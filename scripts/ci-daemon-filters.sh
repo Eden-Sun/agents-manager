@@ -17,8 +17,9 @@ module_has_tests() {
     return 1
 }
 
-LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error "
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs "
 emit_lifecycle_moved() {
+    case "$1" in crates/am-lifecycle/src/judge/*.rs) printf 'lifecycle_tests::judge::%s::\n' "$(basename "${1%.rs}")"; return 0 ;; esac
     local n
     n="$(basename "${1%.rs}")"
     case "$LIFECYCLE_MOVED" in *" $n "*) printf 'lifecycle_tests::%s::\n' "$n"; return 0 ;; esac
@@ -101,8 +102,6 @@ while IFS= read -r f; do
         daemon/src/child_done_tests.rs | daemon/src/runners/child_done.rs)
             printf 'child_done::tests::\n'
             ;;
-        daemon/src/child_alerts_tests.rs) printf 'child_alerts::tests::\n' ;;
-        daemon/src/judge_tests.rs) printf 'judge::tests::\n' ;;
         daemon/src/shell.rs) printf 'api::shell::\n' ;;
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
         daemon/src/shell_identity_delete.rs) printf 'api::shell_identity_delete::\n' ;;

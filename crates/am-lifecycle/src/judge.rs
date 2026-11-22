@@ -616,7 +616,19 @@ fn looks_random(s: &str) -> bool {
     digits >= 4 && letters >= 4 && !s.contains("__") && s.matches('_').count() + s.matches('-').count() < 4
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod test_seams {
+    pub const CLEAR_WINDOW_HOURS: i64 = super::CLEAR_WINDOW_HOURS;
+    pub const REDACTED: &str = super::REDACTED;
+    pub const TAIL_CHARS: usize = super::TAIL_CHARS;
+    pub const WEEKLY_CLEAR_WINDOW_HOURS: i64 = super::WEEKLY_CLEAR_WINDOW_HOURS;
+
+    pub fn request_body(model: &str, kind: &str, matched: &str, screen: &str, composer_idle: bool) -> super::Value {
+        super::request_body(model, kind, matched, screen, composer_idle)
+    }
+}
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod source_mark_tests {
     use super::*;
 
@@ -637,12 +649,9 @@ mod source_mark_tests {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "../../../daemon/src/judge_tests.rs"]
-mod tests;
-
 /// judge 的「一次只放一個影子判斷」保險絲。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait JudgeFuse: Send + Sync {
     fn judge_fuse(&self) -> &tokio::sync::Mutex<()>;
     fn claim_host_fence(&self, bot: &str) -> impl std::future::Future<Output = Option<crate::hosts::HostFence>> + Send;
 }
+

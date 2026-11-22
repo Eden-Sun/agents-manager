@@ -25,13 +25,22 @@ use serde_json::{json, Value};
 
 use crate::release_triage::ledger::{self, IssueRef, Row};
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-struct AskedRaceGate {
-    pair: String,
-    barrier: Arc<tokio::sync::Barrier>,
+#[cfg(any(test, feature = "test-hooks"))]
+macro_rules! race_gate_type {
+    ($vis:vis) => {
+        $vis struct AskedRaceGate {
+            pub pair: String,
+            pub barrier: Arc<tokio::sync::Barrier>,
+        }
+    };
 }
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+race_gate_type!(pub);
+#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(any(test, feature = "test-hooks"))]
+race_gate_type!(pub(self));
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(test, feature = "test-hooks"))]
 static ASKED_RACE_GATE: std::sync::OnceLock<std::sync::Mutex<Option<AskedRaceGate>>> = std::sync::OnceLock::new();
 
 /// #264 量過的門檻。低於的只記帳本。
@@ -65,23 +74,29 @@ struct Card {
     bot_id: Option<String>,
 }
 
-struct Candidate {
-    key: String,
-    project_id: Option<String>,
-    title: String,
-    summary: String,
-    touches: Vec<String>,
-    issue_ref: Option<String>,
-    bot_id: String,
-    agent_kind: String,
-    parent_bot_id: Option<String>,
-    assignment_id: Option<String>,
-    /// 寫提示前、答案回來後都要還在的 bot（沒刪、專案沒移交）。撞題查詢不持 bot 鎖，等 Jev 期間它們可能被刪（#1626）；
-    /// 空＝不檢查（交辦那條照舊）。
-    live_bots: Vec<String>,
-    ownership: String,
-    host_fence: Option<crate::hosts::HostFence>,
+macro_rules! candidate_type {
+    ($vis:vis) => {
+        $vis struct Candidate {
+            pub key: String,
+            pub project_id: Option<String>,
+            pub title: String,
+            pub summary: String,
+            pub touches: Vec<String>,
+            pub issue_ref: Option<String>,
+            pub bot_id: String,
+            pub agent_kind: String,
+            pub parent_bot_id: Option<String>,
+            pub assignment_id: Option<String>,
+            pub live_bots: Vec<String>,
+            pub ownership: String,
+            pub host_fence: Option<crate::hosts::HostFence>,
+        }
+    };
 }
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+candidate_type!(pub);
+#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+candidate_type!(pub(self));
 
 impl Candidate {
     fn as_card(&self) -> Card {
@@ -306,7 +321,7 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 || cand.host_fence.as_ref().is_some_and(|f| !f.is_current_now())) {
                 return Ok(());
             }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(test, feature = "test-hooks"))]
             gate_after_asked_for_test(&pair).await;
             let snapshot = snapshot(&pair, &mine, &other);
             let slot = match super::reserve_same_work_slot(
@@ -467,7 +482,7 @@ async fn asked(app: &impl crate::capabilities::Db, pair: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(test, feature = "test-hooks"))]
 async fn gate_after_asked_for_test(pair: &str) {
     let barrier = ASKED_RACE_GATE
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -833,890 +848,40 @@ fn worktree_dirname(cwd: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod test_seams {
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    pub use super::{AskedRaceGate, Candidate};
+    pub const HINT_NOISE: &str = super::HINT_NOISE;
+    pub const MAX_PAIRS: usize = super::MAX_PAIRS;
+    pub const SAME_WORK_FOCUS: &str = super::SAME_WORK_FOCUS;
+    pub const SAME_WORK_QUESTION: &str = super::SAME_WORK_QUESTION;
+    pub const STARTABLE: [&str; 4] = super::STARTABLE;
+
+    pub fn asked_race_gate() -> &'static std::sync::OnceLock<std::sync::Mutex<Option<super::AskedRaceGate>>> {
+        &super::ASKED_RACE_GATE
+    }
+
+    pub async fn asked(app: &impl crate::capabilities::Db, pair: &str) -> super::Result<bool> {
+        super::asked(app, pair).await
+    }
+
+    pub async fn check_candidate(
+        app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse),
+        cand: &super::Candidate,
+    ) -> super::Result<()> {
+        super::check_candidate(app, cand).await
+    }
+
+    pub fn opened_candidates(before: &[super::IssueRef], after: &super::Row) -> Vec<super::Candidate> {
+        super::opened_candidates(before, after)
+    }
+}
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
-    use crate::state::App;
-    use std::sync::Arc;
-    use crate::db;
-    use crate::release_triage::ledger::{IssueRef, Row, Status};
-    use crate::release_triage::{Bucket, Entry};
-    use crate::testing as tt;
-    use axum::http::StatusCode;
-
-    #[derive(Clone, Copy)]
-    enum Mode {
-        Noul(f64),
-        Hang,
-        Status(u16),
-    }
-
-    async fn fake_jev(mode: Mode) -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Notify>) {
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = seen.clone();
-        let request_received = Arc::new(tokio::sync::Notify::new());
-        let notify = request_received.clone();
-        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
-            let log = log.clone();
-            let notify = notify.clone();
-            let mode = match mode {
-                Mode::Noul(p) => Mode::Noul(p),
-                Mode::Hang => Mode::Hang,
-                Mode::Status(c) => Mode::Status(c),
-            };
-            async move {
-                log.lock().unwrap().push(body);
-                notify.notify_one();
-                match mode {
-                    Mode::Hang => {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        (StatusCode::OK, axum::Json(json!({})))
-                    }
-                    Mode::Status(code) => (StatusCode::from_u16(code).unwrap(), axum::Json(json!({"error": "no"}))),
-                    Mode::Noul(p) => (
-                        StatusCode::OK,
-                        axum::Json(json!({"model": "jev-1.13.0", "answers": {"same_work": {"type": "noul", "noul": p}}, "usage": {"input_tokens": 400}})),
-                    ),
-                }
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
-        (url, seen, request_received)
-    }
-
-    async fn gated_parallel_jev() -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let arrived = Arc::new(tokio::sync::Semaphore::new(0));
-        let release = Arc::new(tokio::sync::Semaphore::new(0));
-        let (log, arrived_in, release_in) = (seen.clone(), arrived.clone(), release.clone());
-        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
-            log.lock().unwrap().push(body);
-            arrived_in.add_permits(1);
-            let release = release_in.clone();
-            async move {
-                release.acquire().await.unwrap().forget();
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({"model": "jev-1.13.0", "answers": {"same_work": {"type": "noul", "noul": 0.8}}, "usage": {"input_tokens": 400}})),
-                )
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
-        (url, seen, arrived, release)
-    }
-
-    struct Rig {
-        env: tt::Env,
-        dir: std::path::PathBuf,
-        seen: Arc<std::sync::Mutex<Vec<Value>>>,
-        request_received: Arc<tokio::sync::Notify>,
-    }
-
-    async fn stand(mode: Mode, enabled: bool, listed: bool) -> Rig {
-        let env = tt::env().await;
-        let (url, seen, request_received) = fake_jev(mode).await;
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-collision-{}", db::ulid())));
-        std::fs::create_dir_all(&dir).unwrap();
-        let key = dir.join("key");
-        std::fs::write(&key, "k-test\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let pid = if listed { env.project_id.clone() } else { "not-this-project".into() };
-        let key_s = key.to_string_lossy().into_owned();
-        env.app
-            .cfg
-            .update(move |c| {
-                c.judge.enabled = enabled;
-                c.judge.projects = vec![pid];
-                c.judge.key_file = key_s;
-                c.judge.endpoint = url;
-                c.judge.timeout_ms = 300;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        Rig { env, dir, seen, request_received }
-    }
-
-    impl Drop for Rig {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.dir).ok();
-        }
-    }
-
-    fn write_branch(dir: &std::path::Path, branch: &str) {
-        let git = dir.join(".git");
-        std::fs::create_dir_all(&git).unwrap();
-        std::fs::write(git.join("HEAD"), format!("ref: refs/heads/{branch}\n")).unwrap();
-    }
-
-    async fn child(app: &Arc<App>, project: &str, parent: &str, name: &str, cwd: &str, title: &str) -> db::Bot {
-        let bot = tt::claude_bot(app, project, name).await;
-        sqlx::query("UPDATE bots SET parent_bot_id=?, cwd=?, managed_by='child' WHERE id=?")
-            .bind(parent)
-            .bind(cwd)
-            .bind(&bot.id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let run = tt::fake_run(app, &bot.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind(title).bind(&run).execute(&app.db).await.unwrap();
-        db::bot(&app.db, &bot.id).await.unwrap().unwrap()
-    }
-
-    async fn shadow_rows(app: &Arc<App>) -> Vec<(Option<f64>, Option<f64>, Option<String>, String, String)> {
-        sqlx::query_as("SELECT jev_is_live_ui, jev_same_work, error, regex_verdict, matched_line FROM judge_shadow WHERE regex_verdict='same_work' ORDER BY at, id")
-            .fetch_all(&app.db)
-            .await
-            .unwrap()
-    }
-
-    struct AskedRaceGateGuard;
-
-    impl AskedRaceGateGuard {
-        fn install(pair: &str, parties: usize) -> Self {
-            *ASKED_RACE_GATE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = Some(super::AskedRaceGate {
-                pair: pair.to_string(),
-                barrier: Arc::new(tokio::sync::Barrier::new(parties)),
-            });
-            Self
-        }
-    }
-
-    impl Drop for AskedRaceGateGuard {
-        fn drop(&mut self) {
-            *ASKED_RACE_GATE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = None;
-        }
-    }
-
-    async fn inbox(app: &Arc<App>) -> Vec<crate::supervisor::store::InboxEvent> {
-        crate::supervisor::store::pending_inbox(&app.db).await.unwrap().into_iter().filter(|e| e.kind == "judge_same_work").collect()
-    }
-
-    async fn status_of(app: &Arc<App>, id: &str) -> String {
-        sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn same_pair_claim_race_asks_once_and_pushes_one_hint() {
-        let rig = stand(Mode::Noul(0.8), true, true).await;
-        let app = rig.env.app.clone();
-        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "other").await;
-        let existing = crate::supervisor::store::insert_assignment(
-            &app.db,
-            None,
-            &other.id,
-            "existing-1499",
-            "修正同一個 Jev 撞題檢查的競態 #1499",
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-        let pair = format!("claim:{}:1499|asg:{}", caller.id, existing.id);
-        let _gate = AskedRaceGateGuard::install(&pair, 2);
-        let ask = || ClaimAsk {
-            project_id: rig.env.project_id.clone(),
-            caller: caller.id.clone(),
-            issue: Some(1499),
-            title: "修正同一個 Jev 撞題檢查的競態 #1499".into(),
-            child: "candidate".into(),
-            child_bot_id: None,
-            claim_id: None,
-            branch: None,
-        };
-
-        let first_ask = ask();
-        let second_ask = ask();
-        let (first, second) = tokio::join!(check_claim(&app, &first_ask), check_claim(&app, &second_ask));
-        first.unwrap();
-        second.unwrap();
-
-        assert_eq!(rig.seen.lock().unwrap().len(), 1, "同一 pair 只送一個 Jev HTTP request");
-        assert_eq!(shadow_rows(&app).await.len(), 1, "同一 pair 只占一列帳本");
-        assert_eq!(inbox(&app).await.len(), 1, "同一 pair 只推一則通知");
-    }
-
-    #[tokio::test]
-    async fn different_pairs_reach_jev_while_the_other_request_is_pending() {
-        let rig = stand(Mode::Noul(0.8), true, true).await;
-        let app = rig.env.app.clone();
-        let (url, seen, arrived, release) = gated_parallel_jev().await;
-        app.cfg.update(move |c| {
-            c.judge.endpoint = url;
-            c.judge.timeout_ms = 10_000;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "other").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "existing-1499", "修正撞題並行認領問題 #1499", &[], None, true).await.unwrap();
-        let ask = |issue| ClaimAsk {
-            project_id: rig.env.project_id.clone(),
-            caller: caller.id.clone(),
-            issue: Some(issue),
-            title: format!("檢查獨立工作 {issue}"),
-            child: "candidate".into(),
-            child_bot_id: None,
-            claim_id: None,
-            branch: None,
-        };
-        let first_app = app.clone();
-        let first_ask = ask(14991);
-        let first = tokio::spawn(async move { check_claim(&first_app, &first_ask).await });
-        let second_app = app.clone();
-        let second_ask = ask(14992);
-        let second = tokio::spawn(async move { check_claim(&second_app, &second_ask).await });
-
-        arrived.acquire_many(2).await.unwrap().forget();
-        assert_eq!(seen.lock().unwrap().len(), 2, "不同 pair 都能在前一個 Jev 回覆前送出 request");
-        release.add_permits(2);
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-        assert_eq!(shadow_rows(&app).await.len(), 2, "不同 pair 各自留一列帳本");
-        assert_eq!(inbox(&app).await.len(), 2, "不同 pair 各自推提示");
-    }
-
-    #[tokio::test]
-    async fn overlap_at_or_above_half_hints_and_records_without_blocking() {
-        let rig = stand(Mode::Noul(0.72), true, true).await;
-        let app = rig.env.app.clone();
-        let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
-        let wt = rig.dir.join("wt");
-        std::fs::create_dir_all(&wt).unwrap();
-        write_branch(&wt, "fix/other-g557");
-        let existing = child(&app, &rig.env.project_id, &parent.id, "sib", wt.to_str().unwrap(), "卡住的畫面判斷").await;
-        crate::supervisor::store::insert_assignment(
-            &app.db,
-            None,
-            &existing.id,
-            "old-557",
-            "實作 #557：派工時比對同專案在跑的工作 daemon/src/judge.rs",
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-        let top = tt::claude_bot(&app, &rig.env.project_id, "top").await;
-        let top_run = tt::fake_run(&app, &top.id).await;
-        sqlx::query("UPDATE runs SET state='stopped', agent_title=? WHERE id=?")
-            .bind("不要比對這個 #999")
-            .bind(&top_run)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let newbie = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
-        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&newbie.id).execute(&app.db).await.unwrap();
-        let own_run = tt::fake_run(&app, &newbie.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("自己上一件 SELF-TITLE").bind(&own_run).execute(&app.db).await.unwrap();
-        crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-old", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(
-            &app.db,
-            None,
-            &newbie.id,
-            "new-557",
-            "開票與派工的撞題提示，跟 #557 是同一件事，改 daemon/src/judge/collision.rs Bearer super-secret-token",
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-
-        check_assignment(&app, &a.id).await.unwrap();
-        assert_eq!(status_of(&app, &a.id).await, "queued", "shadow 不改交辦狀態");
-        assert!(rig.env.herdr.calls_to("pane.send_keys").is_empty(), "不按鍵");
-
-        let sent = rig.seen.lock().unwrap().clone();
-        assert!(!sent.is_empty());
-        let blob = serde_json::to_string(&sent).unwrap();
-        assert!(blob.contains(SAME_WORK_QUESTION));
-        assert!(blob.contains(SAME_WORK_FOCUS));
-        assert!(!blob.contains("\"collision\""), "不問四級 Score");
-        assert!(!blob.contains(&newbie.id) && !blob.contains(&rig.env.project_id), "不送 bot／專案 id");
-        assert!(!blob.contains("super-secret-token"), "交辦正文要遮罩");
-        assert!(blob.contains("daemon/src/judge.rs") || blob.contains("collision.rs"));
-        assert!(!blob.contains("#999") && !blob.contains("不要比對"), "頂層 bot 的標題不在比對裡");
-        assert!(!blob.contains("SELF-TITLE") && !blob.contains("SELF-ASSIGNMENT"), "候選那顆自己的工作不比");
-        let sources: HashSet<String> = shadow_rows(&app)
-            .await
-            .into_iter()
-            .filter_map(|(_, _, _, _, line)| serde_json::from_str::<Value>(&line).ok())
-            .filter_map(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string))
-            .collect();
-        assert!(sources.contains("claimed_issue"), "{sources:?}");
-        assert!(sources.contains("child_title"), "{sources:?}");
-        assert!(sources.contains("worktree_branch"), "{sources:?}");
-
-        let rows = shadow_rows(&app).await;
-        assert!(rows.iter().all(|(live, p, err, verdict, _)| {
-            live.is_none() && *p == Some(0.72) && err.is_none() && verdict == "same_work"
-        }));
-        let cleared: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE regex_verdict='same_work' AND cleared_at IS NOT NULL")
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-        assert_eq!(cleared, 0, "cleared_at 只服務撞限，撞題列維持 NULL 給事後對帳");
-
-        let hints = inbox(&app).await;
-        assert!(!hints.is_empty());
-        assert!(hints.iter().all(|e| e.payload_json.contains(HINT_NOISE) && e.payload_json.contains("不阻擋")));
-        assert!(hints.iter().all(|e| {
-            let p: Value = serde_json::from_str(&e.payload_json).unwrap();
-            let action = p["action"].as_str().unwrap_or_default();
-            p["suggested_by"] == "jev" && p["suggestion_only"] == true && p["probability_pct"] == 72 && action.starts_with("🤖 Jev 建議") && action.contains("72%")
-        }));
-        assert!(hints.iter().any(|e| e.bot_id.as_deref() == Some(parent.id.as_str())), "提示掛在父 bot");
-
-        let n = sent.len();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert_eq!(rig.seen.lock().unwrap().len(), n, "同一對不再問");
-        assert_eq!(inbox(&app).await.len(), hints.len());
-    }
-
-    /// #1467：專案在遠端主機（mac_builder）時，派工與認領兩個入口跟本機專案一樣問、一樣記帳本、一樣推提示——daemon 這一側
-    /// 不看主機。（`agm issue claim` 從遠端 pane 送不進這支路由是另一回事：遠端沒有 `AM_PORT`，見 SPEC §4.3c。）
-    #[tokio::test]
-    async fn a_remote_hosts_project_is_compared_by_assignment_and_by_claim_like_a_local_one() {
-        let rig = stand(Mode::Noul(0.8), true, true).await;
-        let app = rig.env.app.clone();
-        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "ops-web").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "ops-master").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動 #1467", &[], None, true).await.unwrap();
-
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影 #1467", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert_eq!(shadow_rows(&app).await.len(), 1, "派工入口問了");
-        assert_eq!(inbox(&app).await.len(), 1);
-
-        let ask = ClaimAsk {
-            project_id: rig.env.project_id.clone(),
-            caller: bot.id.clone(),
-            issue: Some(1467),
-            title: "修 sidebar 的捲動殘影".into(),
-            child: "ops-web".into(),
-            child_bot_id: None,
-            claim_id: None,
-            branch: None,
-        };
-        check_claim(&app, &ask).await.unwrap();
-        let rows = shadow_rows(&app).await;
-        assert_eq!(rows.len(), 2, "認領入口也問了：{rows:?}");
-        assert!(rows.iter().all(|r| r.1 == Some(0.8) && r.2.is_none()));
-    }
-
-    #[tokio::test]
-    async fn running_top_level_bot_titles_and_branches_are_claim_candidates_only_in_the_same_project() {
-        let rig = stand(Mode::Noul(0.8), true, true).await;
-        let app = rig.env.app.clone();
-        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
-
-        let active = tt::claude_bot(&app, &rig.env.project_id, "active-top-level").await;
-        let wt = rig.dir.join("top-level-wt");
-        std::fs::create_dir_all(&wt).unwrap();
-        write_branch(&wt, "fix/lx1468");
-        sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(wt.to_str().unwrap()).bind(&active.id).execute(&app.db).await.unwrap();
-        let active_run = tt::fake_run(&app, &active.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
-            .bind("Top-level active title #1468")
-            .bind(&active_run)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let idle = tt::claude_bot(&app, &rig.env.project_id, "idle-top-level").await;
-        let idle_run = tt::fake_run(&app, &idle.id).await;
-        sqlx::query("UPDATE runs SET state='stopped', agent_title=? WHERE id=?")
-            .bind("Idle top-level title should stay out")
-            .bind(&idle_run)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let other_project = db::ulid();
-        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES (?,'/tmp/other-project','other-project','local',?)")
-            .bind(&other_project)
-            .bind(db::now())
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let foreign = tt::claude_bot(&app, &other_project, "foreign-top-level").await;
-        let foreign_run = tt::fake_run(&app, &foreign.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
-            .bind("Foreign top-level title should stay out")
-            .bind(&foreign_run)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let ask = ClaimAsk {
-            project_id: rig.env.project_id.clone(),
-            caller: caller.id.clone(),
-            issue: Some(1468),
-            title: "Candidate issue #1468 title".into(),
-            child: caller.name.clone(),
-            child_bot_id: None,
-            claim_id: None,
-            branch: None,
-        };
-        check_claim(&app, &ask).await.unwrap();
-
-        let sent = rig.seen.lock().unwrap().clone();
-        let blob = serde_json::to_string(&sent).unwrap();
-        assert!(blob.contains("Top-level active title #1468"), "在跑的同專案頂層標題要作為候選：{blob}");
-        assert!(blob.contains("fix/lx1468"), "在跑的同專案頂層分支要作為候選：{blob}");
-        assert!(!blob.contains("Idle top-level title should stay out"), "閒置頂層 bot 不納入候選");
-        assert!(!blob.contains("Foreign top-level title should stay out"), "其他專案頂層 bot 不納入候選");
-
-        let sources: HashSet<String> = shadow_rows(&app)
-            .await
-            .into_iter()
-            .filter_map(|(_, _, _, _, line)| serde_json::from_str::<Value>(&line).ok())
-            .filter_map(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string))
-            .collect();
-        assert!(sources.contains("top_level_title"), "{sources:?}");
-        assert!(sources.contains("top_level_branch"), "{sources:?}");
-    }
-
-    #[tokio::test]
-    async fn a_remote_claim_spool_event_reaches_the_collision_check_for_its_project() {
-        let rig = stand(Mode::Noul(0.8), true, true).await;
-        let app = rig.env.app.clone();
-        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
-        let caller = tt::claude_bot(&app, &rig.env.project_id, "remote-claimer").await;
-        let existing = tt::claude_bot(&app, &rig.env.project_id, "remote-top-level").await;
-        let run = tt::fake_run(&app, &existing.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
-            .bind("Remote top-level active #1468")
-            .bind(&run)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let notified = rig.request_received.notified();
-        let body = crate::hookrecv::HookBody {
-            bot_id: caller.id.clone(),
-            provider: "claude".into(),
-            payload: json!({
-                "hook_event_name": "AmClaimCollisionCheck",
-                "issue": 1468,
-                "title": "遠端認領工作 #1468",
-                "child": "remote-claimer",
-                "branch": "fix/lx1468",
-            }),
-            received_at: Some("2026-10-12T00:00:00.000Z".into()),
-            truncated: false,
-            run_id: None,
-        };
-        crate::hookrecv::process(&app, &body).await.unwrap();
-        notified.await;
-
-        let sent = rig.seen.lock().unwrap().clone();
-        let blob = serde_json::to_string(&sent).unwrap();
-        assert!(blob.contains("遠端認領工作 #1468"), "事件的標題送給 Jev：{blob}");
-        assert!(blob.contains("Remote top-level active #1468"), "同專案活躍頂層候選送給 Jev：{blob}");
-        assert!(!blob.contains(&caller.id), "不送 bot id");
-        assert!(!blob.contains(&rig.env.project_id), "不送 project id");
-    }
-
-    #[tokio::test]
-    async fn half_hints_and_just_under_only_records() {
-        let rig = stand(Mode::Noul(0.5), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert_eq!(status_of(&app, &a.id).await, "queued");
-        assert_eq!(shadow_rows(&app).await.len(), 1);
-        assert_eq!(shadow_rows(&app).await[0].1, Some(0.5));
-        assert_eq!(inbox(&app).await.len(), 1, "0.5 要提示");
-
-        let rig = stand(Mode::Noul(0.49), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert_eq!(status_of(&app, &a.id).await, "queued");
-        assert_eq!(shadow_rows(&app).await[0].1, Some(0.49));
-        assert!(inbox(&app).await.is_empty(), "0.49 只記帳");
-    }
-
-    #[tokio::test]
-    async fn timeout_and_http_failure_record_an_error_and_do_not_hint_or_block() {
-        for mode in [Mode::Hang, Mode::Status(500)] {
-            let rig = stand(mode, true, true).await;
-            let app = rig.env.app.clone();
-            let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-            let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-            crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
-            let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 quota 橫幅的誤判", &[], None, true).await.unwrap();
-            check_assignment(&app, &a.id).await.unwrap();
-            assert_eq!(status_of(&app, &a.id).await, "queued");
-            let rows = shadow_rows(&app).await;
-            assert_eq!(rows.len(), 1);
-            assert!(rows[0].0.is_none() && rows[0].1.is_none());
-            let err = rows[0].2.as_deref().unwrap_or("");
-            assert!(err.contains("request failed") || err.contains("http 500"), "{err}");
-            assert!(inbox(&app).await.is_empty(), "失敗不推提示");
-        }
-    }
-
-    #[tokio::test]
-    async fn disabled_unlisted_missing_key_and_notices_skip_quietly() {
-        let rig = stand(Mode::Noul(0.99), false, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty());
-        assert!(shadow_rows(&app).await.is_empty());
-
-        let rig = stand(Mode::Noul(0.99), true, false).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty() && shadow_rows(&app).await.is_empty(), "專案不在名單");
-
-        let rig = stand(Mode::Noul(0.99), true, true).await;
-        let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.judge.key_file = "/tmp/am-judge-no-such-key".into(); Ok(()) }).await.unwrap();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty() && shadow_rows(&app).await.is_empty(), "沒有 key 不寫帳");
-
-        let rig = stand(Mode::Noul(0.99), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
-        let note = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "note", "收到，進 idle", &[], None, false).await.unwrap();
-        check_assignment(&app, &note.id).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "通知不問");
-    }
-
-    #[tokio::test]
-    async fn schedule_returns_while_jev_is_still_hanging_and_the_assignment_stays_queued() {
-        let rig = stand(Mode::Hang, true, true).await;
-        let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.judge.timeout_ms = 60_000; Ok(()) }).await.unwrap();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), schedule_assignment(&app, &a.id)).await.expect("schedule 不能等 Jev 回來");
-        assert_eq!(status_of(&app, &a.id).await, "queued");
-        assert!(shadow_rows(&app).await.is_empty() || shadow_rows(&app).await[0].2.as_deref() == Some("pending") || shadow_rows(&app).await[0].1.is_none());
-    }
-
-    /// 真的走 `supervisor::assign`，Jev 卡住、逾時 60 秒：派工要在 10 秒內回來（不拿牆鐘毫秒數當斷言，issue #948）。
-    #[tokio::test]
-    async fn assign_returns_while_jev_hangs() {
-        let rig = stand(Mode::Hang, true, true).await;
-        let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.judge.timeout_ms = 60_000; Ok(()) }).await.unwrap();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
-        let manager = tt::claude_bot(&app, &rig.env.project_id, "agm").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
-        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
-            .bind(&manager.id)
-            .bind(crate::supervisor::store::SUPERVISOR_ID)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-948", None, &[], None, true, None, None, Default::default()),
-        )
-        .await
-        .expect("派工不能等 Jev")
-        .unwrap();
-        assert!(out["ownership_conflicts"].as_array().is_some_and(|v| v.is_empty()), "撞題不併進 ownership_conflicts");
-    }
-
-    /// 真的走 `supervisor::assign`：派工照常回來、交辦照常建，撞題的問答在背景才落帳。
-    #[tokio::test]
-    async fn assign_returns_before_jev_answers_and_the_pair_lands_in_the_ledger() {
-        let rig = stand(Mode::Hang, true, true).await;
-        let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.judge.timeout_ms = 1500; Ok(()) }).await.unwrap();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
-        let manager = tt::claude_bot(&app, &rig.env.project_id, "agm").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
-        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
-            .bind(&manager.id)
-            .bind(crate::supervisor::store::SUPERVISOR_ID)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let out = crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-557", None, &[], None, true, None, None, Default::default())
-            .await
-            .unwrap();
-        assert!(out["ownership_conflicts"].as_array().is_some_and(|v| v.is_empty()), "撞題不併進 ownership_conflicts");
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        let row = loop {
-            let rows = shadow_rows(&app).await;
-            if rows.first().is_some_and(|r| r.2.as_deref() != Some("pending")) {
-                break rows[0].clone();
-            }
-            assert!(Instant::now() < deadline, "背景 task 沒有落帳：{rows:?}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
-        assert!(row.1.is_none() && row.2.as_deref().unwrap_or("").contains("request failed"), "{row:?}");
-        let id = out["id"].as_str().unwrap();
-        let status = status_of(&app, id).await;
-        assert!(status != "failed" && status != "cancelled", "逾時不影響交辦：{status}");
-        assert!(inbox(&app).await.is_empty());
-    }
-
-    /// #568：真的走 `supervisor::assign`，派送當場就 `dispatch_failed`（整段是終端控制序列，清完什麼都不剩）。
-    /// 那筆已經停在 `awaiting_review`、不會開始了：不能再被當成「有人要開始做的工作」去問 Jev、推提示。
-    #[tokio::test]
-    async fn an_assignment_whose_dispatch_failed_on_the_spot_is_not_asked_or_hinted() {
-        let rig = stand(Mode::Noul(0.99), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
-        let manager = tt::claude_bot(&app, &rig.env.project_id, "agm").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
-        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
-            .bind(&manager.id)
-            .bind(crate::supervisor::store::SUPERVISOR_ID)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let out = crate::supervisor::assign(&app, &bot.id, "\u{1b}[2J\u{1b}[31m", "crid-568", None, &[], None, true, None, None, Default::default())
-            .await
-            .unwrap();
-        let id = out["id"].as_str().unwrap().to_string();
-        let a = crate::supervisor::store::assignment(&app.db, &id).await.unwrap().unwrap();
-        assert_eq!((a.status.as_str(), a.turn_status.as_deref()), ("awaiting_review", Some("dispatch_failed")), "前提：派送當場失敗");
-        check_assignment(&app, &id).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(rig.seen.lock().unwrap().is_empty(), "不會開始的交辦不問 Jev");
-        assert!(shadow_rows(&app).await.is_empty(), "也不占帳本");
-        assert!(inbox(&app).await.is_empty(), "不推撞題提示");
-    }
-
-    /// 假 Jev：收到請求就卡住，直到 `release` 放行才回 `p`。
-    async fn gated_jev(p: f64) -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Semaphore>) {
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let (log, g) = (seen.clone(), gate.clone());
-        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
-            let (log, g) = (log.clone(), g.clone());
-            async move {
-                log.lock().unwrap().push(body);
-                g.acquire().await.unwrap().forget();
-                axum::Json(json!({"model": "jev-1.13.0", "answers": {"same_work": {"type": "noul", "noul": p}}, "usage": {"input_tokens": 400}}))
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
-        (url, seen, gate)
-    }
-
-    /// #568：Jev 還在回的時候交辦被取消／收掉，答案回來就不能再推提示；帳本留下這次觀察，但標成過時。
-    /// 對照組：在途之間的正常推進（送達、等額度）不是過時，照樣提示——只看 `updated_at` 變沒變的話這兩條會被誤殺。
-    #[tokio::test]
-    async fn a_lifecycle_change_while_jev_is_answering_suppresses_the_hint_and_marks_the_row_stale() {
-        use crate::supervisor::assignment_state::AssignmentState as S;
-        for (to, stale) in [
-            (S::Cancelled, true),
-            (S::AwaitingReview, true),
-            (S::Completed, true),
-            (S::Superseded, true),
-            (S::Blocked, true),
-            (S::Delivered, false),
-            (S::QuotaBlocked, false),
-        ] {
-            let rig = stand(Mode::Noul(0.0), true, true).await;
-            let app = rig.env.app.clone();
-            let (url, seen, gate) = gated_jev(0.93).await;
-            app.cfg.update(move |c| { c.judge.endpoint = url; c.judge.timeout_ms = 10_000; Ok(()) }).await.unwrap();
-            let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-            let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-            crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
-            let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
-
-            let task = {
-                let (app, id) = (app.clone(), a.id.clone());
-                tokio::spawn(async move { check_assignment(&app, &id).await })
-            };
-            let deadline = Instant::now() + std::time::Duration::from_secs(5);
-            while seen.lock().unwrap().is_empty() {
-                assert!(Instant::now() < deadline, "Jev 沒被問到");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            let moved = crate::supervisor::assignment_state::set_status(&app.db, &a.id, S::Queued, to, "test").await.unwrap();
-            assert!(matches!(moved, crate::supervisor::assignment_state::Outcome::Applied), "{to:?}");
-            gate.add_permits(16);
-            task.await.unwrap().unwrap();
-
-            let rows: Vec<(Option<f64>, String)> = sqlx::query_as("SELECT jev_same_work, matched_line FROM judge_shadow WHERE regex_verdict='same_work'")
-                .fetch_all(&app.db)
-                .await
-                .unwrap();
-            assert_eq!(rows.len(), 1, "{to:?}");
-            assert_eq!(rows[0].0, Some(0.93), "{to:?}：觀察照記");
-            let line: Value = serde_json::from_str(&rows[0].1).unwrap();
-            if stale {
-                assert!(inbox(&app).await.is_empty(), "{to:?}：已經不會開始的交辦不推提示");
-                assert_eq!(line["stale"].as_str(), Some(to.as_str()), "{to:?}：帳本分得出這筆是過時的觀察");
-            } else {
-                assert_eq!(inbox(&app).await.len(), 1, "{to:?}：在途的正常推進照樣提示");
-                assert!(line.get("stale").is_none(), "{to:?}");
-            }
-        }
-    }
-
-    /// 答案回來之後只重讀狀態、不帶世代戳記，靠的是這個性質：離開可開工的狀態就回不來。
-    /// 狀態機哪天多了一條回頭邊（例如 `blocked → queued`），這裡要先紅，逼人補上真的世代比對。
-    #[test]
-    fn once_out_of_the_startable_states_an_assignment_never_comes_back() {
-        for from in crate::supervisor::assignment_state::ALL {
-            if STARTABLE.contains(&from) {
-                continue;
-            }
-            for to in STARTABLE {
-                assert!(!crate::supervisor::assignment_state::allowed(from, to), "{from} → {to}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn a_burst_asks_at_most_fifteen_and_keeps_the_shared_issue() {
-        let rig = stand(Mode::Noul(0.2), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "cand").await;
-        for i in 0..16 {
-            let other = tt::claude_bot(&app, &rig.env.project_id, &format!("o{i}")).await;
-            crate::supervisor::store::insert_assignment(
-                &app.db,
-                None,
-                &other.id,
-                &format!("old-{i}"),
-                &format!("unrelated padding fix number {i} in web/src/pad{i}.tsx"),
-                &[],
-                None,
-                true,
-            )
-            .await
-            .unwrap();
-        }
-        let shared_bot = tt::claude_bot(&app, &rig.env.project_id, "shared").await;
-        crate::supervisor::store::insert_assignment(
-            &app.db,
-            None,
-            &shared_bot.id,
-            "old-shared",
-            "SHARED-557 跟 #557 是同一張票 daemon/src/judge.rs",
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-        let a = crate::supervisor::store::insert_assignment(
-            &app.db,
-            None,
-            &bot.id,
-            "new",
-            "候選也是 #557，改 daemon/src/judge/collision.rs",
-            &[],
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        let sent = rig.seen.lock().unwrap().clone();
-        assert_eq!(sent.len(), MAX_PAIRS, "一次最多 15 對");
-        let blob = serde_json::to_string(&sent).unwrap();
-        assert!(blob.contains("SHARED-557"), "票號重疊的那張要排進名額");
-        assert_eq!(status_of(&app, &a.id).await, "queued");
-        assert!(inbox(&app).await.is_empty(), "0.2 不提示");
-    }
-
-    #[tokio::test]
-    async fn an_opened_issue_is_compared_the_same_way() {
-        let rig = stand(Mode::Noul(0.81), true, true).await;
-        let app = rig.env.app.clone();
-        let pid = rig.env.project_id.clone();
-        app.cfg.update(move |c| { c.release_triage.repo = Some("owner/proj".into()); c.release_triage.project_ids = vec![pid]; Ok(()) }).await.unwrap();
-        let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
-        let wt = rig.dir.join("wt2");
-        std::fs::create_dir_all(&wt).unwrap();
-        write_branch(&wt, "fix/quota-g404");
-        child(&app, &rig.env.project_id, &parent.id, "sib", wt.to_str().unwrap(), "舊快照蓋掉額度").await;
-        let before = Vec::new();
-        let after = sample_row(404);
-        let cands = opened_candidates(&before, &after);
-        assert_eq!(cands.len(), 1);
-        assert_eq!(cands[0].key, "issue:404");
-        assert!(cands[0].summary.contains("screen.rs") || cands[0].touches.iter().any(|p| p.contains("screen.rs")));
-        check_opened(&app, &before, &after).await.unwrap();
-        let sent = rig.seen.lock().unwrap().clone();
-        assert!(!sent.is_empty());
-        let blob = serde_json::to_string(&sent).unwrap();
-        assert!(blob.contains("quota banner") || blob.contains("claude 2.1.277"));
-        assert!(blob.contains("fix/quota-g404") || blob.contains("issue #404") || blob.contains("#404"));
-        assert!(!inbox(&app).await.is_empty());
-        assert!(shadow_rows(&app).await.iter().any(|r| r.1 == Some(0.81)));
-        let n = sent.len();
-        check_opened(&app, &after.issues, &after).await.unwrap();
-        assert_eq!(rig.seen.lock().unwrap().len(), n);
-    }
-
-    /// 名稱不當參照：專案 label／路徑末段剛好等於 repo 名也不算「同專案」，只有 `project_ids` 明講的才是；
-    /// 沒設就不問。
-    #[tokio::test]
-    async fn an_issue_is_only_compared_with_the_configured_project_ids_not_with_a_same_named_project() {
-        let rig = stand(Mode::Noul(0.81), true, true).await;
-        let app = rig.env.app.clone();
-        let label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?").bind(&rig.env.project_id).fetch_one(&app.db).await.unwrap();
-        let repo = format!("owner/{label}");
-        app.cfg.update(move |c| { c.release_triage.repo = Some(repo); Ok(()) }).await.unwrap();
-        let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
-        child(&app, &rig.env.project_id, &parent.id, "sib", rig.dir.to_str().unwrap(), "舊快照蓋掉額度").await;
-        check_opened(&app, &[], &sample_row(404)).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "label 對得上 repo 名、但沒設 project_ids：不問");
-        assert!(shadow_rows(&app).await.is_empty() && inbox(&app).await.is_empty());
-
-        app.cfg.update(|c| { c.release_triage.project_ids = vec!["no-such-project".into()]; Ok(()) }).await.unwrap();
-        check_opened(&app, &[], &sample_row(404)).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "設的專案 ID 不存在：不問，也不退回用名字猜");
-    }
+    use crate::release_triage::{ledger::Status, Bucket, Entry};
 
     fn sample_row(number: i64) -> Row {
         let entry = Entry {
@@ -1758,13 +923,14 @@ mod tests {
         }
     }
 
+
     #[test]
     fn issue_numbers_and_branches_follow_the_three_sources() {
         assert_eq!(issue_numbers("實作 #557 與 issue-12"), vec!["557".to_string(), "12".to_string()]);
         assert_eq!(issue_numbers("fix/kd61te-g558"), vec!["558".to_string()]);
         assert!(issue_numbers("#557abc").is_empty(), "號碼後面緊接字母不是票號");
         assert!(issue_numbers("#0123").is_empty(), "前導零不是票號");
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-branch-{}", db::ulid())));
+        let dir = crate::test_dirs::scratch_dir("am-branch");
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/fix/demo-g7\n").unwrap();
         assert_eq!(branch_of(dir.to_str().unwrap()).as_deref(), Some("fix/demo-g7"));
@@ -1812,151 +978,4 @@ mod tests {
         assert!(!has_new_issue(&[], &only_comment), "只留言不算開票");
     }
 
-    /// #1330：認領時的撞題。候選＝呼叫端專案裡、`child` 以外的在跑工作。
-    /// sibling 的工作目錄放在呼叫端的 `dir`（`Rig` 的暫存目錄，`Rig::drop` 會刪），不碰系統暫存目錄（#1387）。
-    async fn claim_setup(app: &Arc<App>, project: &str, dir: &std::path::Path, sibling_title: &str) -> (db::Bot, db::Bot) {
-        let parent = tt::claude_bot(app, project, "parent").await;
-        let wt = dir.join("claim-sib");
-        std::fs::create_dir_all(&wt).unwrap();
-        child(app, project, &parent.id, "sib", wt.to_str().unwrap(), sibling_title).await;
-        let newbie = tt::claude_bot(app, project, "newbie").await;
-        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&newbie.id).execute(&app.db).await.unwrap();
-        (parent, newbie)
-    }
-
-    fn claim_ask(project: &str, caller: &str, child_bot_id: Option<&str>) -> ClaimAsk {
-        ClaimAsk {
-            project_id: project.into(),
-            caller: caller.into(),
-            issue: Some(1330),
-            title: "修卡住的畫面判斷".into(),
-            child: "newbie".into(),
-            child_bot_id: child_bot_id.map(String::from),
-            claim_id: Some("claim-1330".into()),
-            branch: Some("fix/newbie-g1330".into()),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_claim_at_or_above_half_hints_once_per_pair_and_never_blocks() {
-        let rig = stand(Mode::Noul(0.72), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        let ask = || claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id));
-        check_claim(&app, &ask()).await.unwrap();
-        let rows = shadow_rows(&app).await;
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].1, Some(0.72));
-        assert_eq!(inbox(&app).await.len(), 1, "≥0.5 推一則提示");
-        check_claim(&app, &ask()).await.unwrap();
-        assert_eq!(rig.seen.lock().unwrap().len(), 1, "同一對只問一次");
-        assert_eq!(shadow_rows(&app).await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_claim_below_half_only_lands_in_the_ledger() {
-        let rig = stand(Mode::Noul(0.3), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
-        assert_eq!(shadow_rows(&app).await.len(), 1, "帳本照寫");
-        assert!(inbox(&app).await.is_empty(), "<0.5 不推提示");
-    }
-
-    #[tokio::test]
-    async fn a_claim_asks_nothing_when_jev_is_off_or_the_project_is_not_listed() {
-        for (enabled, listed) in [(false, true), (true, false)] {
-            let rig = stand(Mode::Noul(0.9), enabled, listed).await;
-            let app = rig.env.app.clone();
-            let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-            check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
-            assert!(rig.seen.lock().unwrap().is_empty(), "enabled={enabled} listed={listed}：不問");
-            assert!(shadow_rows(&app).await.is_empty(), "enabled={enabled} listed={listed}：不寫帳本");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_claim_never_compares_the_child_with_its_own_running_work() {
-        let rig = stand(Mode::Noul(0.9), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "別的工作 #77").await;
-        let own_run = tt::fake_run(&app, &newbie.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
-        crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-1330", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
-        let asked = rig.seen.lock().unwrap().clone();
-        assert_eq!(asked.len(), 1, "只問 sib，不問 child 自己的卡：{asked:?}");
-        let text = asked[0].to_string();
-        assert!(!text.contains("SELF-1330") && !text.contains("SELF-ASSIGNMENT"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn a_claim_whose_child_is_not_a_bot_here_is_recorded_under_the_caller() {
-        let rig = stand(Mode::Noul(0.9), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some("ghost-child-id"))).await.unwrap();
-        let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
-        assert_eq!(bot, parent.id, "對不上 bot 時記在呼叫端名下");
-        assert_eq!(rig.seen.lock().unwrap().len(), 1);
-    }
-
-    /// 名稱不當參照：child 只認 bot ID。bot 改名後，帶 ID 的認領照樣把它自己的卡排除；
-    /// 只有名字（沒帶 ID）時，即使專案裡剛好有同名的 bot 也不當成 child——記在呼叫端名下，那顆同名 bot 的卡照常拿來比。
-    #[tokio::test]
-    async fn a_claim_finds_its_child_by_bot_id_never_by_name() {
-        let rig = stand(Mode::Noul(0.9), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "別的工作 #77").await;
-        let own_run = tt::fake_run(&app, &newbie.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE bots SET name='renamed-newbie' WHERE id=?").bind(&newbie.id).execute(&app.db).await.unwrap();
-
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
-        let text = rig.seen.lock().unwrap().iter().map(|v| v.to_string()).collect::<String>();
-        assert!(!text.contains("SELF-1330"), "改名後仍靠 ID 認得 child，自己的卡不比：{text}");
-        let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
-        assert_eq!(bot, newbie.id);
-
-        let impostor = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
-        let impostor_run = tt::fake_run(&app, &impostor.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 同名者 NAMESAKE-1330").bind(&impostor_run).execute(&app.db).await.unwrap();
-        let mut ask = claim_ask(&rig.env.project_id, &parent.id, None);
-        ask.claim_id = Some("claim-by-name-only".into());
-        check_claim(&app, &ask).await.unwrap();
-        let text = rig.seen.lock().unwrap().iter().map(|v| v.to_string()).collect::<String>();
-        assert!(text.contains("NAMESAKE-1330"), "沒帶 ID 不用名字認 child，同名那顆的卡照常比：{text}");
-        let bots: Vec<String> = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' AND run_id LIKE 'claim:claim-by-name-only%'").fetch_all(&app.db).await.unwrap();
-        assert!(!bots.is_empty() && bots.iter().all(|b| *b == parent.id), "記在呼叫端名下：{bots:?}");
-    }
-
-    /// #1421：移交出去的專案（`projects.handed_off_to`）不問撞題：不呼叫 Jev、不寫帳本、不推提示。
-    /// 認領路徑與派工路徑共用 `check_candidate`，兩邊都要擋。
-    #[tokio::test]
-    async fn a_handed_off_project_is_not_asked_about_a_claim() {
-        let rig = stand(Mode::Noul(0.9), true, true).await;
-        let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "移交中的專案不問 Jev");
-        assert!(shadow_rows(&app).await.is_empty(), "不寫帳本");
-        assert!(inbox(&app).await.is_empty(), "不推提示");
-    }
-
-    #[tokio::test]
-    async fn a_handed_off_project_is_not_asked_about_an_assignment() {
-        let rig = stand(Mode::Noul(0.9), true, true).await;
-        let app = rig.env.app.clone();
-        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
-        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
-        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
-        sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
-        check_assignment(&app, &a.id).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "移交中的專案不問 Jev");
-        assert!(shadow_rows(&app).await.is_empty(), "不寫帳本");
-        assert!(inbox(&app).await.is_empty(), "不推提示");
-        assert_eq!(status_of(&app, &a.id).await, "queued", "交辦狀態不動");
-    }
 }

@@ -16,8 +16,11 @@ check() {
 check "lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle/queue.rs"
 check "api:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api.rs"
 check "host_baseline::tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/host_baseline/tests.rs"
-check "child_alerts::tests:: testing::scratch_leak_guard::" "daemon/src/child_alerts_tests.rs"
-check "judge::tests:: testing::scratch_leak_guard::" "daemon/src/judge_tests.rs"
+check "lifecycle_tests::child_alerts:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/child_alerts.rs"
+check "lifecycle_tests::judge:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/judge.rs"
+check "judge::collision:: lifecycle_tests::judge::collision::" "crates/am-lifecycle/src/judge/collision.rs"
+check "lifecycle_tests::handoff::" "crates/am-lifecycle/src/handoff.rs"
+check "background_jobs:: lifecycle_tests::background_jobs::" "crates/am-lifecycle/src/background_jobs.rs"
 check "lifecycle::grok_transcript::tests::" "crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs"
 check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs"
 check "lifecycle::suggestion::tests:: lifecycle_tests::suggestion::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
@@ -29,8 +32,8 @@ check "lifecycle::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
 check "lifecycle::claude_resume_menu::tests:: lifecycle_tests::claude_resume_menu::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests:: lifecycle_tests::unsent_draft::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
-check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: lifecycle_tests::unsent_draft:: testing::scratch_leak_guard::" \
-    "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
+check "lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: lifecycle_tests::judge:: lifecycle_tests::unsent_draft:: testing::scratch_leak_guard:: timestamp_compat_tests::" \
+    "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/lifecycle_tests/judge.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "share_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/mod.rs"
 check "share_tests::trusted:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/trusted.rs"

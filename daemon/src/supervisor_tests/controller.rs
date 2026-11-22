@@ -2393,7 +2393,7 @@ mod turn_done_quota_tests {
 /// 交辦所屬的任務關了或被使用者暫停時，派送（含背景的重試與等額度重送）不能再把它送進 bot。
 mod report_evidence_tests {
     use super::*;
-    use crate::judge::report::tests::{enable, fake_jev};
+    use crate::lifecycle_tests::judge::report::tests::{enable, fake_jev};
     use crate::testing as tt;
 
     #[tokio::test]

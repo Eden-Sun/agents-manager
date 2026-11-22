@@ -1,5 +1,38 @@
+#![allow(unused_imports)]
 
-    use super::*;
+mod retain_tests {
+    use crate::lifecycle_tests::prelude::*;
+    use crate::child_alerts::*;
+    use crate::child_alerts::test_seams::*;
+
+    /// herdr 重啟後 reconcile 把 child 退役（`deleted_at`），父 bot 隨後用 herdr 重開、復原：這段時間 sweep 不能把它的通知指紋清掉，
+    /// 不然復原後還停在同一個 blocked 問題，父 bot 會被同一件事再叫一次。退役太久（沒人會回來了）才清。
+    #[tokio::test]
+    async fn a_child_retired_and_restored_soon_after_is_not_told_to_its_parent_twice() {
+        let env = crate::testing::env().await;
+        let recent = crate::testing::claude_bot(&env.app, &env.project_id, "kid-recent").await;
+        let stale = crate::testing::claude_bot(&env.app, &env.project_id, "kid-stale").await;
+        for (bot, ago) in [(&recent, 120), (&stale, 3 * 3600)] {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::iso_in(-ago)).bind(&bot.id).execute(&env.app.db).await.unwrap();
+            spoken().lock().unwrap().insert(bot.id.clone(), (7, std::time::Instant::now()));
+        }
+        let mut live = crate::update_watch::live_bot_ids(&env.app).await.unwrap();
+        live.extend(spoken().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
+        live.extend(episodes().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
+        retain_bots(&live);
+        assert!(spoken().lock().unwrap().contains_key(&recent.id), "剛退役：指紋留著，復原後同一個問題不再講第二次");
+        assert!(!spoken().lock().unwrap().contains_key(&stale.id), "退役很久了：清掉");
+        spoken().lock().unwrap().remove(&recent.id);
+        episodes().lock().unwrap().remove(&recent.id);
+    }
+
+}
+
+mod tests {
+
+    use crate::lifecycle_tests::prelude::*;
+    use crate::child_alerts::*;
+    use crate::child_alerts::test_seams::*;
     use crate::runners::child_alerts::sweep;
     use crate::state::App;
     use std::sync::Arc;
@@ -117,7 +150,7 @@
     /// 它跟 `⏵⏵` 那種一樣是固定行：不能帶給 parent，尾巴換了（`? for shortcuts`、多了背景 shell）也不能算成新問題。
     #[test]
     fn the_default_mode_row_stays_out_of_the_question() {
-        const MANUAL: &str = include_str!("../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        const MANUAL: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
         let q = question_from_screen(MANUAL).expect("畫面上有字");
         assert!(q.contains("DONE") && !q.contains("manual mode"), "{q}");
         let shortcuts = MANUAL.replace("· ← for agents", "· ? for shortcuts");
@@ -695,3 +728,5 @@
         assert!(q.chars().count() <= MAX_QUESTION_CHARS + 1, "{}", q.chars().count());
         assert!(q.ends_with('…'));
     }
+
+}
