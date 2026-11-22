@@ -1,6 +1,8 @@
+#![allow(unused_imports)]
 
     use crate::runners::child_done::notify_turn;
-    use super::*;
+    use crate::child_done::*;
+    use crate::child_done::test_seams::*;
     use crate::runners::child_done::sweep;
     use crate::db;
     use crate::state::App;

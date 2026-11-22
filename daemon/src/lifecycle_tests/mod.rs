@@ -5,6 +5,8 @@ mod agy_tests;
 mod background_jobs;
 mod blocked_reason;
 mod busy_send;
+mod child_done;
+mod codex_rollout_turn;
 mod claude_child_log;
 mod child_alerts;
 mod claude_resume_menu;

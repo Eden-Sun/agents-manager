@@ -35,7 +35,9 @@ check "lifecycle_tests::poller::folded_paste_tests::" "crates/am-lifecycle/src/l
 check "lifecycle::poller:: lifecycle_tests::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
 check "lifecycle::claude_resume_menu::tests:: lifecycle_tests::claude_resume_menu::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests:: lifecycle_tests::unsent_draft::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
-check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
+check "lifecycle::codex_rollout::turn_boundary:: lifecycle_tests::codex_rollout_turn::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
+check "lifecycle_tests::child_done:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/child_done.rs"
+check "lifecycle_tests::child_done:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/child_done.rs"
 check "lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: lifecycle_tests::judge:: lifecycle_tests::unsent_draft:: testing::scratch_leak_guard:: timestamp_compat_tests::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/lifecycle_tests/judge.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"

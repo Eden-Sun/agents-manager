@@ -17,7 +17,7 @@ module_has_tests() {
     return 1
 }
 
-LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook poller observed_status codex_session_refresh interrupt_grace interruption "
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook poller observed_status codex_session_refresh interrupt_grace interruption child_done codex_rollout_turn "
 emit_lifecycle_moved() {
     case "$1" in
         crates/am-lifecycle/src/judge/*.rs) printf 'lifecycle_tests::judge::%s::\n' "$(basename "${1%.rs}")"; return 0 ;;
@@ -103,8 +103,8 @@ while IFS= read -r f; do
             | crates/am-lifecycle/src/lib.rs)
             printf '__all__\n'
             ;;
-        daemon/src/child_done_tests.rs | daemon/src/runners/child_done.rs)
-            printf 'child_done::tests::\n'
+        daemon/src/runners/child_done.rs)
+            printf 'lifecycle_tests::child_done::\n'
             ;;
         daemon/src/shell.rs) printf 'api::shell::\n' ;;
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
@@ -138,7 +138,7 @@ while IFS= read -r f; do
             dir="${dir##*/}"
             printf 'lifecycle::%s::%s::\n' "${dir%_tests}" "${mod%.rs}"
             ;;
-        crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs) printf 'lifecycle::codex_rollout::turn_boundary::\n' ;;
+        crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs) printf 'lifecycle::codex_rollout::turn_boundary::\n'; printf 'lifecycle_tests::codex_rollout_turn::\n' ;;
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;

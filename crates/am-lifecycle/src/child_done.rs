@@ -193,5 +193,10 @@ pub fn truncate(s: &str, limit: usize) -> String {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "../../../daemon/src/child_done_tests.rs"]
-mod tests;
+#[doc(hidden)]
+pub mod test_seams {
+    pub(crate) const LEGACY_INTRO: &str = super::LEGACY_INTRO;
+    pub(crate) const NEAR_DUPLICATE_MAX_DISTANCE_PERCENT: usize = super::NEAR_DUPLICATE_MAX_DISTANCE_PERCENT;
+    pub(crate) fn quoted_reply(notice: &str) -> Option<&str> { super::quoted_reply(notice) }
+    pub(crate) fn normalized_reply(reply: &str) -> Vec<char> { super::normalized_reply(reply) }
+}

@@ -4,7 +4,7 @@
 //! 終端備援與 hookless 捕獲可優先自 rollout 提取結構化回覆，避免存成終端整面快照。
 
 #[path = "codex_rollout_turn.rs"]
-mod turn_boundary;
+pub(crate) mod turn_boundary;
 
 use serde_json::Value;
 pub(super) use turn_boundary::NativeOutcome;
@@ -214,7 +214,7 @@ pub async fn codex_rollout_reply_for_hookless(
     .ok()?
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     #[test]
     fn native_task_complete_error_requires_matching_native_boundaries() {
