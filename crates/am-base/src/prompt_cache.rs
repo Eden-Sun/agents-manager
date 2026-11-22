@@ -173,6 +173,27 @@ pub fn last_token_count_before(path: &Path, end: u64) -> Option<CodexUsage> {
     last_token_count_with_total_before(path, end).map(|(u, _)| u)
 }
 
+/// 讀取 rollout 檔尾最後一筆 `total_token_usage` 與 context tokens（`CodexUsage.input`）。
+pub fn read_rollout_tokens(path: &Path) -> Option<(CodexTotalUsage, Option<i64>)> {
+    let (text, new_offset) = read_new(path, 0).ok()?;
+    let mut latest = last_token_count_with_total(&text);
+    if latest.is_none() {
+        latest = last_token_count_with_total_before(path, new_offset);
+    }
+    let (usage, total) = latest?;
+    total.map(|t| (t, Some(usage.input)))
+}
+
+/// 更新記憶體中指定 session 的 total 讀數。
+pub fn record_session_total(session_id: &str, total: CodexTotalUsage) {
+    let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
+    for e in s.values_mut() {
+        if e.session_id == session_id {
+            e.total = Some(total);
+        }
+    }
+}
+
 async fn sync_lineage_tokens(
     pool: &SqlitePool,
     run: &db::Run,
@@ -579,5 +600,23 @@ mod lineage_sync_tests {
         refresh_codex_with_ports(&db_ctx, &FakeRollout { path: None }, &NullEvents, &run).await;
         let again = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
         assert_eq!((again[0].input_tokens, again[0].cached_input_tokens, again[0].output_tokens), (30_000, 25_000, 400));
+    }
+
+    #[test]
+    fn read_rollout_tokens_reads_latest_total_and_context_tokens() {
+        let rollout_path = std::env::temp_dir().join(format!("am-rollout-read-{}.jsonl", db::ulid())); // scratch-guard: allow TempFile Drop removes the temp rollout file
+        let _guard = TempFile(rollout_path.clone());
+        std::fs::write(
+            &rollout_path,
+            concat!(
+                r#"{"timestamp":"2026-11-21T10:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50000,"cached_input_tokens":40000,"output_tokens":1500},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":10000,"output_tokens":300},"model_context_window":258400}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (total, ctx) = read_rollout_tokens(&rollout_path).unwrap();
+        assert_eq!(total, CodexTotalUsage { input: 50_000, cached: 40_000, output: 1_500 });
+        assert_eq!(ctx, Some(12_000));
     }
 }

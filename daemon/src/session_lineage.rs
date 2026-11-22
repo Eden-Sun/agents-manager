@@ -274,6 +274,71 @@ pub(crate) async fn stats(
     Ok(Json(json!({"project_id": project_id, "lines": lines})))
 }
 
+async fn sync_session_rollout_tokens(
+    app: &Arc<App>,
+    project_id: &str,
+    session_id: &str,
+) {
+    let bot_id: Option<String> = sqlx::query_scalar(
+        "SELECT b.id FROM runs r \
+         JOIN bots b ON b.id = r.bot_id \
+         WHERE r.native_session_id = ? AND b.project_id = ? \
+         ORDER BY r.started_at DESC, r.rowid DESC \
+         LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(project_id)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten();
+
+    let candidate_homes: Vec<std::path::PathBuf> = if let Some(bot_id) = bot_id {
+        if matches!(db::bot_host(&app.db, &bot_id).await.as_deref(), Ok(h) if h != crate::config::LOCAL_HOST) {
+            return;
+        }
+        let Some(bot) = db::bot(&app.db, &bot_id).await.ok().flatten() else { return };
+        crate::lifecycle::codex_home(app, &bot).await.into_iter().collect()
+    } else {
+        let mut homes = Vec::new();
+        if let Some(env_ch) = std::env::var_os("CODEX_HOME").filter(|s| !s.is_empty()) {
+            homes.push(std::path::PathBuf::from(env_ch));
+        }
+        if let Some(h) = dirs::home_dir().map(|h| h.join(".codex")) {
+            if !homes.contains(&h) {
+                homes.push(h);
+            }
+        }
+        homes
+    };
+
+    let mut rollout_path = None;
+    for home in candidate_homes {
+        if let Some(p) = crate::lifecycle::codex_session_log_async(home, session_id.to_string()).await {
+            rollout_path = Some(p);
+            break;
+        }
+    }
+    let Some(path) = rollout_path else { return };
+    let parsed = tokio::task::spawn_blocking(move || crate::prompt_cache::read_rollout_tokens(&path))
+        .await
+        .ok()
+        .flatten();
+    if let Some((total, ctx)) = parsed {
+        crate::prompt_cache::record_session_total(session_id, total);
+        let _ = db::lineage::record_rollout_tokens(
+            &app.db,
+            project_id,
+            session_id,
+            total.input,
+            total.cached,
+            total.output,
+            ctx,
+        )
+        .await;
+    }
+}
+
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     Path(project_id): Path<String>,
@@ -287,7 +352,11 @@ pub(crate) async fn create(
         return Err(bad("claim_id", "only supported on advance"));
     }
     let session_id = session_id.ok_or_else(|| bad("session_id", "1–200 printable ASCII chars without spaces"))?;
-    let session = lineage::create(&app.db, &project_id, &line, &session_id, f).await.map_err(lineage_err)?;
+    let mut session = lineage::create(&app.db, &project_id, &line, &session_id, f).await.map_err(lineage_err)?;
+    sync_session_rollout_tokens(&app, &project_id, &session_id).await;
+    if let Ok(Some(refreshed)) = lineage::session(&app.db, &project_id, &session_id).await {
+        session = refreshed;
+    }
     Ok(Json(json!({"session": session})))
 }
 
@@ -301,13 +370,17 @@ pub(crate) async fn advance(
     live_project(&app, &project_id).await?;
     let has_claim = body.claim_id.as_deref().is_some_and(|c| !c.trim().is_empty());
     let (line, session_id, claim_id, f) = fields(body, has_claim)?;
-    let done = match claim_id {
+    let mut done = match claim_id {
         Some(cid) => lineage::advance_with_claim(&app.db, &project_id, &line, &cid, session_id.as_deref(), f).await.map_err(lineage_err)?,
         None => {
             let sid = session_id.ok_or_else(|| bad("session_id", "1–200 printable ASCII chars without spaces"))?;
             lineage::advance(&app.db, &project_id, &line, &sid, f).await.map_err(lineage_err)?
         }
     };
+    sync_session_rollout_tokens(&app, &project_id, &done.session.session_id).await;
+    if let Ok(Some(refreshed)) = lineage::session(&app.db, &project_id, &done.session.session_id).await {
+        done.session = refreshed;
+    }
     Ok(Json(serde_json::to_value(done).map_err(up)?))
 }
 

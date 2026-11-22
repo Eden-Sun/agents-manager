@@ -441,3 +441,153 @@ async fn lineage_stats_aggregates_checkpoints_open_claims_and_tokens() {
     let err = stats(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager)).await.unwrap_err();
     assert_eq!(reason(&err), "cross_project");
 }
+
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+impl EnvGuard {
+    fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, val);
+        Self { key, prev }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(ref p) = self.prev {
+            std::env::set_var(self.key, p);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+#[tokio::test]
+async fn create_and_advance_with_existing_rollout_backfills_token_counts() {
+    let _lock = ENV_LOCK.lock().await;
+    let c = cast().await;
+    let (app, pid) = (c.env.app.clone(), c.env.project_id.clone());
+
+    let fake_home = crate::testing::scratch_dir("am-codex-lineage-d3");
+    let day = fake_home.join("sessions/2026/11/22");
+    std::fs::create_dir_all(&day).unwrap();
+
+    let r1 = day.join("rollout-2026-11-22T00-00-00-sess-backfill-1.jsonl");
+    std::fs::write(
+        &r1,
+        concat!(
+            r#"{"timestamp":"2026-11-22T00:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50000,"cached_input_tokens":40000,"output_tokens":1500},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":10000,"output_tokens":300},"model_context_window":258400}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let r2 = day.join("rollout-2026-11-22T01-00-00-sess-backfill-2.jsonl");
+    std::fs::write(
+        &r2,
+        concat!(
+            r#"{"timestamp":"2026-11-22T01:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":75000,"cached_input_tokens":60000,"output_tokens":2200},"last_token_usage":{"input_tokens":25000,"cached_input_tokens":20000,"output_tokens":700},"model_context_window":258400}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let _guard = EnvGuard::set("CODEX_HOME", &fake_home);
+
+    let Json(created) = create(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "web",
+            "session_id": "sess-backfill-1",
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(created["session"]["input_tokens"].as_i64(), Some(50_000));
+    assert_eq!(created["session"]["cached_input_tokens"].as_i64(), Some(40_000));
+    assert_eq!(created["session"]["output_tokens"].as_i64(), Some(1_500));
+    assert_eq!(created["session"]["context_tokens"].as_i64(), Some(12_000));
+
+    let Json(adv) = advance(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "web",
+            "session_id": "sess-backfill-2",
+            "parent_session_id": "sess-backfill-1",
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adv["session"]["input_tokens"].as_i64(), Some(25_000));
+    assert_eq!(adv["session"]["cached_input_tokens"].as_i64(), Some(20_000));
+    assert_eq!(adv["session"]["output_tokens"].as_i64(), Some(700));
+    assert_eq!(adv["session"]["context_tokens"].as_i64(), Some(25_000));
+}
+
+#[tokio::test]
+async fn advance_uses_executors_custom_codex_home_from_run() {
+    let _lock = ENV_LOCK.lock().await;
+    let c = cast().await;
+    let (app, pid) = (c.env.app.clone(), c.env.project_id.clone());
+
+    let executor_home = crate::testing::scratch_dir("am-codex-executor-home");
+    let day = executor_home.join("sessions/2026/11/22");
+    std::fs::create_dir_all(&day).unwrap();
+
+    let rollout = day.join("rollout-2026-11-22T02-00-00-sess-exec-custom.jsonl");
+    std::fs::write(
+        &rollout,
+        concat!(
+            r#"{"timestamp":"2026-11-22T02:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":64000,"cached_input_tokens":50000,"output_tokens":1800},"last_token_usage":{"input_tokens":15000,"cached_input_tokens":10000,"output_tokens":400},"model_context_window":258400}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let env_json = json!({"CODEX_HOME": executor_home.to_string_lossy()}).to_string();
+    sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+        .bind(env_json)
+        .bind(&c.executor.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at) \
+         VALUES ('run-exec-custom', ?, 'stopped', 'idle', 'sess-exec-custom', ?)",
+    )
+    .bind(&c.executor.id)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let empty_global = crate::testing::scratch_dir("am-codex-empty-global");
+    let _guard = EnvGuard::set("CODEX_HOME", &empty_global);
+
+    let Json(adv) = advance(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "web",
+            "session_id": "sess-exec-custom",
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adv["session"]["input_tokens"].as_i64(), Some(64_000));
+    assert_eq!(adv["session"]["cached_input_tokens"].as_i64(), Some(50_000));
+    assert_eq!(adv["session"]["output_tokens"].as_i64(), Some(1_800));
+    assert_eq!(adv["session"]["context_tokens"].as_i64(), Some(15_000));
+}

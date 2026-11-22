@@ -162,6 +162,11 @@ async fn by_session(conn: &mut sqlx::SqliteConnection, project_id: &str, session
     sqlx::query_as("SELECT * FROM lineage_sessions WHERE project_id = ? AND session_id = ?").bind(project_id).bind(session_id).fetch_optional(conn).await
 }
 
+/// 依 `(project_id, session_id)` 查單一 session。
+pub async fn session(pool: &SqlitePool, project_id: &str, session_id: &str) -> Result<Option<LineageSession>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM lineage_sessions WHERE project_id = ? AND session_id = ?").bind(project_id).bind(session_id).fetch_optional(pool).await
+}
+
 /// 專案的血統列；`line`／`state` 給了就篩。同一條線內檢查點排最前，其餘新的在前。
 pub async fn list(pool: &SqlitePool, project_id: &str, line: Option<&str>, state: Option<&str>) -> Result<Vec<LineageSession>, sqlx::Error> {
     sqlx::query_as(
