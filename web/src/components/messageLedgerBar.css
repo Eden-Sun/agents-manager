@@ -218,8 +218,10 @@
   position: absolute;
   top: 100%;
   right: 0;
-  z-index: 20;
+  z-index: 30;
   min-width: 150px;
+  background: var(--bg-panel, #ffffff);
+  box-shadow: var(--shadow, 0 4px 14px rgb(0 0 0 / 15%));
 }
 
 .ledger-awaiting {
