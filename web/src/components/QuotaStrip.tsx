@@ -1,5 +1,5 @@
 import { useDismiss } from '../lib/useDismiss'
-import { AGY_DEFAULT_IDENTITY } from '../lib/defaultIdentity'
+import { AGY_DEFAULT_IDENTITY, quotaIdentityLabel } from '../lib/defaultIdentity'
 import { fmtDateTime } from '../lib/userTime'
 import { CodexResetHint } from './CodexResetHint'
 import { leftPct } from '../lib/quotaLeft'
@@ -559,7 +559,7 @@ function Gauge({
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {entry.identity ?? (entry.kind === 'agy' ? AGY_DEFAULT_IDENTITY : entry.kind)}
+            {quotaIdentityLabel(entry.kind, entry.identity)}
           </span>
         )}
         {headPct ? (

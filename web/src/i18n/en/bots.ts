@@ -235,7 +235,7 @@ export default {
   '在這裡開 shell': 'Open shell here',
   '刪除專案…': 'Delete Project…',
   '{n} 個 Bot·點一下展開': { one: '{n} Bot · click to expand', other: '{n} Bots · click to expand' },
-  '{n} 個 Bot 已隱藏（額度不足）': { one: '{n} Bot hidden (quota limit)', other: '{n} Bots hidden (quota limit)' },
+  '{n} 個 Bot 已隱藏（{identities} 已停用）': { one: '{n} Bot hidden ({identities} disabled)', other: '{n} Bots hidden ({identities} disabled)' },
   '此專案尚無 Bot': 'This Project has no Bots yet',
   '{name} 的 Bot': 'Bots in {name}',
   '{name} 的 {n} 個子 agent': { one: '{n} sub-agent of {name}', other: '{n} sub-agents of {name}' },

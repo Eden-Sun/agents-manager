@@ -3,6 +3,7 @@ import { persistSetDiff } from '../store/sharedSet'
 import { renderProbe } from '../lib/renderProbe'
 import { useStableCallback } from '../hooks/useStableCallback'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
+import { quotaIdentityLabel } from '../lib/defaultIdentity'
 import { t, useT } from '../lib/i18n'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
@@ -1416,8 +1417,14 @@ export function Sidebar() {
               hit.has(b.id) ||
               (b.parent_bot_id ? hit.has(b.parent_bot_id) : every.some((c) => c.parent_bot_id === b.id && hit.has(c.id))),
           )
+          const hiddenBots = query ? [] : all.filter((b) => hiddenQuota.has(b.id))
+          const hiddenCount = hiddenBots.length
+          const hiddenIdentities = hiddenCount > 0
+            ? [...new Set(hiddenBots.map((b) => quotaIdentityLabel(b.kind, b.identity)))]
+                .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+                .join(t('、'))
+            : ''
           const shown = query ? all : all.filter((b) => !hiddenQuota.has(b.id))
-          const hiddenCount = all.length - shown.length
           const shownIds = new Set(shown.map((b) => b.id))
           const topLevel = shown.filter((b) => !b.parent_bot_id || !shownIds.has(b.parent_bot_id))
           const list = topLevel.filter((b) => b.role !== 'scheduler')
@@ -1550,7 +1557,7 @@ export function Sidebar() {
                 </button>
               ) : topLevel.length === 0 && hiddenCount > 0 ? (
                 <div className="project-empty">
-                  <span className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（額度不足）', { n: hiddenCount })}</span>
+                  <span className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（{identities} 已停用）', { n: hiddenCount, identities: hiddenIdentities })}</span>
                   <QuickAddBots projectId={p.id} />
                 </div>
               ) : topLevel.length === 0 ? (
@@ -1602,7 +1609,7 @@ export function Sidebar() {
               {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
-                <p className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（額度不足）', { n: hiddenCount })}</p>
+                <p className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（{identities} 已停用）', { n: hiddenCount, identities: hiddenIdentities })}</p>
               ) : null}
             </section>
           )

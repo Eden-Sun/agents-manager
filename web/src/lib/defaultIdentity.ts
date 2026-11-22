@@ -8,6 +8,10 @@ export function defaultIdentityName(kind: BotKind | string | null | undefined): 
   return null
 }
 
+export function quotaIdentityLabel(kind: BotKind, identity: string | null): string {
+  return identity ?? (kind === 'agy' ? AGY_DEFAULT_IDENTITY : kind)
+}
+
 export function isBuiltinDefaultIdentity(kind: BotKind | string | null | undefined, name: string | null | undefined): boolean {
   const n = name?.trim() ?? ''
   return kind === 'agy' && (n === AGY_DEFAULT_IDENTITY || n === 'agy')
