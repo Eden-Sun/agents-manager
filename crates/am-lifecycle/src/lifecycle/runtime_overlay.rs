@@ -73,7 +73,7 @@ pub fn policy_rev_now(bot: &db::Bot, role_policy: &BTreeMap<String, serde_json::
     policy_rev_of(&resolve(bot, role_policy).0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
     use am_base::runtime_policy::RuntimeSettings;

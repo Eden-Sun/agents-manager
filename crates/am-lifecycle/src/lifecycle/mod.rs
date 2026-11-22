@@ -139,12 +139,10 @@ pub mod paste_check;
 pub mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod native_transport_prototype;
 /// issue #77 探索用的原型，同一個做法：`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，
 /// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub mod actor_runtime_eval_prototype;
 /// issue #92 的端到端情境：撞額度 → 換身份 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod identity_switch_tests;
@@ -152,13 +150,9 @@ pub mod identity_switch_tests;
 #[cfg(test)]
 pub use crate::race_point;
 /// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub mod purge_dirs_tests;
 /// #188：子 agent 不能走 stop + start；夾具（一顆有真 mock pane 的子 agent）給批次重啟的測試共用。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod restart_kind_tests;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub mod herdr_review_tests;
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
 /// pane back to the herdr `agent.prompt` path that swallowed prompts (sol review round three #2).
@@ -193,20 +187,6 @@ pub fn retain_bot_state(live: &[String]) {
     deferred_live::retain_bots(live);
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod pane_typed_memo_tests {
-    use super::*;
-
-    #[test]
-    fn an_ended_runs_pane_typed_memo_is_dropped() {
-        remember_pane_typed("memo-gone");
-        remember_pane_typed("memo-kept");
-        retain_pane_typed(&["memo-kept".to_string()]);
-        assert!(!pane_typed_memo("memo-gone"), "結束的 run 不留帳");
-        assert!(pane_typed_memo("memo-kept"));
-        retain_pane_typed(&[]);
-    }
-}
 
 pub use messages::*;
 pub use poller::*;
@@ -329,4 +309,10 @@ async fn client_for_run_with_host_fence(
         return Err(stale());
     }
     Ok(client)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
 }

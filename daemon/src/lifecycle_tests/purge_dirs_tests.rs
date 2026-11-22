@@ -1,6 +1,17 @@
 //! #187：`purge_deleted_bot_dirs` 只在「確定是軟刪」而且「確定沒有 active run」時才有權刪 `bots/<id>/`。
 //! 讀不到（SQLite 一時忙、I/O 錯）不等於沒有：留著、下一次啟動再判斷。
-use super::*;
+
+#![allow(unused_imports)]
+
+use crate::lifecycle_tests::prelude::*;
+use crate::db;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use crate::state::App;
+use crate::lifecycle::*;
+use crate::lifecycle::start::{restart_bot_with, StartOpts};
+
+use crate::lifecycle::*;
 use crate::testing as tt;
 
 /// 一顆軟刪的 bot 與它的目錄（裡面放著 hook 設定，刪掉就補不回來）。

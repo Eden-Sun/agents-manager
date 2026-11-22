@@ -209,7 +209,7 @@ pub async fn turn_changed<E: TurnEvents>(events: &E, turn_id: &str) {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     /// 受護欄管的 send 組 production 檔。
     const SOURCES: &[(&str, &str)] = &[

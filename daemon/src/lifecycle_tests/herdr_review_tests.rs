@@ -1,5 +1,16 @@
 //! herdr 0.9.3 下的 start／restart 對帳審查：同一顆 bot 同時兩個 start、herdr 在 agent.start／停機當下斷線。
-use super::*;
+
+#![allow(unused_imports)]
+
+use crate::lifecycle_tests::prelude::*;
+use crate::db;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use crate::state::App;
+use crate::lifecycle::*;
+use crate::lifecycle::start::{restart_bot_with, StartOpts};
+
+use crate::lifecycle::*;
 use crate::testing as tt;
 
 async fn active_runs(app: &Arc<App>, bot_id: &str) -> i64 {

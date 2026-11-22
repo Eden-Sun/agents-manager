@@ -10,6 +10,11 @@
 //! 之間的空窗**——不是真的搭一套生產用的 actor runtime（那正是這個 issue 要先問清楚值不值得
 //! 做的東西）。
 
+#![allow(unused_imports)]
+
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -118,35 +123,35 @@ mod tests {
     #[test]
     fn the_bot_lock_ingress_claims_in_the_design_doc_still_match_the_code() {
         let sources: &[(&str, &str)] = &[
-            ("api.rs", include_str!("../../../../daemon/src/api.rs")),
-            ("hookrecv.rs", include_str!("../hookrecv.rs")),
-            ("default_session.rs", include_str!("../default_session.rs")),
-            ("reconcile.rs", include_str!("../../../../daemon/src/reconcile.rs")),
-            ("lifecycle/poller.rs", include_str!("poller.rs")),
-            ("lifecycle/queue.rs", include_str!("queue.rs")),
-            ("lifecycle/screen.rs", include_str!("screen.rs")),
-            ("lifecycle/slash.rs", include_str!("slash.rs")),
-            ("lifecycle/start.rs", include_str!("start.rs")),
-            ("lifecycle/stop.rs", include_str!("../../../../daemon/src/lifecycle_tests/stop.rs")),
-            ("lifecycle/stuck_turns.rs", include_str!("stuck_turns.rs")),
+            ("api.rs", include_str!("../api.rs")),
+            ("hookrecv.rs", include_str!("../../../crates/am-lifecycle/src/hookrecv.rs")),
+            ("default_session.rs", include_str!("../../../crates/am-lifecycle/src/default_session.rs")),
+            ("reconcile.rs", include_str!("../reconcile.rs")),
+            ("lifecycle/poller.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/poller.rs")),
+            ("lifecycle/queue.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/queue.rs")),
+            ("lifecycle/screen.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/screen.rs")),
+            ("lifecycle/slash.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/slash.rs")),
+            ("lifecycle/start.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/start.rs")),
+            ("lifecycle/stop.rs", include_str!("stop.rs")),
+            ("lifecycle/stuck_turns.rs", include_str!("../../../crates/am-lifecycle/src/lifecycle/stuck_turns.rs")),
         ];
         for (name, src) in sources {
             assert!(src.contains("bot_lock("), "設計文件說 {name} 有呼叫 bot_lock，現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算");
         }
         assert!(
-            include_str!("prompt.rs").contains("StartServices::lock_bot_for_start("),
+            include_str!("../../../crates/am-lifecycle/src/lifecycle/prompt.rs").contains("StartServices::lock_bot_for_start("),
             "設計文件說 lifecycle/prompt.rs 持有 bot 鎖（現在經 `StartServices::lock_bot_for_start`），現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算"
         );
         assert!(
-            include_str!("../../../../daemon/src/runners/s6_l.rs").contains("app_ports_p4sess::lock_bot_owned(&self.shared(), bot_id)"),
+            include_str!("../runners/s6_l.rs").contains("app_ports_p4sess::lock_bot_owned(&self.shared(), bot_id)"),
             "`StartServices` 的 App adapter 不再委派到 per-bot bot_lock——prompt.rs 的鎖與其他 ingress 不同，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
         );
         assert!(
-            include_str!("../../../../daemon/src/app_ports_p4sess.rs").contains("app.bot_lock(bot_id).await"),
+            include_str!("../app_ports_p4sess.rs").contains("app.bot_lock(bot_id).await"),
             "`lock_bot_owned` 不再取得 `BotLocks::bot_lock`——prompt.rs 的鎖與其他 ingress 不同，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
         );
         assert!(
-            include_str!("../../../../daemon/src/api.rs").contains("依 id 排序、一次拿齊"),
+            include_str!("../api.rs").contains("依 id 排序、一次拿齊"),
             "lock_bots_in_order 排序說明的措辭變了——docs/ACTOR-RUNTIME-EVAL.md 的『actor 換不掉 lock ordering』一節引用的就是這句"
         );
     }
