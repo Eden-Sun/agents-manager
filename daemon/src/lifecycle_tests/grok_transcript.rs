@@ -1,19 +1,24 @@
+#![allow(unused_imports)]
 //! fixtures 取自 grok 1.0.46 真實的 `chat_history.jsonl`（agents-manager 的 grok 子 agent g5／g8），去敏：
 //! system prompt、`<user_info>`、system reminder、工具輸出與長 prompt 截短，reasoning 的加密內容換成 `REDACTED`。
 //! 測試的 `GROK_HOME` 一律是 `tt::track` 的暫存目錄，不碰真的 `~/.grok`。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::grok_transcript::*;
+use crate::lifecycle::grok_transcript::test_seams::*;
+use crate::lifecycle::*;
+use std::collections::HashSet;
 use crate::testing as tt;
 use std::path::{Path, PathBuf};
 
-const FRESH: &str = include_str!("fixtures/grok-1.0.46-chat_history.jsonl");
-const COMPACTED: &str = include_str!("fixtures/grok-1.0.46-chat_history-compacted.jsonl");
-const WELCOME: &str = include_str!("fixtures/grok-1.0.46-welcome.txt");
+const FRESH: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/grok-1.0.46-chat_history.jsonl");
+const COMPACTED: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/grok-1.0.46-chat_history-compacted.jsonl");
+const WELCOME: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/grok-1.0.46-welcome.txt");
 /// grok 1.0.70 真畫面：1.0.69 起 Resume session 排在 New worktree 上面。取法（2026-10-24，grok 1.0.70 (f50904eaee6c) [stable]）：
 /// `tmux new-session -d -s <名> -x 80 -y 40 -c /home/user/project/agents-manager "grok; sleep 600"`，等 8 秒，
 /// `tmux capture-pane -p -t <名>`，再去掉每行尾端空白。80 欄＝選單是裸的兩欄。
-const WELCOME_80: &str = include_str!("fixtures/grok-1.0.70-welcome-80col.txt");
+const WELCOME_80: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/grok-1.0.70-welcome-80col.txt");
 /// 同上，`-x 120 -y 45`：寬 pane 把選單框在 `│` 裡，label 前面還有吉祥物的點陣字。
-const WELCOME_120: &str = include_str!("fixtures/grok-1.0.70-welcome-120col.txt");
+const WELCOME_120: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/grok-1.0.70-welcome-120col.txt");
 const SID: &str = "01a10136-1726-7ec2-9cd8-d321b39fda2e";
 
 #[test]
@@ -204,7 +209,7 @@ async fn a_hookless_grok_child_records_its_exchanges_from_chat_history() {
     let app = c.env.app.clone();
     let want = parse_chat_history(FRESH);
 
-    assert!(super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+    assert!(crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     let msgs = messages(&app, &c.conv).await;
     let got: Vec<(&str, &str, &str)> = msgs.iter().map(|(r, t, s, _)| (r.as_str(), t.as_str(), s.as_str())).collect();
     assert_eq!(
@@ -225,8 +230,8 @@ async fn a_hookless_grok_child_records_its_exchanges_from_chat_history() {
         .unwrap();
     assert_eq!(keys, vec![("completed".into(), "p0".into()), ("completed".into(), "p1".into())]);
 
-    assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
-    assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
     assert_eq!(messages(&app, &c.conv).await.len(), 4);
 }
 
@@ -236,8 +241,8 @@ async fn without_a_session_the_startup_menu_is_not_stored() {
     let c = grok_child(None).await;
     let app = c.env.app.clone();
     sqlx::query("UPDATE runs SET last_read_tail_hash = 'x' WHERE id = ?").bind(&c.run_id).execute(&app.db).await.unwrap();
-    assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
-    assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     assert!(messages(&app, &c.conv).await.is_empty(), "歡迎畫面的選單不能變成 assistant 訊息");
 }
 
@@ -281,12 +286,12 @@ async fn a_relayed_prompt_is_the_user_message_and_its_reply_lands_on_the_same_tu
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
 
-    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, "/effort high").await.is_none(), "slash 指令不開回合");
+    assert!(crate::lifecycle::relay_watch::test_seams::open_turn(&app, &run, &parent.id, None, "/effort high").await.is_none(), "slash 指令不開回合");
     assert!(messages(&app, &c.conv).await.is_empty(), "slash 指令的回音不是對話");
-    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[0].prompt).await.expect("交辦開回合");
-    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.is_none());
+    let tid = crate::lifecycle::relay_watch::test_seams::open_turn(&app, &run, &parent.id, None, &want[0].prompt).await.expect("交辦開回合");
+    assert!(crate::lifecycle::relay_watch::test_seams::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.is_none());
 
-    assert!(super::super::poller::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "對話檔收掉這一回合");
+    assert!(crate::lifecycle::poller::test_seams::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "對話檔收掉這一回合");
     let msgs = messages(&app, &c.conv).await;
     let got: Vec<(&str, &str, &str, Option<&str>)> =
         msgs.iter().map(|(r, t, s, f)| (r.as_str(), t.as_str(), s.as_str(), f.as_deref())).collect();
@@ -381,9 +386,9 @@ async fn a_prompt_still_running_in_the_transcript_stays_in_flight() {
     let want = parse_chat_history(COMPACTED);
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
-    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.unwrap();
+    let tid = crate::lifecycle::relay_watch::test_seams::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.unwrap();
 
-    assert!(!super::super::poller::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "還沒答完：不收");
+    assert!(!crate::lifecycle::poller::test_seams::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "還沒答完：不收");
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(&tid).fetch_one(&app.db).await.unwrap();
     assert_eq!(status, "in_flight");
     let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'")

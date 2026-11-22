@@ -568,6 +568,10 @@ pub async fn settle_in_flight(app: &impl GrokTranscriptContext, bot: &db::Bot, r
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "grok_transcript_tests.rs"]
-mod tests;
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
+    pub(crate) const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
+    pub(crate) const RUN_USER_PROMPTS_SQL: &str = super::RUN_USER_PROMPTS_SQL;
+}

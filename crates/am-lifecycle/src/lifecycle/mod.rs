@@ -60,8 +60,6 @@ pub mod agy_session;
 pub mod agy_tests;
 pub mod grok_transcript;
 pub mod claude_child_log;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub mod grok_hook_tests;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod suggestion_list_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]

@@ -384,6 +384,13 @@ pub async fn pending_tail_for_session(
     Ok(split_output(&out).map(|(_, body)| body))
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "claude_child_log_tests.rs"]
-mod tests;
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
+    pub(crate) use super::{parse_exchanges, is_human_prompt_row, record_runtime, parse_runtime, RuntimeSeen, LOG_MARK};
+    pub(crate) const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
+    pub(crate) fn split_output(out: &str) -> Option<(String, String)> { super::split_output(out) }
+    pub(crate) fn within_projects(path: &str, roots: &[String]) -> bool { super::within_projects(path, roots) }
+    pub(crate) fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String { super::read_script_tail_with_recorded(roots, sid, max, recorded) }
+}

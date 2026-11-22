@@ -235,3 +235,10 @@ pub fn heal_at_startup(app: &(impl crate::capabilities::DataDir + crate::capabil
     }
     ensure(app, &path)
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
+    pub fn selected_grok_home(env: &Value, home: Option<&Path>) -> Option<String> { super::selected_grok_home(env, home) }
+}

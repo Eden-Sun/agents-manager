@@ -1,5 +1,12 @@
+#![allow(unused_imports)]
 //! 測試的 `CLAUDE_CONFIG_DIR` 一律是 `tt::track` 的暫存目錄，遠端是 ssh fake，不碰真的 `~/.claude`。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::claude_child_log::*;
+use crate::lifecycle::claude_child_log::test_seams::*;
+use crate::lifecycle::grok_transcript::*;
+use crate::lifecycle::*;
+use std::collections::HashSet;
+use crate::lifecycle::grok_transcript::*;
 use crate::lifecycle::grok_transcript::{sync_locked, Synced};
 use crate::testing as tt;
 use serde_json::json;
@@ -272,7 +279,7 @@ fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
     std::fs::write(&b, "QUESTION-B").unwrap();
     let script = format!(
         "python3 -I -c {} {} 64 {} {} {} 2>/dev/null; :",
-        sh_quote(include_str!("claude_child_tail.py")),
+        sh_quote(include_str!("../../../crates/am-lifecycle/src/lifecycle/claude_child_tail.py")),
         sh_quote(SID),
         sh_quote(LOG_MARK),
         sh_quote(b.to_string_lossy().as_ref()),
@@ -295,7 +302,7 @@ fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
         assert!(alias_b.is_file(), "the symlink alias must resolve to B's transcript");
         let alias_script = format!(
             "python3 -I -c {} {} 64 {} {} {}",
-            sh_quote(include_str!("claude_child_tail.py")),
+            sh_quote(include_str!("../../../crates/am-lifecycle/src/lifecycle/claude_child_tail.py")),
             sh_quote(SID),
             sh_quote(LOG_MARK),
             sh_quote(alias_b.to_string_lossy().as_ref()),
@@ -344,7 +351,7 @@ def swap_open(path, flags, *args, **kwargs):
 os.open = swap_open
 "#;
     let script = read_script_tail_with_recorded(&[root.display().to_string()], SID, 64, None);
-    let reader = include_str!("claude_child_tail.py");
+    let reader = include_str!("../../../crates/am-lifecycle/src/lifecycle/claude_child_tail.py");
     let script = script.replace(
         &sh_quote(reader),
         &sh_quote(&reader.replace("import sys\n", &format!("import sys\n{hook}\n"))),
@@ -474,7 +481,7 @@ async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
     c.env.herdr.set_screen(&c.pane, "⏺ 我先讀那份 brief。\n");
 
-    assert!(crate::lifecycle::poller::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
+    assert!(crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
     let msgs = messages(&app, &c.conv).await;
     let got: Vec<(&str, &str, &str)> = msgs.iter().map(|(r, t, s)| (r.as_str(), t.as_str(), s.as_str())).collect();
     assert_eq!(
@@ -493,7 +500,7 @@ async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
     let status: Vec<String> = sqlx::query_scalar("SELECT status FROM turns WHERE conversation_id = ? ORDER BY created_at, rowid").bind(&c.conv).fetch_all(&app.db).await.unwrap();
     assert_eq!(status, vec!["completed", "completed"]);
 
-    assert!(!crate::lifecycle::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     assert_eq!(messages(&app, &c.conv).await.len(), 4);
 }
 
@@ -753,7 +760,7 @@ async fn the_baseline_still_settles_the_turn_that_was_dispatched() {
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
-    let tid = crate::lifecycle::relay_watch::open_turn(&app, &run, &parent.id, None, "請讀 brief 並開工").await.unwrap();
+    let tid = crate::lifecycle::relay_watch::test_seams::open_turn(&app, &run, &parent.id, None, "請讀 brief 並開工").await.unwrap();
 
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
     assert_eq!(turn_count(&app, &c.conv).await, 1, "只有派工開的那一筆");
@@ -933,14 +940,14 @@ async fn an_idle_edge_with_no_turn_in_flight_records_the_exchange_that_finished_
         "sess-1",
         &log(&[user_at("u1", prompt, "2026-10-17T08:04:02.714Z"), assistant("我先讀 brief。", Some("tool_use"), true), tool_result(), assistant("已推上 origin main。", Some("end_turn"), false)]),
     );
-    assert!(crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert!(crate::lifecycle::poller::test_seams::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     let turns: Vec<(String, String)> =
         sqlx::query_as("SELECT origin, status FROM turns WHERE conversation_id = ?").bind(&c.conv).fetch_all(&app.db).await.unwrap();
     assert_eq!(turns, vec![("external".to_string(), "completed".to_string())]);
     let got: Vec<(String, String)> = messages(&app, &c.conv).await.into_iter().map(|(r, t, _)| (r, t)).collect();
     assert_eq!(got, vec![("user".to_string(), prompt.to_string()), ("assistant".to_string(), "已推上 origin main。".to_string())]);
 
-    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     assert_eq!(turn_count(&app, &c.conv).await, 1);
     assert_eq!(messages(&app, &c.conv).await.len(), 2);
 }
@@ -956,7 +963,7 @@ async fn an_idle_edge_does_not_sync_the_transcript_of_a_bot_with_hooks() {
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
     sqlx::query("UPDATE bots SET inject_hooks = 1 WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
 
-    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     assert_eq!(turn_count(&app, &c.conv).await, 0);
 }
 
@@ -978,7 +985,7 @@ async fn an_idle_edge_leaves_an_in_flight_turn_to_the_fallback() {
         .await
         .unwrap();
 
-    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert!(!crate::lifecycle::poller::test_seams::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     assert_eq!(turn_count(&app, &c.conv).await, 1, "只有原本那筆在飛的");
 }
 

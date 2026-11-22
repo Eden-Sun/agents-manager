@@ -1029,3 +1029,10 @@ mod tests {
         assert_eq!(turns, 0);
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
+    pub async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, from_turn: Option<&str>, text: &str) -> Option<String> { super::open_turn(app, run, from_bot, from_turn, text).await }
+}

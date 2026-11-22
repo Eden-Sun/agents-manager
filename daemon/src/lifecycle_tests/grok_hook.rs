@@ -1,9 +1,10 @@
+#![allow(unused_imports)]
 //! grok 的全域 hook 檔（`<GROK_HOME>/hooks/agents-manager.json`，SPEC §12）：自癒、保留使用者自己的 hook、原子寫入、不寫真實 HOME。
 //!
 //! 起因（2026-10-02 c6）：使用者真實的 `~/.grok/hooks/agents-manager.json` 指向早就刪掉的 `/tmp/am-test-…/data/grok-hook.sh`——
 //! 測試啟動 grok bot 時，`dirs::home_dir()` 是**真的** HOME，把測試資料目錄的 dispatcher 路徑寫進了使用者的檔案。
 
-use super::grok_hook::{heal_at_startup, hooks_json_merged, hooks_json_merged_local, install_local};
+use crate::lifecycle::grok_hook::{heal_at_startup, hooks_json_merged, hooks_json_merged_local, install_local};
 use crate::testing as tt;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt as _;
@@ -75,13 +76,13 @@ fn a_users_hook_named_grok_hook_sh_is_not_removed_as_ours() {
 
 #[test]
 fn grok_home_fails_closed_without_home_and_preserves_an_explicit_root_override() {
-    assert_eq!(super::grok_hook::selected_grok_home(&json!({}), None), None, "no HOME must not become `/.grok`");
-    assert_eq!(super::grok_hook::selected_grok_home(&json!({"GROK_HOME": "/"}), None).as_deref(), Some("/"));
-    assert_eq!(super::grok_hook::selected_grok_home(&json!({"GROK_HOME": "/tmp/grok///"}), None).as_deref(), Some("/tmp/grok"));
+    assert_eq!(crate::lifecycle::grok_hook::test_seams::selected_grok_home(&json!({}), None), None, "no HOME must not become `/.grok`");
+    assert_eq!(crate::lifecycle::grok_hook::test_seams::selected_grok_home(&json!({"GROK_HOME": "/"}), None).as_deref(), Some("/"));
+    assert_eq!(crate::lifecycle::grok_hook::test_seams::selected_grok_home(&json!({"GROK_HOME": "/tmp/grok///"}), None).as_deref(), Some("/tmp/grok"));
 }
 
 fn hooks_file(grok_home: &Path) -> std::path::PathBuf {
-    grok_home.join("hooks").join(super::setup::grok_hooks_file(None))
+    grok_home.join("hooks").join(crate::lifecycle::setup::grok_hooks_file(None))
 }
 
 /// bot 啟動時裝：不猜同名路徑屬於 daemon；保留它並加入本 daemon 項目，使用者 hook 與原權限也留著。
@@ -154,7 +155,7 @@ async fn a_stale_hook_is_replaced_only_when_its_script_proves_agents_manager_own
     let path = hooks_file(&grok_home);
     let old_dir = tt::scratch_dir("am-grokhook-old-data");
     let old_dispatcher = old_dir.join("grok-hook.sh");
-    let old_script = super::setup::local_grok_dispatch_sh("/old/agents-managerd", "/old/data", None);
+    let old_script = crate::lifecycle::setup::test_seams::local_grok_dispatch_sh("/old/agents-managerd", "/old/data", None);
     std::fs::write(&old_dispatcher, old_script).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let user_same_name = "/home/u/scripts/grok-hook.sh";
@@ -237,7 +238,7 @@ async fn tests_never_write_the_real_home() {
     assert_eq!(fake.as_path(), crate::test_home::dir(), "home::dir() 與換掉的 $HOME 是同一處");
     assert!(fake.to_string_lossy().contains("am-test-home-"), "測試的 HOME 不是真的 HOME：{}", fake.display());
     install_local(&e.app, &json!({})).unwrap();
-    assert!(fake.join(".grok/hooks").join(super::setup::grok_hooks_file(None)).is_file(), "寫進了假 HOME");
+    assert!(fake.join(".grok/hooks").join(crate::lifecycle::setup::grok_hooks_file(None)).is_file(), "寫進了假 HOME");
 }
 
 /// #1884：本機 grok 的 hook 檔多一個 `PreToolUse`（指向自己的 dispatcher）；遠端那份不帶（它會把每個 PreToolUse 轉去 spool）。

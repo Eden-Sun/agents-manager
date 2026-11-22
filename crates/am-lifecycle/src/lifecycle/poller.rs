@@ -2236,6 +2236,8 @@ mod no_reply_notice_tests {
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    pub async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str, seed: bool) -> anyhow::Result<bool> { super::capture_hookless_turn_locked(app, run_id, seed).await }
+    pub async fn sync_idle_transcript_locked(app: &impl LcHost, run_id: &str) -> anyhow::Result<bool> { super::sync_idle_transcript_locked(app, run_id).await }
     use super::*;
     pub async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> { super::try_fallback(app, run_id, expected_turn).await }
 }

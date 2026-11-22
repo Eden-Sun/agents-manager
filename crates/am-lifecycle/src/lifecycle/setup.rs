@@ -3337,6 +3337,7 @@ mod codex_stop_args_tests {
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    pub fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String { super::local_grok_dispatch_sh(exe, data_dir, instance) }
     use super::*;
     pub async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> { super::install_remote_grok_hook(conn, env, instance).await }
     pub fn hook_cmd_parts(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::capabilities::ListenPort), bot: &db::Bot, provider: &str) -> Vec<String> { super::hook_cmd_parts(app, bot, provider) }
