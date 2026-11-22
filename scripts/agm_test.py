@@ -1684,6 +1684,37 @@ paths = ["web/**"]
             self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", prompt_call["body"]["text"])
             self.assertTrue(prompt_call["body"]["text"].endswith("請修好 App.tsx 的按鈕"))
 
+    def test_lineage_dispatch_expert_manager_reads_target_via_peers_when_supervisor_state_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            codex_log = root / "codex.log"
+            fake_codex = self._write_fake_bin(
+                root / "fake-codex",
+                f"#!/usr/bin/env python3\nimport json, sys\nopen({str(codex_log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\nprint(json.dumps({{'type': 'thread.started', 'thread_id': 'bak-sess-1'}}))\n",
+            )
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = (200, {"claim": {"id": "clm-1", "line": "web", "mode": "resume", "base_session_id": "chk-sess-1", "backup_session_id": "bak-sess-1", "state": "open"}, "checkpoint": cp})
+            FakeDaemon.routes["GET /api/supervisor/state"] = (403, {"error": "forbidden", "reason": "role_required"})
+            FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"project_id": "p1", "peers": [{"id": "b-exec", "name": "exec", "kind": "codex", "run_state": "running", "native_session_id": "chk-sess-1"}]})
+            FakeDaemon.routes["POST /api/bots/b-exec/restart"] = (200, {"run_id": "r2", "resumed": True, "session_id": "chk-sess-1", "resume_outcome": "verified"})
+            FakeDaemon.routes["POST /api/bots/b-exec/prompt"] = (200, {"ok": True, "turn_id": "t1"})
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(fake_codex),
+            }
+            with patch.dict(os.environ, env):
+                out = self.ok("lineage", "dispatch", "--paths", "web/App.tsx", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+            self.assertEqual(out["mode"], "resume")
+            self.assertEqual(out["work_session_id"], "chk-sess-1")
+            self.assertEqual(out["worker"], {"kind": "bot", "bot_id": "b-exec"})
+            paths = [r["path"] for r in FakeDaemon.seen]
+            self.assertIn("/api/projects/p1/peers", paths)
+            self.assertIn("/api/bots/b-exec/restart?resume=native&session=chk-sess-1", paths)
+
     def test_lineage_dispatch_fork_and_busy_fallback_expert_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

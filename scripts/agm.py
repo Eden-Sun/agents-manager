@@ -1900,14 +1900,37 @@ def _herdr_agent_session(target: str) -> str | None:
                 return obj["session_id"].strip()
     return None
 
+def _is_role_refused(e: AgmError) -> bool:
+    detail = e.extra.get("detail")
+    return e.kind == "http_error" and e.extra.get("status") == 403 and isinstance(detail, dict) and detail.get("reason") == "role_required"
+
+def _bot_from_peer(peer: dict) -> dict:
+    run_state = peer.get("run_state")
+    run = {"state": run_state, "native_session_id": peer.get("native_session_id")} if run_state not in (None, "stopped") else None
+    return {"id": peer.get("id"), "name": peer.get("name"), "kind": peer.get("kind"), "run": run}
+
+def _find_bot_in_peers(client: Client, bot_id: str) -> dict | None:
+    data = client.get("/api/projects/" + urllib.parse.quote(_project_id(), safe="") + "/peers")
+    for p in (data.get("peers") if isinstance(data, dict) else None) or []:
+        if isinstance(p, dict) and p.get("id") == bot_id:
+            return _bot_from_peer(p)
+    return None
+
 def _find_bot_in_state(client: Client, cfg: dict, bot_id: str) -> dict | None:
     manager = ""
     try:
         manager = manager_bot_id(cfg)
     except AgmError:
         pass
-    sup = optional_get(client, "/api/supervisor/state")
-    state = slim_state(sup if sup is not None else client.get("/api/state"), manager)
+    try:
+        sup = optional_get(client, "/api/supervisor/state")
+    except AgmError as e:
+        if not _is_role_refused(e):
+            raise
+        return _find_bot_in_peers(client, bot_id)
+    if sup is None:
+        return _find_bot_in_peers(client, bot_id)
+    state = slim_state(sup, manager)
     for b in state.get("bots") or []:
         if b.get("id") == bot_id:
             return b

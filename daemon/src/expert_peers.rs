@@ -69,7 +69,7 @@ pub(crate) async fn list(
         let is_api_advisor = crate::config::is_api_kind(&bot.kind) && crate::relay_policy::api_bot_consultable(&project, bot, caller.as_ref());
         let is_shared = shared_ids.contains(&bot.id);
         let dispatchable = (!crate::config::is_api_kind(&bot.kind) || is_api_advisor) && !is_shared;
-        let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
+        let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open,"native_session_id":run.as_ref().and_then(|r| r.native_session_id.clone())});
         if crate::config::is_api_kind(&bot.kind) {
             peer["billing"] = json!("api");
             if !is_api_advisor {
@@ -759,5 +759,24 @@ mod coordinator_peers_tests {
         let plain = call(None).await.unwrap().0;
         assert_eq!(plain["acting_deputy"], true);
         assert!(plain["peers"].as_array().unwrap().iter().all(|p| p.get("dispatch").is_none()), "{plain}");
+    }
+}
+
+#[cfg(test)]
+mod native_session_peers_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn peers_carry_the_active_runs_native_session_id() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let live = crate::testing::claude_bot(&app, &env.project_id, "live-exec").await;
+        let run = crate::testing::fake_run(&app, &live.id).await;
+        sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let idle = crate::testing::claude_bot(&app, &env.project_id, "idle-exec").await;
+        let out = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::User)).await.unwrap().0;
+        let peer = |id: &str| out["peers"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap();
+        assert_eq!(peer(&live.id)["native_session_id"], "sid-live", "{out}");
+        assert!(peer(&idle.id)["native_session_id"].is_null(), "{out}");
     }
 }
