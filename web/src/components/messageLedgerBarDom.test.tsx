@@ -99,6 +99,7 @@ test('面板：每項一行（標題＋白話狀態＋下一步），操作收�
   assert.ok(el.querySelector('[role="dialog"]'), '面板開著')
   const rows = [...el.querySelectorAll('.ledger-row')]
   assert.equal(rows.length, 3)
+  assert.deepEqual(rows.map((r) => r.querySelector('.ledger-code')?.textContent), ['L1', 'L2', 'L3'])
   assert.match(rows[1].textContent ?? '', /把檢查腳本改成 60 秒/)
   assert.match(rows[2].textContent ?? '', /需要你回覆/)
   assert.equal(rows[0].querySelector('.ledger-more'), null, '已回答的不再有操作')

@@ -153,58 +153,63 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
                 const at = when.at ? new Date(when.at).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null
                 return (
                   <li key={it.id} className={`ledger-row status-${it.status}`}>
-                    <div className="ledger-row-main">
-                      <button type="button" className="track-jump" disabled={!it.source_message_id} onClick={() => jump(it)}>
-                        <span className="ledger-code">{it.code}</span> <span className="ledger-row-title">{it.title}</span>
-                      </button>
-                      <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
-                      {it.status === 'answered' ? null : (
-                      <button
-                        type="button"
-                        className="ledger-more"
-                        aria-label={t('更多操作')}
-                        aria-haspopup="menu"
-                        aria-expanded={menuFor === it.id}
-                        disabled={busy}
-                        onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
-                      >
-                        ⋯
-                      </button>
-                      )}
+                    <div className="ledger-code-col">
+                      <span className={`ledger-code status-${it.status}`}>{it.code}</span>
                     </div>
-                    {it.status === 'answered' && it.deliverable ? <div className="ledger-row-meta"><span className="ledger-row-note">{t('交件內容')}：{it.deliverable}</span></div> : null}
-                    {it.status === 'answered' ? (
-                      <AwaitingActions
-                        busy={busy}
-                        onDone={() => void run(() => completeLedgerItem(projectId, it))}
-                        onNotSure={() => void run(() => notSureLedgerItem(projectId, it, notSureNext))}
-                      />
-                    ) : null}
-                    <div className="ledger-row-meta">
-                      {it.next_step ? <span className="ledger-row-note">{t('下一步')}：{it.next_step}</span> : null}
-                      {at ? <span className="ledger-row-owner">{t('訊息時間')}：{at}</span> : null}
-                    </div>
-                    {hintFor && hintFor.id === it.id ? <div className="track-hint">{hintFor.text}</div> : null}
-                    {menuFor === it.id ? (
-                      <div className="ledger-menu" role="menu">
+                    <div className="ledger-body-col">
+                      <div className="ledger-row-main">
+                        <button type="button" className="track-jump" disabled={!it.source_message_id} onClick={() => jump(it)}>
+                          <span className="ledger-row-title">{it.title}</span>
+                        </button>
+                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
+                        {it.status === 'answered' ? null : (
                         <button
                           type="button"
-                          role="menuitem"
+                          className="ledger-more"
+                          aria-label={t('更多操作')}
+                          aria-haspopup="menu"
+                          aria-expanded={menuFor === it.id}
                           disabled={busy}
-                          onClick={() => void run(() => patchLedgerItem(projectId, it.id, { op: 'cancel', expected_version: it.version, close_reason: 'cancelled by user' }))}
+                          onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
                         >
-                          {t('不用做了')}
+                          ⋯
                         </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={busy}
-                          onClick={() => void run(() => patchLedgerItem(projectId, it.id, { op: 'update', expected_version: it.version, status: 'done' }))}
-                        >
-                          {t('已經好了')}
-                        </button>
+                        )}
                       </div>
-                    ) : null}
+                      {it.status === 'answered' && it.deliverable ? <div className="ledger-row-meta"><span className="ledger-row-note">{t('交件內容')}：{it.deliverable}</span></div> : null}
+                      {it.status === 'answered' ? (
+                        <AwaitingActions
+                          busy={busy}
+                          onDone={() => void run(() => completeLedgerItem(projectId, it))}
+                          onNotSure={() => void run(() => notSureLedgerItem(projectId, it, notSureNext))}
+                        />
+                      ) : null}
+                      <div className="ledger-row-meta">
+                        {it.next_step ? <span className="ledger-row-note">{t('下一步')}：{it.next_step}</span> : null}
+                        {at ? <span className="ledger-row-owner">{t('訊息時間')}：{at}</span> : null}
+                      </div>
+                      {hintFor && hintFor.id === it.id ? <div className="track-hint">{hintFor.text}</div> : null}
+                      {menuFor === it.id ? (
+                        <div className="ledger-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={busy}
+                            onClick={() => void run(() => patchLedgerItem(projectId, it.id, { op: 'cancel', expected_version: it.version, close_reason: 'cancelled by user' }))}
+                          >
+                            {t('不用做了')}
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={busy}
+                            onClick={() => void run(() => patchLedgerItem(projectId, it.id, { op: 'update', expected_version: it.version, status: 'done' }))}
+                          >
+                            {t('已經好了')}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
                   </li>
                 )
               })}

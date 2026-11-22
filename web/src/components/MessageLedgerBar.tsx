@@ -157,39 +157,44 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
               <ul className="ledger-rows">
                 {live.map((it) => (
                   <li key={it.id} className={`ledger-row status-${it.status}`}>
-                    <div className="ledger-row-main">
-                      <span className="ledger-row-title">{it.title}</span>
-                      <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
-                      {ACTIONABLE.includes(it.status) ? (
-                        <button
-                          type="button"
-                          className="ledger-more"
-                          aria-label={t('更多操作')}
-                          aria-haspopup="menu"
-                          aria-expanded={menuFor === it.id}
-                          disabled={busy}
-                          onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
-                        >
-                          ⋯
-                        </button>
+                    <div className="ledger-code-col">
+                      <span className="ledger-code">{it.code}</span>
+                    </div>
+                    <div className="ledger-body-col">
+                      <div className="ledger-row-main">
+                        <span className="ledger-row-title">{it.title}</span>
+                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
+                        {ACTIONABLE.includes(it.status) ? (
+                          <button
+                            type="button"
+                            className="ledger-more"
+                            aria-label={t('更多操作')}
+                            aria-haspopup="menu"
+                            aria-expanded={menuFor === it.id}
+                            disabled={busy}
+                            onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
+                          >
+                            ⋯
+                          </button>
+                        ) : null}
+                      </div>
+                      {it.status === 'answered' && it.deliverable ? <div className="ledger-row-note">{t('交件內容')}：{it.deliverable}</div> : null}
+                      {it.next_step ? <div className="ledger-row-note">{t('下一步')}：{it.next_step}</div> : null}
+                      {it.owner_bot_id ? <div className="ledger-row-owner">{t('承辦')}：{botName(it.owner_bot_id)}</div> : null}
+                      {it.status === 'answered' ? (
+                        <AwaitingActions busy={busy} onDone={() => void markDone(it)} onNotSure={() => void notSure(it)} />
+                      ) : null}
+                      {menuFor === it.id ? (
+                        <div className="ledger-menu" role="menu">
+                          <button type="button" role="menuitem" disabled={busy} onClick={() => void dismiss(it)}>
+                            {t('不用做了')}
+                          </button>
+                          <button type="button" role="menuitem" disabled={busy} onClick={() => void markDone(it)}>
+                            {t('已經好了')}
+                          </button>
+                        </div>
                       ) : null}
                     </div>
-                    {it.status === 'answered' && it.deliverable ? <div className="ledger-row-note">{t('交件內容')}：{it.deliverable}</div> : null}
-                    {it.next_step ? <div className="ledger-row-note">{t('下一步')}：{it.next_step}</div> : null}
-                    {it.owner_bot_id ? <div className="ledger-row-owner">{t('承辦')}：{botName(it.owner_bot_id)}</div> : null}
-                    {it.status === 'answered' ? (
-                      <AwaitingActions busy={busy} onDone={() => void markDone(it)} onNotSure={() => void notSure(it)} />
-                    ) : null}
-                    {menuFor === it.id ? (
-                      <div className="ledger-menu" role="menu">
-                        <button type="button" role="menuitem" disabled={busy} onClick={() => void dismiss(it)}>
-                          {t('不用做了')}
-                        </button>
-                        <button type="button" role="menuitem" disabled={busy} onClick={() => void markDone(it)}>
-                          {t('已經好了')}
-                        </button>
-                      </div>
-                    ) : null}
                   </li>
                 ))}
               </ul>

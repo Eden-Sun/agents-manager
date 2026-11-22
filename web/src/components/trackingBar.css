@@ -17,8 +17,8 @@
   flex: 1 1 auto;
   min-width: 0;
   text-align: left;
-  border: 1px solid var(--line, #d0d7de);
-  background: var(--surface, #fff);
+  border: 1px solid var(--border, #c8d0db);
+  background: var(--bg-panel, #ffffff);
   color: inherit;
   border-radius: 999px;
   padding: 3px 10px;
@@ -34,7 +34,7 @@
   flex: 0 0 auto;
   border: 0;
   background: transparent;
-  color: var(--muted, #6e7781);
+  color: var(--text-dim, #6e7781);
   font: inherit;
   min-height: 28px;
   padding: 0 6px;
@@ -47,7 +47,7 @@
 }
 
 .track-pill {
-  border: 1px solid var(--line, #d0d7de);
+  border: 1px solid var(--border, #c8d0db);
   border-radius: 999px;
   color: inherit;
 }
