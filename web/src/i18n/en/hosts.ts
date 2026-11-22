@@ -697,6 +697,7 @@ export default {
   '建立失敗：{reason}': 'Create failed: {reason}',
   '建立所選身份（{n}）': 'Create selected identities ({n})',
   '從本機複製身份到 {host}': 'Copy identities from this machine to {host}',
+  '共用': 'Shared',
   '從本機複製身份': 'Copy identities from this machine',
   '同時在其他已連線主機建立（{names}）': 'Also create on other connected hosts ({names})',
   '{host} 已有同名身份，將略過': '{host} already has an identity with this name; it will be skipped',

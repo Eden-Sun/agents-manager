@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useT } from '../lib/i18n'
 import { BOT_KINDS, type BotKind } from '../api/types'
 import { useStore } from '../store/store'
-import { identityHost, identityRowKey } from '../store/identityRows'
+import { identitiesForHost, identityRowKey } from '../store/identityRows'
 import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 import { DefaultAccountRow, IdentityRow } from './IdentityRow'
 import { ShellIdentityRows } from './IdentityShellRows'
@@ -77,9 +77,11 @@ export function IdentitiesPanel() {
     ...hosts.map((h) => summarize(h.name, h.name, h.connected, h.tools, h.identity_status)),
   ]
   const activeConnected = active === 'local' ? localConnected : hosts.find((h) => h.name === active)?.connected !== false
+  const activeStatuses = active === 'local' ? localStatuses : (hosts.find((h) => h.name === active)?.identity_status ?? {})
+  const activeIdentities = identitiesForHost(identities, active, activeStatuses)
   const kinds: BotKind[] = [
     ...SWITCHABLE_KINDS,
-    ...BOT_KINDS.filter((k) => !SWITCHABLE_KINDS.includes(k) && identities.some((i) => identityHost(i) === active && i.kind === k)),
+    ...BOT_KINDS.filter((k) => !SWITCHABLE_KINDS.includes(k) && activeIdentities.some((i) => i.kind === k)),
   ]
   const choose = (name: string) => {
     setPicked(name)
@@ -138,12 +140,12 @@ export function IdentitiesPanel() {
         {kinds.map((kind) => (
           <IdentityKindCard key={kind} host={active} kind={kind} onAdd={() => setAdding({ kind })}>
             <DefaultAccountRow host={active} kind={kind} />
-            {identities
-              .filter((i) => identityHost(i) === active && i.kind === kind)
+            {activeIdentities
+              .filter((i) => i.kind === kind)
               .map((i) => {
                 const isFresh = fresh !== null && fresh.host === active && fresh.name === i.name
                 return (
-                  <div key={identityRowKey(i)} className={isFresh ? 'identity-row-fresh' : undefined} data-fresh-row={isFresh ? 'true' : undefined}>
+                  <div key={`${active}:${identityRowKey(i)}`} className={isFresh ? 'identity-row-fresh' : undefined} data-fresh-row={isFresh ? 'true' : undefined}>
                     <IdentityRow host={active} name={i.name} />
                   </div>
                 )

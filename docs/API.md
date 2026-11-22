@@ -1972,7 +1972,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 ### `POST /api/hosts/{name}/identities/sync`（從本機複製身份到遠端）
 
-讓遠端主機新增與本機相同的身份（shell alias `cc0`–`cc6` 與 config 身份 `host = "local"` 的那些），**只新增、不覆寫**。
+讓遠端主機新增與本機相同的身份（shell alias `cc0`–`cc6`、`co0`–`co6`、`gk0`–`gk6`、`ag1`–`ag6` 與 config 身份 `host = "local"` 的那些），**只新增、不覆寫**。
 
 - **安全**：只允許 User principal；不複製任何憑證、token、登入檔；遠端 alias 寫入前先備份 rc 到 `~/.config/agents-manager/shell-alias-backups/<rc>-<32hex>.bak`（`0600`），寫入經 `<shell> -n` 語法檢查後原子替換；目錄建在遠端 `$HOME` 底下（`0700`）。路徑一律以 `$HOME/...` 表示。
 - **比對**：遠端已有同名 alias 或 config 身份但內容不同 → `status: "different"`、`can_apply: false`、不寫；內容相同 → 計入 `already_synced`、不列出。

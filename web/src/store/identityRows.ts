@@ -16,6 +16,29 @@ export function findIdentity(list: readonly Identity[], host: string, name: stri
   return list.find((i) => i.name === name && identityHost(i) === (host || LOCAL))
 }
 
+export function effectiveIdentity(list: readonly Identity[], host: string, name: string): Identity | undefined {
+  const want = host || LOCAL
+  const exact = list.find((i) => i.name === name && identityHost(i) === want)
+  if (exact) return exact
+  if (want !== LOCAL) return list.find((i) => i.name === name && !i.host)
+  return undefined
+}
+
+export function identitiesForHost(
+  list: readonly Identity[],
+  host: string,
+  statuses?: Record<string, { source?: string }>,
+): Identity[] {
+  const want = host || LOCAL
+  if (want === LOCAL) return list.filter((i) => identityHost(i) === LOCAL)
+  const explicit = list.filter((i) => i.host === want)
+  const taken = new Set(explicit.map((i) => i.name))
+  const shared = list.filter(
+    (i) => !i.host && !taken.has(i.name) && statuses?.[i.name]?.source !== 'shell',
+  )
+  return [...explicit, ...shared]
+}
+
 export function identityBots<B extends Pick<Bot, 'identity' | 'project_id'>>(
   bots: readonly B[],
   projects: readonly Pick<Project, 'id' | 'host'>[],

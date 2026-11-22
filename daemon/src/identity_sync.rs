@@ -14,7 +14,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
-const SYNCABLE: [&str; 7] = ["cc0", "cc1", "cc2", "cc3", "cc4", "cc5", "cc6"];
+const SYNCABLE_PREFIXES: [(&str, &str, &str, &str); 4] = [
+    ("cc", "claude", "CLAUDE_CONFIG_DIR", "claude"),
+    ("co", "codex", "CODEX_HOME", "codex"),
+    ("gk", "grok", "GROK_HOME", "grok"),
+    ("ag", "agy", "HOME", "agy"),
+];
 
 static HOST_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
@@ -32,7 +37,7 @@ const PROBE: &str = r#"printf 'AM_SYNC home %s\n' "$HOME"
 case "${SHELL:-}" in */zsh) ba_rc=.zshrc; ba_sh=zsh ;; *) ba_rc=.bashrc; ba_sh=bash ;; esac
 printf 'AM_SYNC shell %s\n' "$ba_sh"
 if [ -f "$HOME/$ba_rc" ] && [ ! -L "$HOME/$ba_rc" ]; then
-  grep -E '^[[:space:]]*(alias[[:space:]]+)?cc[0-6]=' "$HOME/$ba_rc" 2>/dev/null | sed 's/^/AM_ALIAS /'
+  grep -E '^[[:space:]]*(alias[[:space:]]+)?(cc[0-6]|co[0-6]|gk[0-6]|ag[1-6])=' "$HOME/$ba_rc" 2>/dev/null | sed 's/^/AM_ALIAS /'
 fi
 printf 'AM_SYNC end\n'
 "#;
@@ -116,10 +121,29 @@ struct Candidate {
     source: &'static str,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    raw_alias: Option<String>,
+}
+
+fn syncable_spec(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let (prefix, digit) = name.split_at_checked(2)?;
+    if digit.len() != 1 {
+        return None;
+    }
+    let d = digit.as_bytes()[0];
+    if !matches!(d, b'0'..=b'6') {
+        return None;
+    }
+    if prefix == "ag" && d == b'0' {
+        return None;
+    }
+    SYNCABLE_PREFIXES
+        .iter()
+        .find(|(p, _, _, _)| *p == prefix)
+        .map(|(_, kind, env_key, bin)| (*kind, *env_key, *bin))
 }
 
 fn is_syncable(name: &str) -> bool {
-    SYNCABLE.contains(&name)
+    syncable_spec(name).is_some()
 }
 
 pub fn normalize_home(value: &str, home: &str) -> String {
@@ -142,7 +166,78 @@ fn normalize_env(env: &BTreeMap<String, String>, home: &str) -> BTreeMap<String,
     env.iter().map(|(k, v)| (k.clone(), normalize_home(v, home))).collect()
 }
 
+fn unquote_alias_body(s: &str) -> &str {
+    let t = s.trim();
+    for q in ['\'', '"'] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return &t[1..t.len() - 1];
+        }
+    }
+    t
+}
+
+fn leading_env_var(cmd: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let at = cmd.find(&needle)?;
+    if cmd[..at].split_whitespace().any(|w| !w.contains('=')) {
+        return None;
+    }
+    let rest = &cmd[at + needle.len()..];
+    let val = match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => rest[1..].split(q).next().unwrap_or(""),
+        _ => rest.split_whitespace().next().unwrap_or(""),
+    };
+    let val = val.trim();
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+fn normalize_alias_cmd(cmd: &str, home: &str) -> String {
+    if home.is_empty() {
+        return cmd.to_string();
+    }
+    cmd.replace(&format!("{home}/"), "$HOME/")
+}
+
+fn parse_sync_aliases(out: &str, home: &str) -> Vec<(IdentityCfg, String)> {
+    let mut found: BTreeMap<String, (IdentityCfg, String)> = BTreeMap::new();
+    for line in out.lines() {
+        let Some(rest) = line.trim().strip_prefix("AM_ALIAS ") else { continue };
+        let rest = rest.trim().strip_prefix("alias ").unwrap_or(rest.trim());
+        let Some((name, body)) = rest.split_once('=') else { continue };
+        let name = name.trim();
+        let Some((kind, env_key, bin)) = syncable_spec(name) else { continue };
+        let raw_cmd = unquote_alias_body(body).trim();
+        if !raw_cmd.split_whitespace().any(|w| w == bin || w.ends_with(&format!("/{bin}"))) {
+            continue;
+        }
+        if raw_cmd.contains('\'') || raw_cmd.contains('\n') || raw_cmd.contains('\r') {
+            continue;
+        }
+        let norm_cmd = normalize_alias_cmd(raw_cmd, home);
+        let mut env = BTreeMap::new();
+        match leading_env_var(&norm_cmd, env_key) {
+            Some(dir) => {
+                env.insert(env_key.to_string(), normalize_home(&dir, home));
+            }
+            None if norm_cmd.contains(&format!("{env_key}=")) => continue,
+            None => {}
+        }
+        let line = format!("alias {name}='{norm_cmd}'");
+        found.insert(
+            name.to_string(),
+            (IdentityCfg { name: name.to_string(), kind: kind.into(), host: None, env, args: vec![] }, line),
+        );
+    }
+    found.into_values().collect()
+}
+
 pub fn alias_line(name: &str, env: &BTreeMap<String, String>) -> String {
+    if let Some((_, env_key, bin)) = syncable_spec(name) {
+        return match env.get(env_key) {
+            Some(dir) => format!("alias {name}='{env_key}={dir} {bin}'"),
+            None => format!("alias {name}='{bin}'"),
+        };
+    }
     match env.get("CLAUDE_CONFIG_DIR") {
         Some(dir) => format!("alias {name}='CLAUDE_CONFIG_DIR={dir} claude'"),
         None => format!("alias {name}='claude'"),
@@ -153,19 +248,70 @@ fn local_home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
+fn read_local_rc_aliases(home: &str) -> Vec<(IdentityCfg, String)> {
+    if home.is_empty() {
+        return Vec::new();
+    }
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let rc = if shell.ends_with("/zsh") { ".zshrc" } else { ".bashrc" };
+    let path = std::path::Path::new(home).join(rc);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut prefixed = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("alias ") || t.contains('=') {
+            prefixed.push_str("AM_ALIAS ");
+            prefixed.push_str(t);
+            prefixed.push('\n');
+        }
+    }
+    parse_sync_aliases(&prefixed, home)
+}
+
 async fn local_candidates(app: &Arc<App>) -> Vec<Candidate> {
     let home = local_home();
     let cfg = app.cfg.get().await;
-    let shell: Vec<IdentityCfg> = app.tools.lock().await.get("local").map(|t| t.shell_identities.clone()).unwrap_or_default();
     let mut out = Vec::new();
-    for s in shell.iter().filter(|s| is_syncable(&s.name)) {
+    let mut seen_shell = BTreeSet::new();
+    for (s, raw) in read_local_rc_aliases(&home) {
         if cfg.identities.iter().any(|c| c.name == s.name && c.host_or_local() == "local") {
             continue;
         }
-        out.push(Candidate { name: s.name.clone(), kind: s.kind.clone(), source: "shell", env: normalize_env(&s.env, &home), args: vec![] });
+        seen_shell.insert(s.name.clone());
+        out.push(Candidate {
+            name: s.name,
+            kind: s.kind,
+            source: "shell",
+            env: normalize_env(&s.env, &home),
+            args: vec![],
+            raw_alias: Some(raw),
+        });
+    }
+    let shell: Vec<IdentityCfg> = app.tools.lock().await.get("local").map(|t| t.shell_identities.clone()).unwrap_or_default();
+    for s in shell.iter().filter(|s| is_syncable(&s.name)) {
+        if seen_shell.contains(&s.name) || cfg.identities.iter().any(|c| c.name == s.name && c.host_or_local() == "local") {
+            continue;
+        }
+        out.push(Candidate {
+            name: s.name.clone(),
+            kind: s.kind.clone(),
+            source: "shell",
+            env: normalize_env(&s.env, &home),
+            args: vec![],
+            raw_alias: None,
+        });
     }
     for c in cfg.identities.iter().filter(|c| c.host.as_deref() == Some("local")) {
-        out.push(Candidate { name: c.name.clone(), kind: c.kind.clone(), source: "config", env: normalize_env(&c.env, &home), args: c.args.clone() });
+        out.push(Candidate {
+            name: c.name.clone(),
+            kind: c.kind.clone(),
+            source: "config",
+            env: normalize_env(&c.env, &home),
+            args: c.args.clone(),
+            raw_alias: None,
+        });
     }
     out
 }
@@ -198,7 +344,7 @@ async fn probe_remote(fence: &hosts::HostFence) -> LcResult<(String, String, Vec
     if !home.starts_with('/') {
         return Err(LcError::Upstream("remote HOME is not an absolute path".into()));
     }
-    let aliases = crate::tools::parse_shell_identities(&out);
+    let aliases = parse_sync_aliases(&out, &home).into_iter().map(|(cfg, _)| cfg).collect();
     Ok((home, shell, aliases))
 }
 
@@ -260,7 +406,7 @@ pub async fn sync_plan(
                 }
             }
         };
-        let alias = (c.source == "shell").then(|| alias_line(&c.name, &c.env));
+        let alias = (c.source == "shell").then(|| c.raw_alias.clone().unwrap_or_else(|| alias_line(&c.name, &c.env)));
         items.push(json!({
             "name": c.name,
             "kind": c.kind,
@@ -327,11 +473,11 @@ pub async fn apply_sync(
             continue;
         }
         if body.dry_run {
-            let alias = (c.source == "shell").then(|| alias_line(&c.name, &c.env));
+            let alias = (c.source == "shell").then(|| c.raw_alias.clone().unwrap_or_else(|| alias_line(&c.name, &c.env)));
             results.push(json!({"name": name, "kind": c.kind, "source": c.source, "status": "would_create", "reason": null, "message": null, "alias_line": alias, "created_dirs": dirs_of(&c.env)}));
             continue;
         }
-        let alias = (c.source == "shell").then(|| alias_line(&c.name, &c.env));
+        let alias = (c.source == "shell").then(|| c.raw_alias.clone().unwrap_or_else(|| alias_line(&c.name, &c.env)));
         writes.push(json!({"name": c.name, "alias_line": alias, "dirs": dirs_of(&c.env)}));
         if c.source == "config" {
             config_adds.push(c.clone());
@@ -368,7 +514,7 @@ pub async fn apply_sync(
                 "status": status,
                 "reason": r.get("reason").cloned().unwrap_or(Value::Null),
                 "message": null,
-                "alias_line": c.filter(|c| c.source == "shell").map(|c| alias_line(&c.name, &c.env)),
+                "alias_line": c.filter(|c| c.source == "shell").map(|c| c.raw_alias.clone().unwrap_or_else(|| alias_line(&c.name, &c.env))),
                 "created_dirs": r.get("created_dirs").cloned().unwrap_or(json!([])),
             }));
         }
@@ -474,7 +620,24 @@ mod tests {
     #[test]
     fn only_the_seven_alias_names_are_syncable() {
         assert!(is_syncable("cc0") && is_syncable("cc6"));
+        assert!(is_syncable("co0") && is_syncable("co1") && is_syncable("co6"));
+        assert!(is_syncable("gk0") && is_syncable("ag1") && !is_syncable("ag0"));
         assert!(!is_syncable("cc7") && !is_syncable("lead") && !is_syncable("cc"));
+    }
+
+    #[test]
+    fn parses_codex_and_claude_shell_aliases_preserving_flags_and_normalizing_home() {
+        let out = "AM_ALIAS alias co0='codex --dangerously-bypass-approvals-and-sandbox'\nAM_ALIAS alias co1='CODEX_HOME=/home/ubuntu/.codex-co1 codex --dangerously-bypass-approvals-and-sandbox'\nAM_ALIAS alias cc1='CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude --dangerously-skip-permissions'\n";
+        let parsed = parse_sync_aliases(out, "/home/ubuntu");
+        assert_eq!(parsed.len(), 3);
+        let co0 = parsed.iter().find(|(c, _)| c.name == "co0").unwrap();
+        assert_eq!(co0.0.kind, "codex");
+        assert!(co0.0.env.is_empty());
+        assert_eq!(co0.1, "alias co0='codex --dangerously-bypass-approvals-and-sandbox'");
+        let co1 = parsed.iter().find(|(c, _)| c.name == "co1").unwrap();
+        assert_eq!(co1.0.kind, "codex");
+        assert_eq!(co1.0.env.get("CODEX_HOME").map(String::as_str), Some("$HOME/.codex-co1"));
+        assert_eq!(co1.1, "alias co1='CODEX_HOME=$HOME/.codex-co1 codex --dangerously-bypass-approvals-and-sandbox'");
     }
 
     fn run_helper(home: &std::path::Path, shell: &str, input: &str) -> String {

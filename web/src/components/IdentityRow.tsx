@@ -5,7 +5,7 @@ import { utcOffsetLabel } from '../lib/timeZone'
 import type { Bot, BotKind } from '../api/types'
 import { useT } from '../lib/i18n'
 import { identityDisabled, useStore } from '../store/store'
-import { DEFAULT_ACCOUNT, defaultAccountBots, findIdentity, hostLabel, identityBots } from '../store/identityRows'
+import { DEFAULT_ACCOUNT, defaultAccountBots, effectiveIdentity, hostLabel, identityBots } from '../store/identityRows'
 import { loginKindOnHost } from '../lib/onboardingActions'
 import { quotaForIdentity } from '../store/quotaLookup'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -325,7 +325,7 @@ export function DisabledChip({ host, kind, name }: { host: string; kind: string;
 
 export function IdentityRow({ host, name }: { host: string; name: string }) {
   const t = useT()
-  const ident = useStore((s) => findIdentity(s.identities, host, name))
+  const ident = useStore((s) => effectiveIdentity(s.identities, host, name))
   const bots = useStore((s) => s.bots)
   const projects = useStore((s) => s.projects)
   const usedBots = useMemo(() => identityBots(bots, projects, host, name), [bots, projects, host, name])
@@ -333,6 +333,7 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
   const removeIdentity = useStore((s) => s.removeIdentity)
   const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
+  const isSharedOnRemote = host !== 'local' && !ident.host
   const envText = envDisplayText(ident.env)
   const emptyKeys = emptyEnvKeys(ident.env)
   const keyList = emptyKeys.join(t('、'))
@@ -342,6 +343,7 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
       <span className="identity-main">
         <span className="identity-name">
           <IdentityBadge name={ident.name} />
+          {isSharedOnRemote ? <span className="identity-source-tag">{t('共用')}</span> : null}
           <IdentityUsers bots={usedBots} />
           <DisabledChip host={host} kind={ident.kind} name={ident.name} />
         </span>
@@ -357,14 +359,16 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
           kind={ident.kind}
           only={host}
           danger={
-            <button
-              type="button"
-              className="mini-btn identity-login-btn identity-danger-btn"
-              onClick={() => setConfirmDelete(true)}
-              title={t('只移除設定檔裡的這個身份；登入憑證與家目錄保留')}
-            >
-              {t('移除身份設定…')}
-            </button>
+            !isSharedOnRemote ? (
+              <button
+                type="button"
+                className="mini-btn identity-login-btn identity-danger-btn"
+                onClick={() => setConfirmDelete(true)}
+                title={t('只移除設定檔裡的這個身份；登入憑證與家目錄保留')}
+              >
+                {t('移除身份設定…')}
+              </button>
+            ) : undefined
           }
         />
         <details className="identity-path">
