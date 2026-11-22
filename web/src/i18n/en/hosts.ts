@@ -518,6 +518,7 @@ export default {
   '還原中…': 'Restoring…',
   '確認還原': 'Confirm restore',
   '未開啟自動補齊（[host_baseline.sync]）': 'Auto-fix not enabled ([host_baseline.sync])',
+  '自動補齊由自動模式負責，手動補齊停用': 'Auto-fix is handled by auto mode; manual fix is disabled',
   '主機尚未完成一致性探測': 'Consistency check not completed on host',
   '計畫已更新，請重新確認': 'Plan has been updated; please confirm again',
   '包含無法自動補齊的項目': 'Contains items that cannot be auto-fixed',

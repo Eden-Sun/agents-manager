@@ -60,11 +60,30 @@ pub async fn after_detect(app: Arc<App>, host: String, fence: HostFence, checked
     }
 }
 
-fn schedule_retry(app: Arc<App>, host: String, delay: Duration) {
-    use crate::capabilities::BgTasks;
+pub(crate) fn schedule_retry(app: Arc<App>, host: String, delay: Duration) {
+    use crate::capabilities::{BgTasks, Shutdown};
     let tracker = BgTasks::background_tasks(&*app).clone();
+    let shutdown = Shutdown::shutdown(&*app).clone();
     crate::background_loop::spawn_named(&tracker, "baseline auto retry", async move {
-        tokio::time::sleep(delay).await;
-        crate::tools::spawn_detect(app, host);
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = tokio::time::sleep(delay) => crate::tools::spawn_detect(app, host),
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_pending_retry_does_not_hold_up_shutdown() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        schedule_retry(app.clone(), "no-such-host".into(), Duration::from_secs(1800));
+        app.shutdown.cancel();
+        let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
+        tracker.close();
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait()).await.expect("the 30-minute retry sleep must not block drain");
+    }
 }

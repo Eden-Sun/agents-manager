@@ -550,16 +550,6 @@ impl ConfigFile {
         }
     }
 
-    pub fn host_baseline_sync(&self, host: &str) -> HostBaselineSyncMode {
-        if !self.host_baseline_known(host) {
-            return HostBaselineSyncMode::Off;
-        }
-        match self.host_baseline.sync.get(host) {
-            Some(HostBaselineSyncMode::Ask | HostBaselineSyncMode::Auto) => HostBaselineSyncMode::Ask,
-            _ => HostBaselineSyncMode::Off,
-        }
-    }
-
     /// `[host_baseline.sync]` 裡對不上 `local`／`[[hosts]]` 的鍵（主機改名或刪掉後留下的），排好序。
     pub fn host_baseline_orphan_sync_keys(&self) -> Vec<String> {
         self.host_baseline.sync.keys().filter(|k| !self.host_baseline_known(k)).cloned().collect()
@@ -660,15 +650,15 @@ mod host_baseline_cfg_tests {
         let (cfg, unknown) = parse_config("[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n").unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
         assert!(cfg.host_baseline.is_default());
-        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Off);
-        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_mode("mac_builder"), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_mode(LOCAL_HOST), HostBaselineSyncMode::Off);
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("host_baseline"), "{text}");
 
         let (cfg, unknown) = parse_config("[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n\n[host_baseline.sync]\nmac_builder = 'ask'\n").unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
-        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Ask);
-        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off, "a host that is not listed is off");
+        assert_eq!(cfg.host_baseline_mode("mac_builder"), HostBaselineSyncMode::Ask);
+        assert_eq!(cfg.host_baseline_mode(LOCAL_HOST), HostBaselineSyncMode::Off, "a host that is not listed is off");
         let again: ConfigFile = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(again.host_baseline, cfg.host_baseline);
     }
@@ -679,10 +669,10 @@ mod host_baseline_cfg_tests {
         let text = "[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n\n[[hosts]]\nname = 'box2'\nssh = 'b'\n\n[host_baseline.sync]\nlocal = 'auto'\nmac_builder = 'yes'\ngone-host = 'ask'\nbox2 = 'off'\n";
         let (cfg, unknown) = parse_config(text).expect("a bad [host_baseline.sync] must not fail the config load");
         assert!(unknown.is_empty(), "{unknown:?}");
-        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Ask, "auto is ask in 3a");
-        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Off, "an unreadable value is off");
-        assert_eq!(cfg.host_baseline_sync("gone-host"), HostBaselineSyncMode::Off, "a key that names no host is ignored");
-        assert_eq!(cfg.host_baseline_sync("box2"), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_mode(LOCAL_HOST), HostBaselineSyncMode::Auto, "auto is its own effective mode");
+        assert_eq!(cfg.host_baseline_mode("mac_builder"), HostBaselineSyncMode::Off, "an unreadable value is off");
+        assert_eq!(cfg.host_baseline_mode("gone-host"), HostBaselineSyncMode::Off, "a key that names no host is ignored");
+        assert_eq!(cfg.host_baseline_mode("box2"), HostBaselineSyncMode::Off);
         assert_eq!(cfg.host_baseline_orphan_sync_keys(), vec!["gone-host".to_string()]);
         let warnings = cfg.host_baseline_warnings();
         assert_eq!(warnings.len(), 3, "{warnings:?}");
@@ -694,7 +684,7 @@ mod host_baseline_cfg_tests {
         let mut more = cfg.clone();
         more.hosts.push(host("gone-host"));
         assert!(more.host_baseline_orphan_sync_keys().is_empty(), "a key whose host came back is no longer an orphan");
-        assert_eq!(more.host_baseline_sync("gone-host"), HostBaselineSyncMode::Ask);
+        assert_eq!(more.host_baseline_mode("gone-host"), HostBaselineSyncMode::Ask);
     }
 }
 

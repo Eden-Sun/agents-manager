@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 export interface HostBaselineApplyProps {
   host: string
   baseline: HostBaseline | null
-  syncMode?: 'off' | 'ask'
+  syncMode?: 'off' | 'ask' | 'auto'
 }
 
 function errorText(t: ReturnType<typeof useT>, code: string): string {
@@ -67,6 +67,9 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<HostBaselineApplyResult | null>(null)
 
+  if (syncMode === 'auto') {
+    return <span className="host-baseline-auto-status">{t('自動補齊由自動模式負責，手動補齊停用')}</span>
+  }
   if (syncMode !== 'ask') {
     return null
   }

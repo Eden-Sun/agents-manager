@@ -163,7 +163,7 @@ function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
   return <span className={`host-baseline-fix ${fix}`}>{fix === 'auto' ? t('（可自動補）') : t('（需手動）')}</span>
 }
 
-export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: 'off' | 'ask' }) {
+export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: 'off' | 'ask' | 'auto' }) {
   const t = useT()
   useUserTimeZone()
   const v = hostBaselineView(baseline)

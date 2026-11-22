@@ -656,10 +656,10 @@ export function sortByTime<T extends { created_at: string; id: string; seq?: num
   return [...items].sort(byTime)
 }
 
-export function toHostBaselineSync(raw: unknown): Record<string, 'off' | 'ask'> {
-  const out: Record<string, 'off' | 'ask'> = {}
+export function toHostBaselineSync(raw: unknown): Record<string, 'off' | 'ask' | 'auto'> {
+  const out: Record<string, 'off' | 'ask' | 'auto'> = {}
   if (!isRec(raw)) return out
-  for (const [host, mode] of Object.entries(raw)) out[host] = mode === 'ask' ? 'ask' : 'off'
+  for (const [host, mode] of Object.entries(raw)) out[host] = mode === 'ask' || mode === 'auto' ? mode : 'off'
   return out
 }
 

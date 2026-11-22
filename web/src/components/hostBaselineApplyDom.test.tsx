@@ -80,17 +80,25 @@ it('沒有 host_baseline_sync 這欄（舊 daemon、bot 視圖）：一律當 of
   assert.equal(document.querySelector('.host-baseline-apply-btn'), null)
 })
 
-it('host_baseline_sync 正規化：只認 "ask"，其他值都是 off', () => {
+it('host_baseline_sync 正規化：ask／auto 保留，其他值都是 off', () => {
   assert.deepEqual(toHostBaselineSync({ local: 'ask', a: 'off', b: 'auto', c: 1, d: null }), {
     local: 'ask',
     a: 'off',
-    b: 'off',
+    b: 'auto',
     c: 'off',
     d: 'off',
   })
   assert.deepEqual(toHostBaselineSync(['ask']), {})
   assert.deepEqual(toHostBaselineSync(undefined), {})
   return Promise.resolve()
+})
+
+it('sync=auto 且有 fixable 項：有明確狀態、不畫手動補齊鈕', async () => {
+  await mount(<HostBaselineApply host="worker-1" baseline={sampleBaseline} syncMode="auto" />)
+  assert.equal(document.querySelector('.host-baseline-apply-btn'), null)
+  const status = document.querySelector('.host-baseline-auto-status')
+  assert.ok(status)
+  assert.match(status.textContent ?? '', /自動模式/)
 })
 
 it('二次確認：明列主機名、要補的 id、目標檔、「會先備份、只補不蓋」；預設 focus 不在確認鈕，Enter 不直接送出', async () => {

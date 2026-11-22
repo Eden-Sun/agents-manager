@@ -521,7 +521,7 @@ export interface AppState {
   herdr: HerdrVersion
   tools: ToolMap
   baseline: HostBaseline | null
-  host_baseline_sync: Record<string, 'off' | 'ask'>
+  host_baseline_sync: Record<string, 'off' | 'ask' | 'auto'>
   identity_status: IdentityStatusMap
   claude_login_expires_at?: Record<string, number> | null
   hosts: Host[]

@@ -376,7 +376,7 @@ export interface StoreState {
   localTools: ToolMap
   localHerdr: HerdrVersion
   localBaseline: HostBaseline | null
-  hostBaselineSync: Record<string, 'off' | 'ask'>
+  hostBaselineSync: Record<string, 'off' | 'ask' | 'auto'>
   localIdentityStatus: IdentityStatusMap
   localClaudeLoginExpiresAt: Record<string, number>
   dismissedLoginExpiry: Record<string, string>
