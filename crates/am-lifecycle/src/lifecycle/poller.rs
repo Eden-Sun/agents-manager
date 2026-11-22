@@ -1591,6 +1591,56 @@ async fn codex_compaction_pending(app: &impl LcHost, bot: &db::Bot, run: &db::Ru
 ///
 /// `expected_turn`：呼叫端排定（或輪詢）當下看的那一回合，`None`＝排定當下沒有回合在飛。到點時在飛的不是它（排定之後才開的新回合）就不收
 /// ——畫面上最後一段回覆屬於上一回合，留給新回合自己的 hook／下一次 edge／poller（issue #216）。
+pub const AGY_HOOK_QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+pub async fn agy_hook_recent(db: &sqlx::SqlitePool, bot_id: &str) -> bool {
+    let last: Option<String> = sqlx::query_scalar("SELECT MAX(received_at) FROM hook_events WHERE bot_id = ? AND provider = 'agy'")
+        .bind(bot_id)
+        .fetch_one(db)
+        .await
+        .ok()
+        .flatten();
+    last.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).is_some_and(|t| {
+        chrono::Utc::now().signed_duration_since(t).to_std().map_or(true, |age| age < AGY_HOOK_QUIET)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgyNative {
+    Reply(String),
+    Ongoing,
+    Unknown,
+}
+
+
+pub fn agy_native_from_transcript(jsonl: &str, sent: &[String], now: chrono::DateTime<chrono::Utc>) -> AgyNative {
+    let turns = crate::agy_support::parse_turns(jsonl);
+    let Some(last) = turns.last() else { return AgyNative::Unknown };
+    let prompt = squash(&last.prompt);
+    let ours = sent.is_empty()
+        || sent.iter().map(|s| squash(s)).any(|s| !s.is_empty() && (prompt == s || prompt.contains(&s) || s.contains(&prompt)));
+    if !ours {
+        return AgyNative::Unknown;
+    }
+    if last.closed {
+        return match &last.reply {
+            Some(reply) => AgyNative::Reply(reply.clone()),
+            None => AgyNative::Unknown,
+        };
+    }
+    let fresh = crate::agy_support::last_record_at(jsonl)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+        .is_some_and(|t| now.signed_duration_since(t).to_std().map_or(true, |age| age < AGY_HOOK_QUIET));
+    if fresh { AgyNative::Ongoing } else { AgyNative::Unknown }
+}
+
+async fn agy_transcript_outcome(app: &impl LcHost, run: &db::Run, turn: &db::Turn) -> AgyNative {
+    let Ok(host) = db::bot_host(app.db(), &run.bot_id).await else { return AgyNative::Unknown };
+    let Ok(Some((_, text))) = super::agy_session::load(app, run, &host).await else { return AgyNative::Unknown };
+    let Ok(sent) = turn_echo_texts(app, &turn.id).await else { return AgyNative::Unknown };
+    agy_native_from_transcript(&text, &sent, chrono::Utc::now())
+}
+
 pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> {
     let Some(run) = db::run(app.db(), run_id).await? else { return Ok(false) };
     let Some(turn) = db::in_flight_turn(app.db(), run_id).await? else { return Ok(false) };
@@ -1625,6 +1675,24 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         tracing::debug!(run_id, "agy is not fully idle; not completing the turn from the pane");
         return Ok(false);
     }
+    let agy_reply = if bot.kind == "agy" {
+        match agy_transcript_outcome(app, &run, &turn).await {
+            AgyNative::Reply(reply) => Some(reply),
+            AgyNative::Ongoing => {
+                tracing::debug!(run_id, "agy transcript shows the turn still working; not completing it from the pane");
+                return Ok(false);
+            }
+            AgyNative::Unknown => {
+                if agy_hook_recent(app.db(), &bot.id).await {
+                    tracing::debug!(run_id, "agy hooks were active recently; not completing the turn from the pane");
+                    return Ok(false);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
     if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
         tracing::debug!(run_id, "pane is waiting at a numbered menu; not completing the turn from it");
         return Ok(false);
@@ -1698,6 +1766,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None => (None, None, None),
     };
 
+    let codex_rollout_reply = codex_rollout_reply.or(agy_reply);
     let reply = if codex_hit.is_some() || codex_rollout_error.is_some() || compact_turn {
         None
     } else if let Some(r) = codex_rollout_reply.clone() {

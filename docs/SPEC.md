@@ -4258,6 +4258,12 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 | 其他 `Stop` | TurnComplete：`assistant`＝`lastAssistantMessage`、`user`＝`lastUserMessage`；**不給 `turn_id`**（`executionNum` 跨回合是否唯一沒驗過，當去重鑰匙會吃掉之後的回合） |
 | 其他 | Ignore。`terminationReason` 的值域不可假設（官方 `model_stop`／`max_steps_exceeded`／`error`，實測 `ERROR`，第三方 `NO_TOOL_CALL`），只認 `ERROR` |
 
+**agy 的終端備援（`try_fallback`）**：agy 的輸入列在思考與工具之間一直可見、herdr 也會短暫判 idle，所以備援先查證據，不能只看畫面：
+1. 先讀 run 的 transcript（`agy_session::load`＋`parse_turns`）：最後一問對得上這個回合的 prompt 時，已結束（最後一筆是給使用者的 `PLANNER_RESPONSE`）就用它的文字收尾，訊息 `source=transcript`、不標 incomplete、回合 `completed`；還沒結束且最後一筆紀錄在 180 秒內＝還在工作，不收。
+2. 讀不到或對不上時，`hook_events` 裡這顆 bot 的 agy hook 最近 180 秒內有動靜就不收（`AGY_HOOK_QUIET`，資料在 DB，重啟後仍有效）。
+3. 都沒有證據（≥ 3 分鐘無 hook、transcript 也沒更新）才退回終端擷取（`completed_fallback`、`terminal_fallback`、incomplete）。
+daemon 重啟後 re-arm 的 poller 走同一條路，不需要記憶體裡的 hook 時間。
+
 ### 12a.4 畫面判讀：會停下來等人的畫面一律 blocked、不送字、不按鍵
 `agy_screen::blocking_dialog`（只看畫面最底 24 行）：登入（`Select login method:`／未登入歡迎頁）、色彩頁（`Choose your color scheme:`）、條款頁（`Terms of Service & Data Use`——**預設已勾選「允許 Google 收集並使用我的 Interactions 資料」，一個 Enter 就切換同意與否**）、信任框（`Do you trust the contents of this project?` ＋選項）、工具權限框（`Requesting permission for:` … `Run this command?` 加 `> 1. Yes, run command` 等四個選項——**真機 1.2.16 實測**；`Allow access to this URL?`／`Allow calling this tool?` 取自 CHANGELOG，未見過）。真機上 herdr 自己也把這個框判成 `blocked`；daemon 的補標只負責 herdr 判 idle 的那些（登入框等）。認法：標題整行吻合（前面最多一個圖示）；而且**輸入列（單獨一個 `>`）在框標題的下面才算框已經關了**——agy 在回覆裡抄這些字時畫面上只剩輸入列；標題上面的單獨 `>` 是回覆的引文，不擋框（#1530）。
 - 送 prompt 前（`prompt::pane_ready_for_prompt`、`agent.prompt` 路徑）：登入→409 `needs_login`，其餘→409 `dialog_open`，各插一則 system 說明；一個字都不送。

@@ -2,6 +2,8 @@
 
 #[path = "poller/abandon_tests.rs"]
 mod abandon_tests;
+#[path = "poller/agy_activity_tests.rs"]
+mod agy_activity_tests;
 #[path = "poller/agy_not_idle_tests.rs"]
 mod agy_not_idle_tests;
 #[path = "poller/codex_0155_fallback_tests.rs"]

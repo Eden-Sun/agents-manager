@@ -237,6 +237,13 @@ pub fn last_input_tokens(jsonl: &str) -> Option<i64> {
     })
 }
 
+pub fn last_record_at(jsonl: &str) -> Option<String> {
+    jsonl.lines().rev().find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        v.get("created_at").and_then(Value::as_str).map(str::to_owned)
+    })
+}
+
 /// 最後一筆 assistant 回覆的 `created_at`（UTC ISO）：agy 的「最後一次 API 活動」（`cache_clock` 用它算快取倒數）。
 pub fn last_assistant_at(jsonl: &str) -> Option<String> {
     jsonl.lines().rev().find_map(|l| {
