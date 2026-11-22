@@ -23,6 +23,12 @@ async fn backups(app: &Arc<App>, host: &str, principal: RequestPrincipal) -> (St
     body_of(baseline_backups(State(app.clone()), Path(host.to_string()), Extension(principal)).await).await
 }
 
+async fn detect_now(app: &Arc<App>, host: &str) {
+    let fence = app.hosts.fence(host).await.unwrap();
+    let checked_at = app.host_baseline.lock().await.get(host).unwrap().checked_at.clone();
+    crate::host_baseline_auto::after_detect(app.clone(), host.into(), fence, checked_at).await;
+}
+
 fn hooks_report() -> BaselineReport {
     BaselineReport {
         os: Some("Linux".into()),
@@ -274,13 +280,13 @@ async fn auto_writes_once_after_a_detect_and_ask_or_off_never_touch_the_host() {
 
     for mode in ["off", "ask"] {
         set_sync(&e.app, host, mode).await;
-        crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+        detect_now(&e.app, host).await;
         assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), orig, "{mode} must write nothing");
         assert_eq!(backups(), 0, "{mode} must not back anything up");
     }
 
     set_sync(&e.app, host, "auto").await;
-    crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+    detect_now(&e.app, host).await;
     let now = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
     let v: toml::Value = toml::from_str(&now).unwrap();
     assert_eq!(v["features"]["hooks"].as_bool(), Some(true), "{now}");
@@ -290,7 +296,7 @@ async fn auto_writes_once_after_a_detect_and_ask_or_off_never_touch_the_host() {
     }
     assert_eq!(backups(), 1, "one backup before the one write");
 
-    crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+    detect_now(&e.app, host).await;
     assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), now, "a second pass on the same plan does nothing");
     assert_eq!(backups(), 1, "no re-entry on the same plan");
 }
