@@ -166,13 +166,21 @@ pub(crate) async fn follow_scan(app: &Arc<App>, id: &str, from: &str, to: &str, 
     let mut own = Vec::new();
     for (tid, status, at, origin, crid, class, users) in rows {
         if db::same_instant(Some(&at), Some(&created)) { continue }
-        if origin == "external" && crid.is_none() && class == "user" && users == 0 { own.push(OwnTurn { id: tid, status, created_at: at }) } else { ended = true; break }
+        let self_continued = origin == "external" && crid.is_none() && class == "user" && users == 0;
+        if self_continued || relay_result_of_own_child(app, &to, crid.as_deref(), &created).await? { own.push(OwnTurn { id: tid, status, created_at: at }) } else { ended = true; break }
     }
     let conv = db::conversation_id(&app.db, from).await?;
     let notices: Vec<(String,String)> = sqlx::query_as(&format!("SELECT client_request_id,created_at FROM turns WHERE conversation_id=? AND client_request_id LIKE ? ORDER BY {}", db::ts_sql("created_at")))
         .bind(&conv).bind(format!("relay-result:{id}:f:%")).fetch_all(&app.db).await?;
     let through = notices.last().and_then(|(k, _)| k.rsplit(':').next().map(str::to_string));
     Ok(FollowScan { ended, own, noticed_through: through, notices: notices.len() as i64, last_notice_at: notices.last().map(|(_, a)| a.clone()) })
+}
+
+/// 目標自己在被追蹤的回合之後派出去的子請求，其結果通知觸發的回合也算自續（不是目標開始新工作）。
+async fn relay_result_of_own_child(app: &Arc<App>, to: &str, crid: Option<&str>, created: &str) -> anyhow::Result<bool> {
+    let Some(child) = crid.and_then(|c| c.strip_prefix("relay-result:")).and_then(|r| r.split(':').next()) else { return Ok(false) };
+    let child_at: Option<String> = sqlx::query_scalar("SELECT created_at FROM relay_requests WHERE id=? AND from_bot_id=?").bind(child).bind(to).fetch_optional(&app.db).await?;
+    Ok(child_at.is_some_and(|a| !db::cmp_ts(&a, created).is_lt()))
 }
 
 fn secs_since(ts: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
@@ -797,6 +805,70 @@ mod tests {
         assert_eq!(notices().await.len(), 2);
         let v = followup_view(&env.app, &id, &a.id, &b.id, Some(&t0), Some(&notified_at), &cfg).await.unwrap();
         assert_eq!(v["state"], "ended");
+    }
+
+    /// 重現：目標收到自己派出去的子請求結果（relay-result）後，觸發的回合寫出的最終報告要以「後續」送回來源。
+    #[tokio::test]
+    async fn followup_counts_result_turns_of_own_child_requests() {
+        let env = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "child-a").await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "child-b").await;
+        let c = crate::testing::claude_bot(&env.app, &env.project_id, "child-c").await;
+        let arun = crate::testing::fake_run(&env.app, &a.id).await;
+        let brun = crate::testing::fake_run(&env.app, &b.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&arun).execute(&env.app.db).await.unwrap();
+        let ac = db::conversation_id(&env.app.db, &a.id).await.unwrap();
+        let bc = db::conversation_id(&env.app.db, &b.id).await.unwrap();
+        let t0 = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at,completed_at) VALUES(?,?,?,'web','completed','ok',?,?)")
+            .bind(&t0).bind(&bc).bind(&brun).bind(at(-5000)).bind(at(-4000)).execute(&env.app.db).await.unwrap();
+        let id = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at,notified_at) VALUES(?,?,?,'key','text','[]',?,'notified',?,?)")
+            .bind(&id).bind(&a.id).bind(&b.id).bind(&t0).bind(at(-5000)).bind(at(-3000)).execute(&env.app.db).await.unwrap();
+        let child = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,'child','do it','[]','answered',?)")
+            .bind(&child).bind(&b.id).bind(&c.id).bind(at(-4500)).execute(&env.app.db).await.unwrap();
+        let result = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at,completed_at) VALUES(?,?,'web','completed','ok',?,'daemon',?,?)")
+            .bind(&result).bind(&bc).bind(format!("relay-result:{child}:r0")).bind(at(-1000)).bind(at(-900)).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'user','子請求的結果通知','web',?)")
+            .bind(db::ulid()).bind(&bc).bind(&result).bind(at(-1000)).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'assistant','最終報告：PR 已開，驗收通過','hook',?)")
+            .bind(db::ulid()).bind(&bc).bind(&result).bind(at(-900)).execute(&env.app.db).await.unwrap();
+        let cfg = FollowCfg { window_sec: 7200, merge_sec: 0 };
+        followup(&env.app, &id, &cfg).await.unwrap();
+        let n: Vec<(String, String)> = sqlx::query_as("SELECT t.id,m.content FROM turns t JOIN messages m ON m.turn_id=t.id AND m.role='user' WHERE t.conversation_id=? AND t.client_request_id LIKE ? ORDER BY t.created_at").bind(&ac).bind(format!("relay-result:{id}:f:%")).fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(n.len(), 1, "目標的最終報告要送回來源");
+        assert!(n[0].1.contains("後續，第 2 則") && n[0].1.contains("最終報告：PR 已開，驗收通過"), "{}", n[0].1);
+    }
+
+    /// 無關的子請求結果（目標不是它的發送者）仍結束追蹤，不再送後續。
+    #[tokio::test]
+    async fn followup_ends_at_result_of_a_child_request_it_did_not_send() {
+        let env = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "unrelated-a").await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "unrelated-b").await;
+        let d = crate::testing::claude_bot(&env.app, &env.project_id, "unrelated-d").await;
+        let c = crate::testing::claude_bot(&env.app, &env.project_id, "unrelated-c").await;
+        let brun = crate::testing::fake_run(&env.app, &b.id).await;
+        let bc = db::conversation_id(&env.app.db, &b.id).await.unwrap();
+        let t0 = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at,completed_at) VALUES(?,?,?,'web','completed','ok',?,?)")
+            .bind(&t0).bind(&bc).bind(&brun).bind(at(-5000)).bind(at(-4000)).execute(&env.app.db).await.unwrap();
+        let id = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at,notified_at) VALUES(?,?,?,'key','text','[]',?,'notified',?,?)")
+            .bind(&id).bind(&a.id).bind(&b.id).bind(&t0).bind(at(-5000)).bind(at(-3000)).execute(&env.app.db).await.unwrap();
+        let foreign = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,'foreign','do it','[]','answered',?)")
+            .bind(&foreign).bind(&d.id).bind(&c.id).bind(at(-4500)).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at,completed_at) VALUES(?,?,'web','completed','ok',?,'daemon',?,?)")
+            .bind(db::ulid()).bind(&bc).bind(format!("relay-result:{foreign}:r0")).bind(at(-1000)).bind(at(-900)).execute(&env.app.db).await.unwrap();
+        let cfg = FollowCfg { window_sec: 7200, merge_sec: 0 };
+        followup(&env.app, &id, &cfg).await.unwrap();
+        let v = followup_view(&env.app, &id, &a.id, &b.id, Some(&t0), Some(&at(-3000)), &cfg).await.unwrap();
+        assert_eq!(v["state"], "ended");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id LIKE ?").bind(&a.id).bind(format!("relay-result:{id}:f:%")).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
