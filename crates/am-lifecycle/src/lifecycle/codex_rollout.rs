@@ -4,7 +4,7 @@
 //! 終端備援與 hookless 捕獲可優先自 rollout 提取結構化回覆，避免存成終端整面快照。
 
 #[path = "codex_rollout_turn.rs"]
-pub(crate) mod turn_boundary;
+mod turn_boundary;
 
 use serde_json::Value;
 pub(super) use turn_boundary::NativeOutcome;
