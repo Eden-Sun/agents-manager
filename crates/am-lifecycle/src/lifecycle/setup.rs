@@ -1016,6 +1016,8 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
         "remoteControlAtStartup": wants_remote,
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            "Notification": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "Stop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "PreCompact": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
@@ -3172,6 +3174,15 @@ mod pane_env_tests {
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod claude_settings_tests {
     use super::*;
+
+    #[test]
+    fn observation_hooks_use_the_same_dispatcher() {
+        let settings = claude_settings("hook", "sl", false, true, "Asia/Taipei");
+        for event in ["UserPromptSubmit", "Notification"] {
+            assert_eq!(settings["hooks"][event][0]["hooks"][0]["command"], "hook");
+        }
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
+    }
 
     /// 2026-09-14 review：協調者的 rc off 只靠 `args=[]`，但帳號的全域設定可以把它打開。
     /// 現在每顆 bot 的設定檔都明講，且只有自己 argv 要求過才是 true。

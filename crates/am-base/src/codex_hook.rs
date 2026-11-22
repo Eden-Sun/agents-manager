@@ -4,6 +4,127 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::sync::Arc;
 pub const CODEX_HOOK_SH: &str = "codex-hook.sh";
+const OBSERVE_EVENTS: [(&str, &str); 2] = [("SessionStart", "session_start"), ("UserPromptSubmit", "user_prompt_submit")];
+
+fn observation_merge(existing: &str, command: &str) -> Result<(String, Vec<usize>)> {
+    let mut doc: serde_json::Value = if existing.trim().is_empty() { serde_json::json!({}) } else { serde_json::from_str(existing)? };
+    let root = doc.as_object_mut().ok_or_else(|| anyhow!("hooks.json root must be an object"))?;
+    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or_else(|| anyhow!("hooks must be an object"))?;
+    let expected = canonical_stop_group(command);
+    let mut positions = Vec::new();
+    for (event, _) in OBSERVE_EVENTS {
+        let groups = hooks.entry(event).or_insert_with(|| serde_json::json!([])).as_array_mut().ok_or_else(|| anyhow!("hooks.{event} must be an array"))?;
+        let matches: Vec<usize> = groups.iter().enumerate().filter_map(|(i, group)| {
+            group.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(|v| v.as_str()) == Some(command))).then_some(i)
+        }).collect();
+        let index = match matches.as_slice() {
+            [] => { groups.push(expected.clone()); groups.len() - 1 }
+            [i] if groups[*i] == expected => *i,
+            _ => bail!("ambiguous or modified {event} handler"),
+        };
+        positions.push(index);
+    }
+    Ok((serde_json::to_string_pretty(&doc)?, positions))
+}
+
+fn observation_hash(command: &str, event: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let value = serde_json::json!({"event_name": event, "hooks": [{"async": false, "command": command, "timeout": 5, "type": "command"}]});
+    let digest = Sha256::digest(serde_json::to_vec(&value).unwrap_or_default());
+    format!("sha256:{}", digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+fn observation_trust(existing: &str, hooks_path: &str, command: &str, positions: &[usize], force: bool) -> Result<Option<String>> {
+    let mut result = existing.to_string();
+    for ((_, event), index) in OBSERVE_EVENTS.iter().zip(positions) {
+        let key = format!("{hooks_path}:{event}:{index}:0");
+        if !force && recorded_trusted_hash(&result, &key).is_some_and(|hash| hash != observation_hash(command, event)) { bail!("{event} trust differs"); }
+        if let Some(updated) = trust_edit(&result, &key, &observation_hash(command, event))? { result = updated; }
+    }
+    Ok((result != existing).then_some(result))
+}
+
+fn observation_remove(existing: &str, command: &str) -> Result<(Option<String>, Vec<(&'static str, usize)>)> {
+    if existing.trim().is_empty() { return Ok((None, Vec::new())); }
+    let mut doc: serde_json::Value = serde_json::from_str(existing)?;
+    let Some(hooks) = doc.get_mut("hooks").and_then(|v| v.as_object_mut()) else { return Ok((None, Vec::new())) };
+    let mut found = Vec::new();
+    for (name, event) in OBSERVE_EVENTS {
+        let Some(value) = hooks.get_mut(name) else { continue };
+        let groups = value.as_array_mut().ok_or_else(|| anyhow!("hooks.{name} must be an array"))?;
+        let matches: Vec<usize> = groups.iter().enumerate().filter_map(|(i, group)| group.get("hooks").and_then(|v| v.as_array()).is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(|v| v.as_str()) == Some(command))).then_some(i)).collect();
+        match matches.as_slice() {
+            [] => {},
+            [i] if groups[*i] == canonical_stop_group(command) => {
+                found.push((event, *i));
+                if *i + 1 == groups.len() { groups.remove(*i); } else { groups[*i]["hooks"] = serde_json::json!([]); }
+            }
+            _ => bail!("ambiguous or modified {name} handler"),
+        }
+    }
+    let output = if found.is_empty() { None } else { Some(serde_json::to_string_pretty(&doc)?) };
+    Ok((output, found))
+}
+
+fn observation_remove_trust(existing: &str, hooks_path: &str, positions: &[(&str, usize)]) -> Result<Option<String>> {
+    let mut result = existing.to_string();
+    for (event, index) in positions {
+        if let Some(updated) = trust_remove_edit(&result, &format!("{hooks_path}:{event}:{index}:0"))? { result = updated; }
+    }
+    Ok((result != existing).then_some(result))
+}
+
+fn observation_existing_trust(hooks_text: &str, config_text: &str, hooks_path: &str, command: &str, positions: &[usize]) -> Result<()> {
+    let doc: serde_json::Value = serde_json::from_str(hooks_text)?;
+    for (((name, event), index), expected) in OBSERVE_EVENTS.iter().zip(positions).zip(std::iter::repeat_with(|| canonical_stop_group(command))) {
+        if doc.get("hooks").and_then(|v| v.get(*name)).and_then(|v| v.as_array()).and_then(|a| a.get(*index)) == Some(&expected) {
+            let key = format!("{hooks_path}:{event}:{index}:0");
+            if recorded_trusted_hash(config_text, &key).as_deref() != Some(observation_hash(command, event).as_str()) { bail!("existing {event} hook is not trusted"); }
+        }
+    }
+    Ok(())
+}
+
+fn install_observations_local(home: &Path, command: &str, force: bool) -> Result<()> {
+    let hooks = home.join("hooks.json");
+    let config = home.join("config.toml");
+    let old = std::fs::read_to_string(&hooks)?;
+    let (merged, positions) = observation_merge(&old, command)?;
+    let old_config = std::fs::read_to_string(&config).unwrap_or_default();
+    if !force { observation_existing_trust(&old, &old_config, &hooks.to_string_lossy(), command, &positions)?; }
+    let trust_changed = observation_trust(&old_config, &hooks.to_string_lossy(), command, &positions, force)?.is_some();
+    if serde_json::from_str::<serde_json::Value>(&old)? == serde_json::from_str::<serde_json::Value>(&merged)? && !trust_changed { return Ok(()); }
+    if hooks.exists() { backup_observation(&hooks)?; }
+    if config.exists() { backup_observation(&config)?; }
+    crate::trust::update_file(&config, |cur| observation_trust(cur, &hooks.to_string_lossy(), command, &positions, force))?;
+    crate::trust::update_file(&hooks, |cur| {
+        let (new, current) = observation_merge(cur, command)?;
+        if current != positions { bail!("hook positions changed during install"); }
+        Ok((cur != new).then_some(new))
+    })?;
+    Ok(())
+}
+
+async fn install_observations_remote(conn: &HostConn, home: &str, command: &str, force: bool) -> Result<()> {
+    let hooks = format!("{}/hooks.json", home.trim_end_matches('/'));
+    let config = format!("{}/config.toml", home.trim_end_matches('/'));
+    let old = crate::trust::read_remote_text(conn, &hooks).await?;
+    let (merged, positions) = observation_merge(&old, command)?;
+    let old_config = crate::trust::read_remote_text(conn, &config).await?;
+    if !force { observation_existing_trust(&old, &old_config, &hooks, command, &positions)?; }
+    let trust_changed = observation_trust(&old_config, &hooks, command, &positions, force)?.is_some();
+    if serde_json::from_str::<serde_json::Value>(&old)? == serde_json::from_str::<serde_json::Value>(&merged)? && !trust_changed { return Ok(()); }
+    let q = sh_quote(&hooks);
+    let qcfg = sh_quote(&config);
+    conn.ssh_exec(&format!("set -e\ncp -p {q} {q}.am-observe-bak-$(date +%s)\nif [ -f {qcfg} ]; then cp -p {qcfg} {qcfg}.am-observe-bak-$(date +%s); fi\n")).await?;
+    crate::trust::update_remote_file(conn, &config, |cur| observation_trust(cur, &hooks, command, &positions, force)).await?;
+    crate::trust::update_remote_file(conn, &hooks, |cur| {
+        let (new, current) = observation_merge(cur, command)?;
+        if current != positions { bail!("hook positions changed during install"); }
+        Ok((cur != new).then_some(new))
+    }).await?;
+    Ok(())
+}
 
 /// Script body for the local `codex-hook.sh` dispatcher.
 ///
@@ -363,11 +484,39 @@ fn backup_local(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn backup_observation(path: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let backup = path.with_file_name(format!("{name}.am-observe-bak-{stamp}"));
+    std::fs::copy(path, &backup)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// 移除 AG Man 自己的 Stop handler（只認 canonical 那一組）。先拿掉 handler，再拿掉它的信任項（剩下的信任無害）。
 /// 兩個檔案各自寫前備份；寫後讀回，我們的 handler 還在就報錯。回 `false` 表示沒有我們的項目可移。
 pub fn remove_local(codex_home: &Path, command: &str) -> Result<bool> {
     let hooks = codex_home.join("hooks.json");
     let Ok(existing) = std::fs::read_to_string(&hooks) else { return Ok(false) };
+    let (observed, positions) = observation_remove(&existing, command)?;
+    if observed.is_some() {
+        backup_observation(&hooks)?;
+        crate::trust::update_file(&hooks, |cur| {
+            let (updated, actual) = observation_remove(cur, command)?;
+            if actual != positions { bail!("hook positions changed during removal"); }
+            Ok(updated)
+        })?;
+        let config = codex_home.join("config.toml");
+        if config.exists() {
+            backup_observation(&config)?;
+            crate::trust::update_file(&config, |cur| observation_remove_trust(cur, &hooks.to_string_lossy(), &positions))?;
+        }
+    }
+    let existing = std::fs::read_to_string(&hooks)?;
     let Some(idx) = canonical_group_present(&existing, command)? else { return Ok(false) };
     let key = stop_hook_state_key(&hooks.to_string_lossy(), idx);
     backup_local(&hooks)?;
@@ -392,6 +541,20 @@ pub fn remove_local(codex_home: &Path, command: &str) -> Result<bool> {
 pub async fn remove_remote(conn: &HostConn, codex_home: &str, command: &str) -> Result<bool> {
     let home = codex_home.trim_end_matches('/');
     let hooks = format!("{home}/hooks.json");
+    let existing = crate::trust::read_remote_text(conn, &hooks).await?;
+    let (observed, positions) = observation_remove(&existing, command)?;
+    if observed.is_some() {
+        let q = sh_quote(&hooks);
+        let cfg = format!("{home}/config.toml");
+        let qcfg = sh_quote(&cfg);
+        conn.ssh_exec(&format!("set -e\ncp -p {q} {q}.am-observe-bak-$(date +%s)\nif [ -f {qcfg} ]; then cp -p {qcfg} {qcfg}.am-observe-bak-$(date +%s); fi\n")).await?;
+        crate::trust::update_remote_file(conn, &hooks, |cur| {
+            let (updated, actual) = observation_remove(cur, command)?;
+            if actual != positions { bail!("hook positions changed during removal"); }
+            Ok(updated)
+        }).await?;
+        crate::trust::update_remote_file(conn, &format!("{home}/config.toml"), |cur| observation_remove_trust(cur, &hooks, &positions)).await?;
+    }
     let existing = crate::trust::read_remote_text(conn, &hooks).await?;
     let Some(idx) = canonical_group_present(&existing, command)? else { return Ok(false) };
     let key = stop_hook_state_key(&hooks, idx);
@@ -424,7 +587,7 @@ pub async fn remove_remote(conn: &HostConn, codex_home: &str, command: &str) -> 
 /// 未信任／雜湊不符的殘留就移除；`keep_trusted=false`（`stop_hook=false`）：一律移除我們的項目。
 pub fn reconcile_local(codex_home: &Path, command: &str, keep_trusted: bool) -> Result<bool> {
     match local_stop_hook_status(codex_home, command)? {
-        StopHookStatus::NotInstalled => Ok(false),
+        StopHookStatus::NotInstalled => { remove_local(codex_home, command)?; Ok(false) },
         StopHookStatus::Trusted if keep_trusted => Ok(true),
         _ => {
             remove_local(codex_home, command)?;
@@ -436,7 +599,7 @@ pub fn reconcile_local(codex_home: &Path, command: &str, keep_trusted: bool) -> 
 /// 遠端版的 [`reconcile_local`]。
 pub async fn reconcile_remote(conn: &HostConn, codex_home: &str, command: &str, keep_trusted: bool) -> Result<bool> {
     match remote_stop_hook_status(conn, codex_home, command).await? {
-        StopHookStatus::NotInstalled => Ok(false),
+        StopHookStatus::NotInstalled => { remove_remote(conn, codex_home, command).await?; Ok(false) },
         StopHookStatus::Trusted if keep_trusted => Ok(true),
         _ => {
             remove_remote(conn, codex_home, command).await?;
@@ -452,7 +615,9 @@ pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>)
     let dispatcher = data_dir.join(CODEX_HOOK_SH);
     write_local_dispatcher(&dispatcher, &local_dispatch_sh(data_dir, instance))?;
     let command = sh_quote(&dispatcher.to_string_lossy());
-    Ok(local_stop_hook_status(codex_home, &command)? == StopHookStatus::Trusted)
+    let trusted = local_stop_hook_status(codex_home, &command)? == StopHookStatus::Trusted;
+    if trusted { install_observations_local(codex_home, &command, false)?; }
+    Ok(trusted)
 }
 
 /// 使用者確認後：註冊 AG Man 自己的 Stop group，並信任**這一項**的精確 hash。
@@ -490,6 +655,7 @@ pub fn install_and_trust_local(codex_home: &Path, data_dir: &Path, instance: Opt
     if local_stop_hook_status(codex_home, &command)? != StopHookStatus::Trusted {
         bail!("Codex Stop hook is not trusted after the write (check config.toml for a conflicting entry)");
     }
+    install_observations_local(codex_home, &command, true)?;
     Ok(())
 }
 
@@ -510,7 +676,9 @@ pub fn install_remote<'a>(
             bail!("remote Codex dispatcher installation failed");
         }
         let command = sh_quote(&dispatcher);
-        Ok(remote_stop_hook_status(conn, codex_home, &command).await? == StopHookStatus::Trusted)
+        let trusted = remote_stop_hook_status(conn, codex_home, &command).await? == StopHookStatus::Trusted;
+        if trusted { install_observations_remote(conn, codex_home, &command, false).await?; }
+        Ok(trusted)
     })
 }
 
@@ -540,12 +708,41 @@ pub async fn install_and_trust_remote(conn: &HostConn, codex_home: &str, remote_
     if remote_stop_hook_status(conn, codex_home, &command).await? != StopHookStatus::Trusted {
         bail!("Codex Stop hook is not trusted after the write (check config.toml for a conflicting entry)");
     }
+    install_observations_remote(conn, codex_home, &command, true).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observation_events_preserve_user_hooks_and_remove_only_ours() {
+        let input = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"user"}]}],"UserPromptSubmit":[]}}).to_string();
+        let (added, indices) = observation_merge(&input, "ours").unwrap();
+        assert_eq!(indices, vec![1, 0]);
+        let value: serde_json::Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(value["hooks"]["SessionStart"][0]["hooks"][0]["command"], "user");
+        assert_eq!(value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "ours");
+        let config = observation_trust("", "/x/hooks.json", "ours", &indices, false).unwrap().unwrap();
+        assert!(config.contains("/x/hooks.json:session_start:1:0"));
+        assert!(config.contains("/x/hooks.json:user_prompt_submit:0:0"));
+        let (removed, positions) = observation_remove(&added, "ours").unwrap();
+        let after: serde_json::Value = serde_json::from_str(&removed.unwrap()).unwrap();
+        assert_eq!(after["hooks"]["SessionStart"][0]["hooks"][0]["command"], "user");
+        assert!(after["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
+        let cleared = observation_remove_trust(&config, "/x/hooks.json", &positions).unwrap().unwrap();
+        assert!(!cleared.contains("/x/hooks.json:session_start:1:0"));
+    }
+    #[test]
+    fn observation_mismatches_do_not_overwrite_trust_or_unrelated_groups() {
+        let modified = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"ours","timeout":6}]}]}}).to_string();
+        assert!(observation_merge(&modified, "ours").is_err());
+        assert!(observation_remove(&modified, "ours").is_err());
+        let (hooks, positions) = observation_merge("{}", "ours").unwrap();
+        assert!(observation_existing_trust(&hooks, "", "/x/hooks.json", "ours", &positions).is_err());
+        let stale = "[hooks.state.\"/x/hooks.json:session_start:0:0\"]\ntrusted_hash = \"sha256:stale\"\n";
+        assert!(observation_trust(stale, "/x/hooks.json", "ours", &positions, false).is_err());
+    }
     #[test]
     fn test_merge_hooks_json_empty_and_append_nested_shape() {
         let dispatcher = sh_quote("/opt/agm/codex hook.sh");
@@ -826,8 +1023,17 @@ mod tests {
         let merged: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
         assert_eq!(merged["hooks"]["Stop"][0], initial["hooks"]["Stop"][0], "the user's own Stop group is untouched");
         assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert_eq!(merged["hooks"][event].as_array().unwrap().len(), 1);
+            assert_eq!(merged["hooks"][event][0]["hooks"][0]["command"], sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy()));
+        }
         let after = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(after.starts_with(config), "everything the user wrote stays byte-identical");
+        reconcile_local(&home, &sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy()), false).unwrap();
+        let removed: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        assert!(removed["hooks"]["SessionStart"].as_array().unwrap().is_empty());
+        assert!(removed["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
+        assert_eq!(removed["hooks"]["Stop"][0], initial["hooks"]["Stop"][0]);
     }
 
     #[test]

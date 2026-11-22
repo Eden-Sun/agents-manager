@@ -225,7 +225,7 @@ async fn hook_active_within(app: &impl StuckTurnContext, bot_id: &str, threshold
     let since = db::iso_in(-(threshold.as_secs() as i64));
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM hook_events WHERE bot_id = ? AND processed_at >= ?
-            AND COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') NOT IN ('SessionStart', 'StatusLine'))",
+            AND COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') NOT IN ('SessionStart', 'StatusLine', 'UserPromptSubmit', 'Notification'))",
     )
     .bind(bot_id)
     .bind(&since)
@@ -927,6 +927,19 @@ mod tests {
             let notes = messages(&app, &f.turn_id).await.into_iter().filter(|m| m.0 == "system").count();
             assert_eq!(notes, usize::from(!compacted), "compacted={compacted}");
         }
+    }
+
+    #[tokio::test]
+    async fn observation_hooks_do_not_extend_idle_activity() {
+        let f = stuck("fixture").await;
+        let app = f.env.app.clone();
+        let _ = am_base::hook_inbox::migrate(app.db()).await;
+        for event in ["UserPromptSubmit", "Notification"] {
+            let body = serde_json::json!({"payload": {"hook_event_name": event}});
+            sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at, processed_at) VALUES (?, ?, 'claude', 'http', ?, ?, ?)")
+                .bind(db::ulid()).bind(&f.bot_id).bind(body.to_string()).bind(db::now()).bind(db::now()).execute(app.db()).await.unwrap();
+        }
+        assert!(!hook_active_within(&app, &f.bot_id, Duration::from_secs(300)).await);
     }
 
     /// #1763：run 報 idle 已過門檻，但門檻內還有 PostToolUse 進來（遠端長跑的 Bash）：不收，重新計時；hook 停了之後才照常收。
