@@ -74,10 +74,7 @@ export function useMessageTranslation(
         }
 
         const hasSelection = typeof window !== 'undefined' && Boolean(window.getSelection()?.toString().trim())
-        const listEl = typeof document !== 'undefined' ? (document.querySelector('.msg-list') ?? document.querySelector('[data-list]')) : null
-        const isReading = hasSelection || (listEl ? listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight >= 30 : false)
-
-        if (isReading) {
+        if (hasSelection) {
           setWanted(msg.id, true)
           setTranslation(msg.id, { status: 'done', text: r.translation, show: false, ready: true, cost: r.costUsd, cached: r.cached, model: r.model, lowConfidence: r.lowConfidence, jevProb: r.jevProb })
         } else {

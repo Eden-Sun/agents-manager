@@ -295,7 +295,7 @@ test('自動翻譯完成（選取文字中）：先保留原文、按鈕顯示�
   }
 })
 
-test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕顯示「譯文已就緒」，點了才換', async () => {
+test('自動翻譯完成（向上捲動時仍直接換成譯文）', async () => {
   fakeApi(route())
   const host = document.createElement('div')
   host.className = 'msg-list'
@@ -307,7 +307,7 @@ test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕�
   try {
     await mount(
       <div className="msg-list" style={{ height: 400, overflow: 'auto' }}>
-        <Probe m={msg(EN, { id: 'auto-reading' })} />
+        <Probe m={msg(EN, { id: 'auto-scrolled-up' })} />
       </div>,
     )
     const listEl = document.querySelector('.msg-list') as HTMLElement
@@ -315,13 +315,9 @@ test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕�
     Object.defineProperty(listEl, 'scrollTop', { value: 200, configurable: true })
     Object.defineProperty(listEl, 'clientHeight', { value: 400, configurable: true })
 
-    await until(() => document.querySelector('.msg-translate.ready') !== null, '按鈕標註譯文已就緒')
-    assert.equal(document.querySelector('.msg-translate')?.textContent, '譯文已就緒')
-    assert.equal(document.querySelector('.msg-translation'), null, '閱讀歷史中先保留原文')
-
-    await click(document.querySelector('.msg-translate') as HTMLButtonElement)
-    await until(() => document.querySelector('.msg-translation') !== null, '點擊後顯示譯文')
-    assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
+    await until(() => document.querySelector('.msg-translation') !== null, '向上捲動時自動換成譯文')
+    assert.equal(document.querySelector('.msg-translate.ready'), null, '向上捲動不標註譯文已就緒')
+    assert.ok(document.querySelector('.msg-swap-auto'), '向上捲動完成應帶 msg-swap-auto 自動淡入')
   } finally {
     host.remove()
   }
