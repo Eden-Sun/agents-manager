@@ -1403,6 +1403,8 @@ async fn only_hook_events_after_the_turn_began_from_this_bot_count_as_activity()
     let before = "2000-01-01T00:00:00.000Z";
     hook_event(&f, "h-old", r#"{"hook_event_name":"PostToolUse"}"#, before).await;
     hook_event(&f, "h-start", r#"{"hook_event_name":"SessionStart"}"#, &db::now()).await;
+    hook_event(&f, "h-submit", r#"{"payload":{"hook_event_name":"UserPromptSubmit","prompt":"hello"}}"#, &db::now()).await;
+    hook_event(&f, "h-notice", r#"{"payload":{"hook_event_name":"Notification","notification_type":"permission_prompt"}}"#, &db::now()).await;
     let other = tt::claude_bot(&f.env.app, &f.env.project_id, "someone-else").await;
     sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at) VALUES ('h-other', ?, 'claude', 'http', '{\"hook_event_name\":\"PostToolUse\"}', ?)")
         .bind(&other.id)

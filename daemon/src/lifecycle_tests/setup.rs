@@ -337,10 +337,10 @@ mod hook_cmd_parts_tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["PostToolUse", "PreCompact", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"],
+            vec!["Notification", "PostToolUse", "PreCompact", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "UserPromptSubmit"],
             "{hooks:?}"
         );
-        for name in ["SessionStart", "Stop", "StopFailure", "PreCompact", "SubagentStart", "SubagentStop", "PostToolUse"] {
+        for name in ["SessionStart", "Stop", "StopFailure", "PreCompact", "SubagentStart", "SubagentStop", "PostToolUse", "UserPromptSubmit", "Notification"] {
             let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
         }
@@ -1075,6 +1075,10 @@ mod codex_stop_args_tests {
         assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), reviewed);
         let command = am_base::hosts::sh_quote(&env.app.data_dir.join("codex-hook.sh").to_string_lossy());
         am_base::codex_hook::install_and_trust_local(&home, &env.app.data_dir, env.app.instance().as_deref()).unwrap();
+        let mut old_hooks: Value = serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        old_hooks["hooks"].as_object_mut().unwrap().remove("SessionStart");
+        old_hooks["hooks"].as_object_mut().unwrap().remove("UserPromptSubmit");
+        std::fs::write(&hooks_path, serde_json::to_vec(&old_hooks).unwrap()).unwrap();
         let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", am_base::codex_hook::stop_hook_trust_hash(&command));
         std::fs::write(home.join("config.toml"), &good).unwrap();
         let phase_two = injected_args(&env.app, &bot, &project, &pane_env).await.unwrap();
@@ -1199,12 +1203,20 @@ mod codex_stop_args_tests {
         assert_eq!(backups(&dir, "hooks.json.am-bak-"), 1);
 
         am_base::codex_hook::install_and_trust_remote(&conn, &codex_home, &root, env.app.instance().as_deref()).await.unwrap();
+        let registered: serde_json::Value = serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert_eq!(registered["hooks"][event][0]["hooks"][0]["command"], command);
+        }
         let trusted = std::fs::read(&hooks_path).unwrap();
         assert!(reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, true).await, "trusted: kept");
         assert_eq!(std::fs::read(&hooks_path).unwrap(), trusted);
         assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, false).await);
         let after = std::fs::read_to_string(&hooks_path).unwrap();
         assert!(!after.contains(&command) && after.contains("user-first") && after.contains("user-last"));
+        let removed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert!(removed["hooks"][event].as_array().unwrap().is_empty());
+        }
         let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         assert!(cfg.contains("sha256:user-last") && cfg.starts_with("model = \"x\"\n"), "{cfg:?}");
         assert!(!cfg.contains(&am_base::codex_hook::stop_hook_trust_hash(&command)), "{cfg:?}");

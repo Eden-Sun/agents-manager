@@ -225,7 +225,7 @@ async fn hook_active_within(app: &impl StuckTurnContext, bot_id: &str, threshold
     let since = db::iso_in(-(threshold.as_secs() as i64));
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM hook_events WHERE bot_id = ? AND processed_at >= ?
-            AND COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') NOT IN ('SessionStart', 'StatusLine'))",
+            AND COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') NOT IN ('SessionStart', 'StatusLine', 'UserPromptSubmit', 'Notification'))",
     )
     .bind(bot_id)
     .bind(&since)

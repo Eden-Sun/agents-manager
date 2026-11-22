@@ -1944,7 +1944,7 @@ pub fn is_screen_busy(screen: &str) -> bool {
 /// 有＝agent 收到並在處理。`SessionStart` 不算：自動啟動的 bot 在回合建立之後、prompt 送達之前就會送它，證明不了 prompt 被收下。
 pub async fn has_hook_activity(db: &sqlx::SqlitePool, bot_id: &str, since: &str, turn_id: &str) -> bool {
     let events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hook_events WHERE bot_id = ? AND received_at >= ? AND lower(body_json) NOT LIKE '%sessionstart%'",
+        "SELECT COUNT(*) FROM hook_events WHERE bot_id = ? AND received_at >= ? AND lower(body_json) NOT LIKE '%sessionstart%' AND CASE WHEN json_valid(body_json) THEN COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') ELSE '' END NOT IN ('UserPromptSubmit', 'Notification')",
     )
     .bind(bot_id)
     .bind(since)

@@ -1,5 +1,13 @@
 use super::*;
 
+#[test]
+fn observation_hooks_are_not_turn_or_state_events() {
+    for (provider, event) in [("claude", "UserPromptSubmit"), ("claude", "Notification"), ("codex", "SessionStart"), ("codex", "UserPromptSubmit")] {
+        let payload = json!({"hook_event_name": event, "session_id": "s1", "prompt": "fixture", "notification_type": "permission_prompt"});
+        assert!(matches!(classify(provider, &payload), HookKind::Ignore(_)));
+    }
+}
+
 /// Captured from grok 1.0.13 (appendix F), trimmed.
 const GROK_STOP: &str = r#"{"hookEventName":"stop","sessionId":"01a072c2-9098-7d50-b3d1-f1750320ae28",
   "cwd":"/x","workspaceRoot":"/x","timestamp":"2026-09-05T18:09:13.833011+00:00",

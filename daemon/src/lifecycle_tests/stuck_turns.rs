@@ -365,6 +365,22 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn observation_hooks_do_not_extend_idle_activity() {
+        for event in ["SessionStart", "StatusLine", "UserPromptSubmit", "Notification"] {
+            let f = stuck("fixture").await;
+            let app = f.env.app.clone();
+            let _ = am_base::hook_inbox::migrate(app.db()).await;
+            let body = serde_json::json!({"payload": {"hook_event_name": event}});
+            sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at, processed_at) VALUES (?, ?, 'claude', 'http', ?, ?, ?)")
+                .bind(db::ulid()).bind(&f.bot_id).bind(body.to_string()).bind(db::now()).bind(db::now()).execute(app.db()).await.unwrap();
+            sqlx::query("UPDATE turns SET created_at=? WHERE id=?").bind(db::iso_in(-600)).bind(&f.turn_id).execute(app.db()).await.unwrap();
+            let t0 = Instant::now();
+            observe_at(&f.run_id, "idle", t0);
+            assert_eq!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await, vec![f.turn_id.clone()], "{event}");
+        }
+    }
+
     /// #1763：run 報 idle 已過門檻，但門檻內還有 PostToolUse 進來（遠端長跑的 Bash）：不收，重新計時；hook 停了之後才照常收。
     #[tokio::test]
     async fn recent_hook_activity_keeps_an_idle_reported_turn_open() {
