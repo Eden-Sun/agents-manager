@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+use super::*;
 use super::*;
 use crate::testing as tt;
 
@@ -66,39 +68,7 @@ fn fold_dir() -> std::path::PathBuf {
     dir
 }
 
-/// #912：併進既有的 `.replaying` 是追加，不截斷；尾巴沒換行的半行補上換行再接；`src` 併完才刪。
-#[test]
-fn fold_spool_appends_without_truncating() {
-    let dir = fold_dir();
-    let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
-    std::fs::write(&dst, "OLD1\nOLD2-half").unwrap();
-    std::fs::write(&src, "NEW1\nNEW2\n").unwrap();
-    super::fold_spool(&src, &dst).unwrap();
-    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "OLD1\nOLD2-half\nNEW1\nNEW2\n");
-    assert!(!src.exists(), "併完才刪 src");
 
-    std::fs::write(&src, "NEW3\n").unwrap();
-    super::fold_spool(&src, &dst).unwrap();
-    assert!(std::fs::read_to_string(&dst).unwrap().ends_with("NEW2\nNEW3\n"));
-
-    let fresh = dir.join("fresh.replaying");
-    std::fs::write(&src, "ONLY\n").unwrap();
-    super::fold_spool(&src, &fresh).unwrap();
-    assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "ONLY\n");
-    assert!(!src.exists());
-}
-
-/// #912：`src` 讀不到（這裡是目錄）就回錯，`dst` 一個位元組都不動。
-#[test]
-fn fold_spool_keeps_dst_when_src_is_unreadable() {
-    let dir = fold_dir();
-    let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
-    std::fs::create_dir(&src).unwrap();
-    std::fs::write(&dst, "KEEP-ME\n").unwrap();
-    assert!(super::fold_spool(&src, &dst).is_err());
-    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "KEEP-ME\n");
-    assert!(src.exists());
-}
 
 /// #1068：超過上限的行整行丟掉、不留在記憶體；之後的行照常讀到；剛好到上限的行保留；最後一行沒換行也讀得到。
 #[tokio::test]
@@ -172,62 +142,8 @@ impl Drop for Remote {
     }
 }
 
-/// 遠端同款：claim 的 `cat` 與 `rm` 是兩支各自 fork／exec 的外部指令，中間附加的行不准被刪。
-#[test]
-fn the_remote_claim_script_keeps_a_line_appended_inside_the_window() {
-    let r = Remote::new();
-    let root = crate::startup::REMOTE_ROOT;
-    std::fs::write(r.spool.with_extension("jsonl.replaying"), "OLD\n").unwrap();
-    std::fs::write(&r.spool, "A\n").unwrap();
-    r.arm_append_inside_the_window("LATE\n");
 
-    let out = r.sh(&claim_script("botX", root).unwrap());
-    assert!(out.contains("OLD") && out.contains("A"), "兩則都要讀出來：{out}");
-    r.sh(&ack_script("botX", root).unwrap());
 
-    let left = std::fs::read_to_string(&r.spool).unwrap_or_default();
-    assert!(left.contains("LATE"), "窗口裡附加的那一行要留在 spool 上：{left:?}");
-    let again = r.sh(&claim_script("botX", root).unwrap());
-    assert!(again.contains("LATE"), "下一輪要讀得到它：{again}");
-    assert!(!again.contains("OLD"), "已經 ack 過的不能再出現：{again}");
-}
-
-/// #500：`am_fold` 沒收掉 `.claim`（`.replaying` 寫不進去）時，這一輪不准摘新的 spool——
-/// 直接 `mv` 會把那份唯一的副本蓋掉，而且腳本 exit 0、stdout 有東西，daemon 會照常 ack。
-/// 用「`.replaying` 是目錄」製造寫入失敗：跟權限無關，root 底下跑也一樣失敗。
-#[test]
-fn a_claim_that_could_not_be_folded_is_never_overwritten_by_the_next_spool() {
-    let r = Remote::new();
-    let root = crate::startup::REMOTE_ROOT;
-    let claim = r.spool.with_extension("jsonl.claim");
-    std::fs::write(&claim, "OLD-CLAIM\n").unwrap();
-    std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
-    std::fs::write(&r.spool, "NEW\n").unwrap();
-
-    r.sh(&claim_script("botX", root).unwrap());
-
-    assert_eq!(std::fs::read_to_string(&claim).unwrap(), "OLD-CLAIM\n", "唯一的副本不准被蓋掉");
-    assert_eq!(std::fs::read_to_string(&r.spool).unwrap(), "NEW\n", "新的 spool 留到下一輪");
-}
-
-/// #500 複看：`.claim` 併不進去時，卡住這件事要從遠端自己回報——腳本 exit 0、`n = 0`、
-/// `drain_remote` 兩個 info 都被 `n > 0` 擋著，沒有這行標記就是一行 log 都沒有。
-#[test]
-fn a_claim_that_cannot_be_folded_reports_itself_as_stuck() {
-    let r = Remote::new();
-    let root = crate::startup::REMOTE_ROOT;
-    std::fs::write(r.spool.with_extension("jsonl.claim"), "OLD-CLAIM\n").unwrap();
-    std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
-
-    let out = r.sh(&claim_script("botX", root).unwrap());
-    let d = parse_drain_output(&out);
-    assert_eq!(d.stuck_bytes, Some(10), ".claim 的位元組數要帶回來：{out:?}");
-    assert!(d.lines.is_empty(), "標記不可以被當成 spool 的一行：{:?}", d.lines);
-
-    std::fs::remove_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
-    let out = r.sh(&claim_script("botX", root).unwrap());
-    assert_eq!(parse_drain_output(&out).stuck_bytes, None, "{out:?}");
-}
 
 /// 連續看到才算數：併回去的那一輪要把計數清掉，不然一次卡住會永遠掛在那裡。
 #[tokio::test]
@@ -251,54 +167,31 @@ async fn the_stuck_counter_only_counts_consecutive_rounds() {
     assert_eq!(rounds(app).await, Some(1), "不是接著上次算");
 }
 
-/// #501：`.replaying` 是 claim 腳本自己建的，裡面裝完整 payload——不能交給那台機器的 umask。
-/// 明確用寬鬆的 umask 跑，runner 剛好是 077 時才不會變成同義反覆。
+/// `.replaying` 尾巴沒有換行（崩在一行寫到一半）時，併進來的第一行不能跟它黏成一行（#302 的遠端版）。
 #[test]
-fn the_replaying_file_the_claim_script_creates_is_private() {
-    use std::os::unix::fs::PermissionsExt as _;
+fn the_remote_fold_does_not_glue_lines_together() {
     let r = Remote::new();
     let root = crate::startup::REMOTE_ROOT;
-    std::fs::write(&r.spool, "A\n").unwrap();
-    r.sh(&format!("umask 022\n{}", claim_script("botX", root).unwrap()));
-    let staging = r.spool.with_extension("jsonl.replaying");
-    let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode, 0o600, ".replaying 只給自己讀");
-}
-
-/// An interrupted remote writer can leave a private `.tmp.*` file that replay never sees.
-/// Drain should remove only old abandoned temp files and preserve a fresh writer's file.
-#[test]
-fn macos_local_remote_claim_cleans_stale_temp_spool_files() {
-    let r = Remote::new();
-    let root = crate::startup::REMOTE_ROOT;
-    let sd = r.spool.parent().unwrap().join("hook-spool.d");
-    std::fs::create_dir_all(&sd).unwrap();
-    let stale = sd.join(".tmp.abandoned");
-    let fresh = sd.join(".tmp.active");
-    std::fs::write(&stale, "partial secret payload").unwrap();
-    std::fs::write(&fresh, "active writer payload").unwrap();
-    let status = std::process::Command::new("touch")
-        .args(["-t", "200001010000"])
-        .arg(&stale)
-        .status()
-        .unwrap();
-    assert!(status.success());
-
-    r.sh(&claim_script("botX", root).unwrap());
-
-    assert!(!stale.exists(), "abandoned private temp files should be cleaned");
-    assert!(fresh.exists(), "recent temp files may still belong to an active writer");
-}
-
-/// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
-#[test]
-fn the_remote_claim_script_folds_a_leftover_claim_file() {
-    let r = Remote::new();
-    let root = crate::startup::REMOTE_ROOT;
-    std::fs::write(r.spool.with_extension("jsonl.claim"), "STRANDED\n").unwrap();
+    std::fs::write(r.spool.with_extension("jsonl.replaying"), "TORN").unwrap();
+    std::fs::write(&r.spool, "NEXT\n").unwrap();
     let out = r.sh(&claim_script("botX", root).unwrap());
-    assert!(out.contains("STRANDED"), "上一輪留下的 .claim 要收進來：{out}");
-    assert!(!r.spool.with_extension("jsonl.claim").exists(), "併完就不留");
+    assert!(out.lines().any(|l| l == "NEXT"), "新的一行要自己一行：{out:?}");
+}
+
+/// 掃描要看得到只有一則一檔、還沒 claim 的 bot（舊 jsonl 不在時也要）。
+#[test]
+fn macos_local_scan_sees_a_per_file_spool() {
+    let r = Remote::new();
+    let root = crate::startup::REMOTE_ROOT;
+    let dir = r.spool.parent().unwrap();
+    let sd = dir.join("hook-spool.d");
+    std::fs::create_dir_all(&sd).unwrap();
+    std::fs::write(sd.join("1-1.json"), "{}\n").unwrap();
+    let out = r.sh(&scan_script(root));
+    assert!(out.lines().any(|l| l.trim() == "botX"), "有檔就要被掃到：{out:?}");
+    std::fs::remove_file(sd.join("1-1.json")).unwrap();
+    let empty = r.sh(&scan_script(root));
+    assert!(!empty.lines().any(|l| l.trim() == "botX"), "空目錄不是欠著：{empty:?}");
 }
 
 /// #652：一則一檔。claim 把已經寫好的 `*.json` 搬進 replaying 再讀；ack 才刪。
@@ -326,29 +219,143 @@ fn macos_local_per_file_spool_is_claimed_then_acked() {
     assert!(!again.contains("ONE"), "ack 過的不能再出現：{again}");
 }
 
-/// 掃描要看得到只有一則一檔、還沒 claim 的 bot（舊 jsonl 不在時也要）。
+/// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
 #[test]
-fn macos_local_scan_sees_a_per_file_spool() {
+fn the_remote_claim_script_folds_a_leftover_claim_file() {
     let r = Remote::new();
     let root = crate::startup::REMOTE_ROOT;
-    let dir = r.spool.parent().unwrap();
-    let sd = dir.join("hook-spool.d");
-    std::fs::create_dir_all(&sd).unwrap();
-    std::fs::write(sd.join("1-1.json"), "{}\n").unwrap();
-    let out = r.sh(&scan_script(root));
-    assert!(out.lines().any(|l| l.trim() == "botX"), "有檔就要被掃到：{out:?}");
-    std::fs::remove_file(sd.join("1-1.json")).unwrap();
-    let empty = r.sh(&scan_script(root));
-    assert!(!empty.lines().any(|l| l.trim() == "botX"), "空目錄不是欠著：{empty:?}");
+    std::fs::write(r.spool.with_extension("jsonl.claim"), "STRANDED\n").unwrap();
+    let out = r.sh(&claim_script("botX", root).unwrap());
+    assert!(out.contains("STRANDED"), "上一輪留下的 .claim 要收進來：{out}");
+    assert!(!r.spool.with_extension("jsonl.claim").exists(), "併完就不留");
 }
 
-/// `.replaying` 尾巴沒有換行（崩在一行寫到一半）時，併進來的第一行不能跟它黏成一行（#302 的遠端版）。
+/// An interrupted remote writer can leave a private `.tmp.*` file that replay never sees.
+/// Drain should remove only old abandoned temp files and preserve a fresh writer's file.
 #[test]
-fn the_remote_fold_does_not_glue_lines_together() {
+fn macos_local_remote_claim_cleans_stale_temp_spool_files() {
     let r = Remote::new();
     let root = crate::startup::REMOTE_ROOT;
-    std::fs::write(r.spool.with_extension("jsonl.replaying"), "TORN").unwrap();
-    std::fs::write(&r.spool, "NEXT\n").unwrap();
+    let sd = r.spool.parent().unwrap().join("hook-spool.d");
+    std::fs::create_dir_all(&sd).unwrap();
+    let stale = sd.join(".tmp.abandoned");
+    let fresh = sd.join(".tmp.active");
+    std::fs::write(&stale, "partial secret payload").unwrap();
+    std::fs::write(&fresh, "active writer payload").unwrap();
+    let status = std::process::Command::new("touch")
+        .args(["-t", "200001010000"])
+        .arg(&stale)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    r.sh(&claim_script("botX", root).unwrap());
+
+    assert!(!stale.exists(), "abandoned private temp files should be cleaned");
+    assert!(fresh.exists(), "recent temp files may still belong to an active writer");
+}
+
+/// #501：`.replaying` 是 claim 腳本自己建的，裡面裝完整 payload——不能交給那台機器的 umask。
+/// 明確用寬鬆的 umask 跑，runner 剛好是 077 時才不會變成同義反覆。
+#[test]
+fn the_replaying_file_the_claim_script_creates_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let r = Remote::new();
+    let root = crate::startup::REMOTE_ROOT;
+    std::fs::write(&r.spool, "A\n").unwrap();
+    r.sh(&format!("umask 022\n{}", claim_script("botX", root).unwrap()));
+    let staging = r.spool.with_extension("jsonl.replaying");
+    let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o600, ".replaying 只給自己讀");
+}
+
+/// #500 複看：`.claim` 併不進去時，卡住這件事要從遠端自己回報——腳本 exit 0、`n = 0`、
+/// `drain_remote` 兩個 info 都被 `n > 0` 擋著，沒有這行標記就是一行 log 都沒有。
+#[test]
+fn a_claim_that_cannot_be_folded_reports_itself_as_stuck() {
+    let r = Remote::new();
+    let root = crate::startup::REMOTE_ROOT;
+    std::fs::write(r.spool.with_extension("jsonl.claim"), "OLD-CLAIM\n").unwrap();
+    std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+
     let out = r.sh(&claim_script("botX", root).unwrap());
-    assert!(out.lines().any(|l| l == "NEXT"), "新的一行要自己一行：{out:?}");
+    let d = parse_drain_output(&out);
+    assert_eq!(d.stuck_bytes, Some(10), ".claim 的位元組數要帶回來：{out:?}");
+    assert!(d.lines.is_empty(), "標記不可以被當成 spool 的一行：{:?}", d.lines);
+
+    std::fs::remove_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+    let out = r.sh(&claim_script("botX", root).unwrap());
+    assert_eq!(parse_drain_output(&out).stuck_bytes, None, "{out:?}");
+}
+
+/// #500：`am_fold` 沒收掉 `.claim`（`.replaying` 寫不進去）時，這一輪不准摘新的 spool——
+/// 直接 `mv` 會把那份唯一的副本蓋掉，而且腳本 exit 0、stdout 有東西，daemon 會照常 ack。
+/// 用「`.replaying` 是目錄」製造寫入失敗：跟權限無關，root 底下跑也一樣失敗。
+#[test]
+fn a_claim_that_could_not_be_folded_is_never_overwritten_by_the_next_spool() {
+    let r = Remote::new();
+    let root = crate::startup::REMOTE_ROOT;
+    let claim = r.spool.with_extension("jsonl.claim");
+    std::fs::write(&claim, "OLD-CLAIM\n").unwrap();
+    std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+    std::fs::write(&r.spool, "NEW\n").unwrap();
+
+    r.sh(&claim_script("botX", root).unwrap());
+
+    assert_eq!(std::fs::read_to_string(&claim).unwrap(), "OLD-CLAIM\n", "唯一的副本不准被蓋掉");
+    assert_eq!(std::fs::read_to_string(&r.spool).unwrap(), "NEW\n", "新的 spool 留到下一輪");
+}
+
+/// 遠端同款：claim 的 `cat` 與 `rm` 是兩支各自 fork／exec 的外部指令，中間附加的行不准被刪。
+#[test]
+fn the_remote_claim_script_keeps_a_line_appended_inside_the_window() {
+    let r = Remote::new();
+    let root = crate::startup::REMOTE_ROOT;
+    std::fs::write(r.spool.with_extension("jsonl.replaying"), "OLD\n").unwrap();
+    std::fs::write(&r.spool, "A\n").unwrap();
+    r.arm_append_inside_the_window("LATE\n");
+
+    let out = r.sh(&claim_script("botX", root).unwrap());
+    assert!(out.contains("OLD") && out.contains("A"), "兩則都要讀出來：{out}");
+    r.sh(&ack_script("botX", root).unwrap());
+
+    let left = std::fs::read_to_string(&r.spool).unwrap_or_default();
+    assert!(left.contains("LATE"), "窗口裡附加的那一行要留在 spool 上：{left:?}");
+    let again = r.sh(&claim_script("botX", root).unwrap());
+    assert!(again.contains("LATE"), "下一輪要讀得到它：{again}");
+    assert!(!again.contains("OLD"), "已經 ack 過的不能再出現：{again}");
+}
+
+/// #912：併進既有的 `.replaying` 是追加，不截斷；尾巴沒換行的半行補上換行再接；`src` 併完才刪。
+#[test]
+fn fold_spool_appends_without_truncating() {
+    let dir = fold_dir();
+    let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
+    std::fs::write(&dst, "OLD1\nOLD2-half").unwrap();
+    std::fs::write(&src, "NEW1\nNEW2\n").unwrap();
+    super::fold_spool(&src, &dst).unwrap();
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "OLD1\nOLD2-half\nNEW1\nNEW2\n");
+    assert!(!src.exists(), "併完才刪 src");
+
+    std::fs::write(&src, "NEW3\n").unwrap();
+    super::fold_spool(&src, &dst).unwrap();
+    assert!(std::fs::read_to_string(&dst).unwrap().ends_with("NEW2\nNEW3\n"));
+
+    let fresh = dir.join("fresh.replaying");
+    std::fs::write(&src, "ONLY\n").unwrap();
+    super::fold_spool(&src, &fresh).unwrap();
+    assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "ONLY\n");
+    assert!(!src.exists());
+}
+
+/// #912：`src` 讀不到（這裡是目錄）就回錯，`dst` 一個位元組都不動。
+#[test]
+fn fold_spool_keeps_dst_when_src_is_unreadable() {
+    let dir = fold_dir();
+    let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(&dst, "KEEP-ME\n").unwrap();
+    assert!(super::fold_spool(&src, &dst).is_err());
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "KEEP-ME\n");
+    assert!(src.exists());
 }

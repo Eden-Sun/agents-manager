@@ -14,6 +14,7 @@ mod codex_history;
 mod codex_model_migration;
 mod composer_draft;
 mod daemon_notice;
+mod hookrecv;
 mod dangerous_rm;
 mod default_session;
 mod delivery;

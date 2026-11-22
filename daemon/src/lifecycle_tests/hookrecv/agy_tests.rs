@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+use super::*;
 use super::*;
 use crate::testing as tt;
 
@@ -12,84 +14,9 @@ fn stop(extra: Value) -> Value {
     v
 }
 
-#[test]
-fn a_normal_stop_is_a_turn_with_the_reply_the_hook_process_read_and_no_dedup_key() {
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"}))) {
-        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
-            assert_eq!(session_id.as_deref(), Some("c-1"));
-            assert_eq!(turn_id, None, "`executionNum` 跨回合是不是唯一沒驗過：當去重鑰匙會吃掉之後的回合");
-            assert!(transcript_path.unwrap().ends_with("transcript_full.jsonl"));
-            assert_eq!((assistant.as_deref(), user.as_deref()), (Some("OK"), Some("say OK")));
-        }
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    let stop_raw_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e","conversationId":"29ce4fac-aba5-4325-a11c-b5d664ff7a5e","error":"","executionNum":0,"fullyIdle":true,"lastUserInput":"test_stop_input","modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
-    let mut from_stop_fixture: Value = serde_json::from_str(stop_raw_fixture).unwrap();
-    from_stop_fixture["hookEventName"] = json!("Stop");
-    from_stop_fixture["lastAssistantMessage"] = json!("OK");
-    from_stop_fixture["lastUserMessage"] = json!("from transcript");
-    match classify("agy", &from_stop_fixture) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript"), "兩者皆有時 lastUserMessage 優先"),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "from transcript", "lastUserInput": "from stdin"}))) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript")),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "", "lastUserInput": "from stdin"}))) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from stdin"), "lastUserMessage 空白退回 lastUserInput"),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": "only input"}))) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("only input")),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "last_user_input": "snake case input"}))) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("snake case input")),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": 12345}))) {
-        HookKind::TurnComplete { user, .. } => assert_eq!(user, None, "只有 lastUserInput 但型別錯時忽略"),
-        other => panic!("expected TurnComplete, got {other:?}"),
-    }
-    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "model_stop"}))), HookKind::TurnComplete { .. }));
-    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "SOMETHING_NEW"}))), HookKind::TurnComplete { .. }));
-}
 
-#[test]
-fn a_stop_with_background_work_still_running_is_not_the_end_of_the_turn() {
-    assert!(matches!(classify("agy", &stop(json!({"fullyIdle": false}))), HookKind::Ignore(_)));
-}
 
-#[test]
-fn an_error_stop_fails_the_turn_and_the_error_text_is_classified() {
-    match classify("agy", &stop(json!({"terminationReason": "ERROR", "error": "429 RESOURCE_EXHAUSTED: quota exceeded"}))) {
-        HookKind::TurnFailed { session_id, reason, detail, .. } => {
-            assert_eq!(session_id.as_deref(), Some("c-1"));
-            assert_eq!(reason, FailureReason::RateLimit);
-            assert!(detail.unwrap().contains("quota exceeded"));
-        }
-        other => panic!("expected TurnFailed, got {other:?}"),
-    }
-    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "ERROR"}))), HookKind::TurnFailed { .. }), "原因是 ERROR、沒有錯誤文字也算失敗");
-}
 
-#[test]
-fn session_start_and_the_first_pre_invocation_both_give_the_identity_and_state_is_a_status_line() {
-    for ev in ["SessionStart", "PreInvocation"] {
-        let v = json!({"hookEventName": ev, "conversationId": "c-9", "transcriptPath": "/t/transcript_full.jsonl", "invocationNum": 0});
-        match classify("agy", &v) {
-            HookKind::Identity { session_id, transcript_path, .. } => {
-                assert_eq!(session_id.as_deref(), Some("c-9"), "{ev}");
-                assert_eq!(transcript_path.as_deref(), Some("/t/transcript_full.jsonl"));
-            }
-            other => panic!("{ev}: expected Identity, got {other:?}"),
-        }
-    }
-    assert!(matches!(classify("agy", &json!({"hookEventName": "state", "conversation_id": "c-9"})), HookKind::StatusLine));
-    assert!(matches!(classify("agy", &json!({"conversationId": "c-9"})), HookKind::Ignore(_)));
-    assert!(matches!(classify("agy", &json!({"hookEventName": "PostInvocation"})), HookKind::Ignore(_)));
-}
 
 async fn agy_turn(app: &Arc<App>, project_id: &str) -> (String, String, String) {
     let bot_id = db::ulid();
@@ -378,4 +305,83 @@ async fn statusline_official_payload_takes_precedence_over_transcript_fallback_a
     assert_eq!(rst["context_window"]["context_window_size"], 1_048_576);
     assert_eq!(rst["context_window"]["current_usage"]["cache_read_input_tokens"], 140_000);
     assert_eq!(rst["task_count"], 2);
+}
+
+#[test]
+fn a_normal_stop_is_a_turn_with_the_reply_the_hook_process_read_and_no_dedup_key() {
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"}))) {
+        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+            assert_eq!(session_id.as_deref(), Some("c-1"));
+            assert_eq!(turn_id, None, "`executionNum` 跨回合是不是唯一沒驗過：當去重鑰匙會吃掉之後的回合");
+            assert!(transcript_path.unwrap().ends_with("transcript_full.jsonl"));
+            assert_eq!((assistant.as_deref(), user.as_deref()), (Some("OK"), Some("say OK")));
+        }
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    let stop_raw_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e","conversationId":"29ce4fac-aba5-4325-a11c-b5d664ff7a5e","error":"","executionNum":0,"fullyIdle":true,"lastUserInput":"test_stop_input","modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
+    let mut from_stop_fixture: Value = serde_json::from_str(stop_raw_fixture).unwrap();
+    from_stop_fixture["hookEventName"] = json!("Stop");
+    from_stop_fixture["lastAssistantMessage"] = json!("OK");
+    from_stop_fixture["lastUserMessage"] = json!("from transcript");
+    match classify("agy", &from_stop_fixture) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript"), "兩者皆有時 lastUserMessage 優先"),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "from transcript", "lastUserInput": "from stdin"}))) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript")),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "", "lastUserInput": "from stdin"}))) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from stdin"), "lastUserMessage 空白退回 lastUserInput"),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": "only input"}))) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("only input")),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "last_user_input": "snake case input"}))) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("snake case input")),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": 12345}))) {
+        HookKind::TurnComplete { user, .. } => assert_eq!(user, None, "只有 lastUserInput 但型別錯時忽略"),
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "model_stop"}))), HookKind::TurnComplete { .. }));
+    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "SOMETHING_NEW"}))), HookKind::TurnComplete { .. }));
+}
+
+#[test]
+fn a_stop_with_background_work_still_running_is_not_the_end_of_the_turn() {
+    assert!(matches!(classify("agy", &stop(json!({"fullyIdle": false}))), HookKind::Ignore(_)));
+}
+
+#[test]
+fn an_error_stop_fails_the_turn_and_the_error_text_is_classified() {
+    match classify("agy", &stop(json!({"terminationReason": "ERROR", "error": "429 RESOURCE_EXHAUSTED: quota exceeded"}))) {
+        HookKind::TurnFailed { session_id, reason, detail, .. } => {
+            assert_eq!(session_id.as_deref(), Some("c-1"));
+            assert_eq!(reason, FailureReason::RateLimit);
+            assert!(detail.unwrap().contains("quota exceeded"));
+        }
+        other => panic!("expected TurnFailed, got {other:?}"),
+    }
+    assert!(matches!(classify("agy", &stop(json!({"terminationReason": "ERROR"}))), HookKind::TurnFailed { .. }), "原因是 ERROR、沒有錯誤文字也算失敗");
+}
+
+#[test]
+fn session_start_and_the_first_pre_invocation_both_give_the_identity_and_state_is_a_status_line() {
+    for ev in ["SessionStart", "PreInvocation"] {
+        let v = json!({"hookEventName": ev, "conversationId": "c-9", "transcriptPath": "/t/transcript_full.jsonl", "invocationNum": 0});
+        match classify("agy", &v) {
+            HookKind::Identity { session_id, transcript_path, .. } => {
+                assert_eq!(session_id.as_deref(), Some("c-9"), "{ev}");
+                assert_eq!(transcript_path.as_deref(), Some("/t/transcript_full.jsonl"));
+            }
+            other => panic!("{ev}: expected Identity, got {other:?}"),
+        }
+    }
+    assert!(matches!(classify("agy", &json!({"hookEventName": "state", "conversation_id": "c-9"})), HookKind::StatusLine));
+    assert!(matches!(classify("agy", &json!({"conversationId": "c-9"})), HookKind::Ignore(_)));
+    assert!(matches!(classify("agy", &json!({"hookEventName": "PostInvocation"})), HookKind::Ignore(_)));
 }

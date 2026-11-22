@@ -6,18 +6,6 @@ use crate::db;
 use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
 use crate::hosts::sh_quote;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::runners::hookrecv::{receive, replay_host, spawn_spool_scanner, statusline_tasks_spawned};
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use axum::extract::{Path, State};
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use axum::http::{HeaderMap, StatusCode};
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use axum::Json;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use std::sync::Arc;
 use anyhow::Result;
 use serde_json::{json, Value};
 
@@ -276,7 +264,7 @@ async fn claude_account(app: &impl crate::tools::ToolsTable, host: &str, identit
     claude_account_from_tools(&tools, host, identity)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "hookrecv_tests/account_tests.rs"]
 mod account_tests;
 
@@ -544,7 +532,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "hookrecv_tests/classify_tests.rs"]
 mod classify_tests;
 
@@ -2150,13 +2138,21 @@ pub const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 /// Catches status events that never arrived (§11.4.4).
 pub const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Default)]
-struct Drained<'a> {
-    lines: Vec<&'a str>,
-    status: Option<String>,
-    /// `Some(位元組數)`＝`.claim` 併不進 `.replaying`，這台的 spool 停收了（#500 複看）。
-    stuck_bytes: Option<i64>,
+macro_rules! drained_type {
+    ($vis:vis, $fvis:vis,) => {
+        #[derive(Default)]
+        $vis struct Drained<'a> {
+            $fvis lines: Vec<&'a str>,
+            $fvis status: Option<String>,
+            /// `Some(位元組數)`＝`.claim` 併不進 `.replaying`，這台的 spool 停收了（#500 複看）。
+            $fvis stuck_bytes: Option<i64>,
+        }
+    };
 }
+#[cfg(any(test, feature = "test-hooks"))]
+drained_type!(pub, pub,);
+#[cfg(not(any(test, feature = "test-hooks")))]
+drained_type!(, ,);
 
 fn parse_drain_output(text: &str) -> Drained<'_> {
     let mut out = Drained::default();
@@ -2184,7 +2180,7 @@ fn spool_line_log_context(line: &str) -> String {
     format!("malformed spool record: {} bytes (payload omitted)", line.len())
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "hookrecv_tests/spool_log_privacy_tests.rs"]
 mod spool_log_privacy_tests;
 
@@ -2363,11 +2359,19 @@ fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
     })
 }
 
-#[derive(Default)]
-pub struct DrainGate {
-    last: Option<std::time::Instant>,
-    again: bool,
+macro_rules! drain_gate_type {
+    ($fvis:vis,) => {
+        #[derive(Default)]
+        pub struct DrainGate {
+            $fvis last: Option<std::time::Instant>,
+            $fvis again: bool,
+        }
+    };
 }
+#[cfg(any(test, feature = "test-hooks"))]
+drain_gate_type!(pub,);
+#[cfg(not(any(test, feature = "test-hooks")))]
+drain_gate_type!(,);
 
 pub fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, DrainGate>> {
     static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, DrainGate>>> =
@@ -2458,10 +2462,18 @@ fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(
 const MAX_SPOOL_LINE: usize = 8 * 1024 * 1024;
 
 /// [`read_spool_line`] 讀到的一行。`oversized` 為真時 `bytes` 是空的（超過上限的內容已丟掉）。
-struct SpoolLine {
-    bytes: Vec<u8>,
-    oversized: bool,
+macro_rules! spool_line_type {
+    ($vis:vis, $fvis:vis,) => {
+        $vis struct SpoolLine {
+            $fvis bytes: Vec<u8>,
+            $fvis oversized: bool,
+        }
+    };
 }
+#[cfg(any(test, feature = "test-hooks"))]
+spool_line_type!(pub, pub,);
+#[cfg(not(any(test, feature = "test-hooks")))]
+spool_line_type!(, ,);
 
 /// 讀下一行（不含換行），記憶體上界是 [`MAX_SPOOL_LINE`]。EOF 回 `None`；最後一行沒有換行也照樣回。
 async fn read_spool_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Option<SpoolLine>> {
@@ -2574,52 +2586,28 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
     Ok(n)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "hookrecv_tests/drain_tests.rs"]
 mod drain_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/external_claim_tests.rs"]
-mod external_claim_tests;
 
 /// issue #70：`200` 必須代表「已經耐久收下」。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/durable_handoff_tests.rs"]
-mod durable_handoff_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/resume_tests.rs"]
-mod resume_tests;
 
 /// codex 答完一回合清撞限：清的要是**這顆 bot 自己那把 key**（跟寫入端同一支 `quota_base_for_host`）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/codex_limit_clear_tests.rs"]
-mod codex_limit_clear_tests;
 
 /// Grok 撞限解除：只有「撞限之後才送出」的 in-flight 回合收到的 end_turn Stop 才清，`hit.at < turn.delivered_at <= received_at`（#1872）。
 /// 全部走 `process_locked`（真的 hook 入口：圍籬、分類、清除一條路），不只測 helper。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/grok_limit_hit_success_tests.rs"]
-mod grok_limit_hit_success_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "hookrecv_tests/codex_title_tests.rs"]
 mod codex_title_tests;
 
 /// #493：spool 的收攏是「先 rename 再讀」——claim 與 ack 之間 hook 附加進來的行不准被刪掉。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/spool_claim_window_tests.rs"]
-mod spool_claim_window_tests;
 
 /// #243：讀不到 bot 的 host 不能當成本機——spool 重放要回錯、事件留著等下一輪，DB 好了要補回來。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/host_unreadable_replay_tests.rs"]
-mod host_unreadable_replay_tests;
 
 /// agy（Antigravity CLI）：payload 沒有事件名（hook 子行程放進 `hookEventName`），`Stop` 也沒有助理文字（`lastAssistantMessage` 是子行程讀 transcript 補的）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/agy_tests.rs"]
-mod agy_tests;
 
 /// 遠端 spool 折疊卡住的帳。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait SpoolFoldStuck: Send + Sync {
@@ -2687,17 +2675,103 @@ async fn reconcile_after_spawn_hint<H: HookHost>(app: &H, bot_id: &str) {
 }
 
 /// issue #1259：移交查詢讀不出來＝不知道專案歸誰，不准當成「我的」去處理。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/handoff_lookup_tests.rs"]
-mod handoff_lookup_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/agy_pre_invocation_delivery_tests.rs"]
-mod agy_pre_invocation_delivery_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "hookrecv_tests/codex_stop_delivery_tests.rs"]
-mod codex_stop_delivery_tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    use super::*;
+
+    pub const MAX_CLAIM_COLLISION_TEXT_CHARS: usize = super::MAX_CLAIM_COLLISION_TEXT_CHARS;
+    pub const STATUS_MARKER: &str = super::STATUS_MARKER;
+    pub const DRAIN_GATE_KEEP: std::time::Duration = super::DRAIN_GATE_KEEP;
+    pub const MAX_SPOOL_LINE: usize = super::MAX_SPOOL_LINE;
+
+    pub async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
+        super::relay_source(conn, run, echo).await
+    }
+
+    pub fn failure_detail(p: &Value) -> Option<String> {
+        super::failure_detail(p)
+    }
+
+    pub fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
+        super::last_transcript_user_text(path)
+    }
+
+    pub fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool {
+        super::answers_another_prompt(prompt, hook_user)
+    }
+
+    pub fn answers_none_of(prompts: Option<&[String]>, hook_user: Option<&str>) -> bool {
+        super::answers_none_of(prompts, hook_user)
+    }
+
+    pub async fn with_supplements(app: &impl crate::capabilities::Db, turn_id: &str, prompt: Option<&str>) -> Result<Option<Vec<String>>> {
+        super::with_supplements(app, turn_id, prompt).await
+    }
+
+    pub fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
+        super::hook_user_is_new(existing, incoming)
+    }
+
+    pub async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id: &str, full: &str) -> Result<Option<db::Message>> {
+        super::upgrade_clipped_user_message(conn, turn_id, full).await
+    }
+
+    pub async fn fill_or_drop_late_hook(
+        app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
+        turn: &db::Turn,
+        body_text: &str,
+        session_id: &Option<String>,
+        native_turn_id: &Option<String>,
+        same_turn: bool,
+        event_id: Option<&str>,
+    ) -> Result<()> {
+        super::fill_or_drop_late_hook(app, turn, body_text, session_id, native_turn_id, same_turn, event_id).await
+    }
+
+    pub async fn replace_fallback_reply(
+        app: &impl crate::events::ports::TurnCommands,
+        tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+        turn: &db::Turn,
+        body_text: &str,
+        session_id: &Option<String>,
+        native_turn_id: &Option<String>,
+        event_id: Option<&str>,
+    ) -> Result<()> {
+        super::replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id, event_id).await
+    }
+
+    pub async fn fired_within(app: &impl crate::capabilities::Db, t: &db::Turn, received_at: Option<&str>) -> Result<bool> {
+        super::fired_within(app, t, received_at).await
+    }
+
+    pub fn parse_drain_output(text: &str) -> Drained<'_> {
+        super::parse_drain_output(text)
+    }
+
+    pub async fn note_fold_stuck(app: &impl crate::hookrecv::SpoolFoldStuck, host: &str, bot_id: &str, bytes: Option<i64>) {
+        super::note_fold_stuck(app, host, bot_id, bytes).await
+    }
+
+    pub fn claim_script(bot_id: &str, root: &str) -> Result<String> {
+        super::claim_script(bot_id, root)
+    }
+
+    pub fn ack_script(bot_id: &str, root: &str) -> Result<String> {
+        super::ack_script(bot_id, root)
+    }
+
+    pub fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        super::fold_spool(src, dst)
+    }
+
+    pub async fn read_spool_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Option<SpoolLine>> {
+        super::read_spool_line(r).await
+    }
+}
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod resend_staleness_tests {

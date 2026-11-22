@@ -17,7 +17,7 @@ module_has_tests() {
     return 1
 }
 
-LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook poller observed_status codex_session_refresh interrupt_grace interruption child_done codex_rollout_turn stop relay_watch stuck_turns quota_hold herdr_review_tests purge_dirs_tests restart_kind_tests restart_hold messages run_state live_apply_debt actor_runtime_eval_prototype identity_switch_tests transcript_stage transcript_origin dead_panes api_error_nudge turn_controller "
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook poller observed_status codex_session_refresh interrupt_grace interruption child_done codex_rollout_turn stop relay_watch stuck_turns quota_hold herdr_review_tests purge_dirs_tests restart_kind_tests restart_hold messages run_state live_apply_debt actor_runtime_eval_prototype identity_switch_tests transcript_stage transcript_origin dead_panes api_error_nudge turn_controller hookrecv "
 emit_lifecycle_moved() {
     case "$1" in
         crates/am-lifecycle/src/judge/*.rs) printf 'lifecycle_tests::judge::%s::\n' "$(basename "${1%.rs}")"; return 0 ;;
@@ -120,6 +120,7 @@ while IFS= read -r f; do
         crates/am-lifecycle/src/hookrecv_tests/*.rs)
             mod="${f##*/}"
             printf 'hookrecv::%s::\n' "${mod%.rs}"
+            printf 'lifecycle_tests::hookrecv::%s::\n' "${mod%.rs}"
             ;;
         crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs \
             | crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs | crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs)

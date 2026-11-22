@@ -1,43 +1,11 @@
+#![allow(dead_code, unused_imports)]
+use super::*;
 use super::*;
 use crate::testing as tt;
 use std::time::Duration;
 
-#[test]
-fn hook_user_dedups_against_the_scraped_echo() {
-    let echo = vec!["Reply with exactly MERGED-OK".to_string()];
-    assert!(!hook_user_is_new(&echo, "Reply with exactly MERGED-OK"));
-    assert!(!hook_user_is_new(&vec!["Reply with\n  exactly MERGED-OK".into()], "Reply with exactly MERGED-OK"));
-    assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
-}
 
-#[test]
-fn hook_prompt_identity_keeps_word_boundaries_and_rejects_weak_overlap() {
-    let separated = "echo a b";
-    let joined = "echo ab";
-    assert!(answers_another_prompt(Some(separated), Some(joined)));
-    assert!(answers_another_prompt(Some(joined), Some(separated)));
-    assert!(hook_user_is_new(&[separated.into()], joined));
-    assert!(hook_user_is_new(&[joined.into()], separated));
 
-    assert!(answers_another_prompt(Some("echo a much longer instruction"), Some("echo a")));
-    assert!(hook_user_is_new(&["echo a much longer instruction".into()], "echo a"));
-}
-
-#[test]
-fn hook_prompt_identity_accepts_wrapping_and_repeated_whitespace() {
-    assert!(!answers_another_prompt(
-        Some("Reply with exactly MERGED-OK"),
-        Some("Reply with\n  exactly   MERGED-OK")
-    ));
-    assert!(!hook_user_is_new(
-        &["Reply with\n  exactly   MERGED-OK".into()],
-        "Reply with exactly MERGED-OK"
-    ));
-    assert!(!answers_another_prompt(
-        Some("Reply with exactly MERGED-OK"),
-        Some("Reply with exactly MER")
-    ));
-}
 
 /// #218：claude Stop 沒帶使用者訊息，從 transcript 尾巴補。CLI 把貼上的 prompt 包成 `<pasted_content id=…>`
 /// （真 transcript，2026-09-19 實測）：要拆回原文——不然記成外部回合時標籤會顯示給使用者，`agent_relay::claim` 也對不上。
@@ -46,7 +14,7 @@ fn the_transcript_user_text_drops_the_cli_pasted_content_wrapper() {
     let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid())));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("t.jsonl");
-    let log: Vec<&str> = include_str!("../lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
+    let log: Vec<&str> = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
     std::fs::write(&path, log[..2].join("\n") + "\n").unwrap();
     assert_eq!(last_transcript_user_text(&path).as_deref(), Some("請只回覆 OK 兩個字母，不要多說任何其他的話，也不要使用任何工具。"));
     std::fs::write(&path, log[8..].join("\n") + "\n").unwrap();
@@ -58,12 +26,6 @@ fn the_transcript_user_text_drops_the_cli_pasted_content_wrapper() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn hook_user_is_stored_when_it_is_not_the_echo() {
-    assert!(hook_user_is_new(&[], "Reply with exactly MERGED-OK"));
-    assert!(hook_user_is_new(&vec!["echo 1".into()], "echo 2"));
-    assert!(!hook_user_is_new(&[], "   "));
-}
 
 /// `db::open` needs a path; the directory removes itself on drop.
 struct TmpDb(std::path::PathBuf);
@@ -175,17 +137,6 @@ async fn a_late_hook_with_evidence_replaces_the_fallback_reply_in_place() {
     assert_eq!(content, "第一段\n\n最後一段");
 }
 
-#[test]
-fn idle_drain_gates_are_dropped() {
-    let t0 = std::time::Instant::now();
-    let mut g = std::collections::HashMap::new();
-    g.insert("old".to_string(), DrainGate { last: Some(t0), again: false });
-    g.insert("recent".to_string(), DrainGate { last: Some(t0 + DRAIN_GATE_KEEP), again: false });
-    g.insert("owes".to_string(), DrainGate { last: Some(t0), again: true });
-    prune_gates(&mut g, t0 + DRAIN_GATE_KEEP + std::time::Duration::from_secs(1));
-    assert!(!g.contains_key("old"), "久沒用又沒欠補跑：帶走");
-    assert!(g.contains_key("recent") && g.contains_key("owes"));
-}
 
 async fn late_hook_fixture(env: &tt::Env, name: &str, status: &str) -> (String, String) {
     let bot_id = db::ulid();
@@ -2188,102 +2139,10 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "重播不再記：{first:?}");
 }
 
-/// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。
-#[test]
-fn the_failure_classifier_keeps_rate_limit_auth_and_interrupts_apart() {
-    use FailureReason::*;
-    assert_eq!(classify_failure(Some("API Error: 429 rate_limit_error")), RateLimit);
-    assert_eq!(classify_failure(Some("You've hit your usage limit")), RateLimit);
-    assert_eq!(classify_failure(Some("You've hit your session limit · resets 5pm")), RateLimit);
-    assert_eq!(classify_failure(Some("API Error: You've hit your weekly limit")), RateLimit);
-    assert_eq!(classify_failure(Some("overloaded_error")), RateLimit);
-    assert_eq!(classify_failure(Some("401 Unauthorized: invalid api key")), Auth);
-    assert_eq!(classify_failure(Some("OAuth token expired; please login")), Auth);
-    assert_eq!(classify_failure(Some("API Error: 500 Internal Server Error")), Api);
-    assert_eq!(classify_failure(Some("[Request interrupted by user]")), Interrupted);
-    assert_eq!(classify_failure(Some("cancelled")), Interrupted);
-    assert_eq!(classify_failure(None), Unknown);
-    assert_eq!(classify_failure(Some("   ")), Unknown);
-}
 
-/// `esc` 這個 needle 是用純字串 `contains` 比對的：`unescaped`／`description`／`prescribed`
-/// 這種一般英文字都含著 `esc` 三個字母，不該被誤判成使用者按了 Esc——那樣一來真正的失敗（API／
-/// 額度）會走進「中斷」那條回傳早退，回合永遠卡在 in_flight，額度也不會被記下來（issue #79／#108
-/// 想防的正是這件事，「esc」子字串比對把它繞回去了）。
-#[test]
-fn a_generic_word_that_merely_contains_esc_is_not_a_user_interrupt() {
-    use FailureReason::*;
-    assert_eq!(
-        classify_failure(Some("invalid_request_error: unescaped control character in string")),
-        Api,
-        "「unescaped」含 esc，但這是一個 API 驗證錯誤，不是使用者按了 Esc"
-    );
-    assert_eq!(
-        classify_failure(Some("A description of the rate limit reached for this account")),
-        RateLimit,
-        "「description」含 esc，不該蓋掉後面真正的 rate limit 分類"
-    );
-    assert_eq!(classify_failure(Some("Cancelled (Esc)")), Interrupted);
-    assert_eq!(classify_failure(Some("esc")), Interrupted);
-}
 
-/// payload 的欄位名還在動：撈得到就留原文，撈不到也照樣收回合（只是說不出原因）。
-#[test]
-fn the_failure_detail_is_read_from_whichever_field_carries_it() {
-    assert_eq!(failure_detail(&json!({"reason": "rate_limit_error"})).as_deref(), Some("rate_limit_error"));
-    assert_eq!(failure_detail(&json!({"error": {"type": "overloaded_error"}})).as_deref(), Some("overloaded_error"));
-    assert_eq!(
-        failure_detail(&json!({"error": {"message": "Internal server error", "type": "api_error"}})).as_deref(),
-        Some("Internal server error"),
-    );
-    assert_eq!(failure_detail(&json!({"hook_event_name": "StopFailure", "session_id": "s"})), None);
-    assert_eq!(failure_detail(&json!({"reason": "  "})), None, "空白不算原因");
-}
 
-/// 分類本身：`StopFailure` 走 `TurnFailed`，一般 `Stop` 不受影響。
-#[test]
-fn stop_failure_classifies_as_a_failed_turn_and_plain_stop_is_untouched() {
-    let v = json!({"hook_event_name": "StopFailure", "session_id": "s1", "prompt_id": "p1", "reason": "429 rate_limit"});
-    match classify("claude", &v) {
-        HookKind::TurnFailed { session_id, turn_id, reason, detail, .. } => {
-            assert_eq!(session_id.as_deref(), Some("s1"));
-            assert_eq!(turn_id.as_deref(), Some("p1"));
-            assert_eq!(reason, FailureReason::RateLimit);
-            assert_eq!(detail.as_deref(), Some("429 rate_limit"));
-        }
-        other => panic!("expected TurnFailed, got {other:?}"),
-    }
-    let v = json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p1"});
-    assert!(matches!(classify("claude", &v), HookKind::TurnComplete { .. }), "一般 Stop 照舊");
-}
 
-/// issue #82：`SubagentStart`／`SubagentStop` 分類成 `SubagentEvent`，帶得到 `agent_id`／
-/// `agent_type`；只有 `SubagentStop` 帶 `agent_transcript_path`（`SubagentStart` 的原生 payload
-/// 本來就沒有這個欄位）。不認得的事件名字（例如 claude 才有的 `TeammateIdle`）照舊被 `Ignore`，
-/// 不會意外冒出一種新的 Turn 副作用。
-#[test]
-fn subagent_start_and_stop_classify_as_a_pure_snapshot() {
-    let start = json!({"hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a1", "agent_type": "general-purpose"});
-    match classify("claude", &start) {
-        HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
-            assert_eq!(event, "start");
-            assert_eq!(agent_id.as_deref(), Some("a1"));
-            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
-            assert_eq!(transcript_path, None);
-        }
-        other => panic!("expected SubagentEvent, got {other:?}"),
-    }
-    let stop = json!({"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "general-purpose",
-                       "agent_transcript_path": "/tmp/a1.jsonl"});
-    match classify("claude", &stop) {
-        HookKind::SubagentEvent { event, transcript_path, .. } => {
-            assert_eq!(event, "stop");
-            assert_eq!(transcript_path.as_deref(), Some("/tmp/a1.jsonl"));
-        }
-        other => panic!("expected SubagentEvent, got {other:?}"),
-    }
-    assert!(matches!(classify("claude", &json!({"hook_event_name": "TeammateIdle"})), HookKind::Ignore(_)));
-}
 
 /// issue #82：`process` 把 `SubagentStart`／`SubagentStop` 整筆寫進這顆 run 的 `subagent_json`，
 /// 不建立、不動任何 Turn（跟 turn 完全脫鉤）；沒有活著的 run 就安靜丟掉，不報錯。
@@ -2321,65 +2180,6 @@ async fn subagent_events_update_the_runs_snapshot_without_touching_any_turn() {
     assert_eq!(t.status, "in_flight", "subagent 事件不該動到任何 turn");
 }
 
-/// issue #1770、#2107：`PreCompact` 與 `PostCompact` 分類成 `CompactStarting` 與 `CompactEnding`。
-/// 支援解析子 agent 壓縮事件所帶的 `agent_id` 與 `agent_type`，無欄位時相容主 session。
-#[test]
-fn pre_compact_classifies_as_a_pure_compacting_marker() {
-    assert!(matches!(
-        classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})),
-        HookKind::CompactStarting { agent_id: None, agent_type: None }
-    ));
-    assert!(matches!(
-        classify("claude", &json!({"hook_event_name": "PostCompact"})),
-        HookKind::CompactEnding { agent_id: None, agent_type: None }
-    ));
-    assert!(matches!(
-        classify("claude", &json!({"hook_event_name": "SessionStart", "session_id": "s-main"})),
-        HookKind::Identity { session_id: Some(ref s), agent_id: None, agent_type: None, .. } if s == "s-main"
-    ));
-
-    let sub_pre = json!({
-        "hook_event_name": "PreCompact",
-        "agent_id": "subagent-xyz",
-        "agent_type": "general-purpose",
-        "trigger": "auto"
-    });
-    match classify("claude", &sub_pre) {
-        HookKind::CompactStarting { agent_id, agent_type } => {
-            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
-            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
-        }
-        other => panic!("expected CompactStarting with agent_id/agent_type, got {other:?}"),
-    }
-
-    let sub_post = json!({
-        "hook_event_name": "PostCompact",
-        "agent_id": "subagent-xyz",
-        "agent_type": "general-purpose"
-    });
-    match classify("claude", &sub_post) {
-        HookKind::CompactEnding { agent_id, agent_type } => {
-            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
-            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
-        }
-        other => panic!("expected CompactEnding with agent_id/agent_type, got {other:?}"),
-    }
-
-    let sub_start = json!({
-        "hook_event_name": "SessionStart",
-        "session_id": "sub-session-123",
-        "agent_id": "subagent-xyz",
-        "agent_type": "general-purpose"
-    });
-    match classify("claude", &sub_start) {
-        HookKind::Identity { session_id, agent_id, agent_type, .. } => {
-            assert_eq!(session_id.as_deref(), Some("sub-session-123"));
-            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
-            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
-        }
-        other => panic!("expected Identity with agent_id/agent_type, got {other:?}"),
-    }
-}
 
 /// issue #1770、#2107：`PreCompact` 把這顆 run 標成「壓縮中」，投影帶出 `compacting_since`；turn 不被碰。
 /// 壓縮做完的 `SessionStart`（source=compact）或 `PostCompact` 收掉標記；回合失敗收尾（`StopFailure`）也收。
@@ -2495,11 +2295,6 @@ async fn a_spooled_spawn_claim_is_recorded_against_the_bot_that_wrote_it() {
     assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
 }
 
-#[test]
-fn nr_relay_legacy_name_only_spool_is_unknown() {
-    assert!(matches!(classify("claude", &json!({"hook_event_name": RELAY_ANNOUNCE_EVENT,
-        "to_agent": "old-name", "text": "不能以舊名猜測這句話的收件身份"})), HookKind::Ignore(_)));
-}
 
 #[tokio::test]
 async fn nr_relay_spool_survives_rename_and_does_not_follow_the_reused_name() {
@@ -3391,15 +3186,6 @@ async fn only_recorded_supplements_count_as_the_turns_prompt() {
     assert!(!answers_none_of(sent.as_deref(), None), "讀不到使用者訊息不下判斷");
 }
 
-/// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉；只在原文有 Tab 時試去 Tab 候選。
-#[test]
-fn a_prompt_whose_tab_the_tui_swallowed_is_still_the_same_prompt() {
-    let sent = "條碼列印・進貨單\t每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
-    let seen = "條碼列印・進貨單每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
-    assert!(!answers_another_prompt(Some(sent), Some(seen)));
-    assert!(!hook_user_is_new(&[sent.to_string()], seen), "同一句不再多一則使用者訊息");
-    assert!(answers_another_prompt(Some(sent), Some("另一件事")), "真的是另一句照樣分得出來");
-}
 
 /// #217：`unknown` 那一則在 transcript 裡被 CLI 包成 `<pasted_content>`（真 transcript，2026-09-19 實測）還是同一則，照樣認領。
 /// prompt 本身寫著字面的 `<pasted_content …>` 時 CLI 還把它跳脫成 `<\…`，兩邊去空白後互不包含——以前被當成「回答的是別句」：
@@ -3411,7 +3197,7 @@ async fn an_unknown_turn_whose_prompt_the_cli_wrapped_as_pasted_content_is_still
     let prompt = "這段文字裡有字面的 <pasted_content id=\"1234\">x</pasted_content id=\"1234\"> 標籤，請只回覆 OK 兩個字母。";
     let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", prompt).await;
     let transcript = own_projects_file(&app, &bot_id, &app.data_dir, &format!("t-{}.jsonl", db::ulid())).await;
-    let log: Vec<&str> = include_str!("../lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
+    let log: Vec<&str> = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
     assert!(log[8].contains(r#"<\\pasted_content id=\"1234\">"#), "fixture 這一列是 CLI 跳脫過又包起來的");
     std::fs::write(&transcript, log[8..].join("\n") + "\n").unwrap();
     let stop = HookBody {
@@ -3947,4 +3733,233 @@ async fn turn_user_messages_returns_the_scraped_echo() {
     assert_eq!(have, vec!["echo 1".to_string()]);
     assert!(!hook_user_is_new(&have, "echo 1"));
     assert!(hook_user_is_new(&have, "echo 2"));
+}
+
+#[test]
+fn hook_user_dedups_against_the_scraped_echo() {
+    let echo = vec!["Reply with exactly MERGED-OK".to_string()];
+    assert!(!hook_user_is_new(&echo, "Reply with exactly MERGED-OK"));
+    assert!(!hook_user_is_new(&vec!["Reply with\n  exactly MERGED-OK".into()], "Reply with exactly MERGED-OK"));
+    assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
+}
+
+#[test]
+fn hook_prompt_identity_keeps_word_boundaries_and_rejects_weak_overlap() {
+    let separated = "echo a b";
+    let joined = "echo ab";
+    assert!(answers_another_prompt(Some(separated), Some(joined)));
+    assert!(answers_another_prompt(Some(joined), Some(separated)));
+    assert!(hook_user_is_new(&[separated.into()], joined));
+    assert!(hook_user_is_new(&[joined.into()], separated));
+
+    assert!(answers_another_prompt(Some("echo a much longer instruction"), Some("echo a")));
+    assert!(hook_user_is_new(&["echo a much longer instruction".into()], "echo a"));
+}
+
+#[test]
+fn hook_prompt_identity_accepts_wrapping_and_repeated_whitespace() {
+    assert!(!answers_another_prompt(
+        Some("Reply with exactly MERGED-OK"),
+        Some("Reply with\n  exactly   MERGED-OK")
+    ));
+    assert!(!hook_user_is_new(
+        &["Reply with\n  exactly   MERGED-OK".into()],
+        "Reply with exactly MERGED-OK"
+    ));
+    assert!(!answers_another_prompt(
+        Some("Reply with exactly MERGED-OK"),
+        Some("Reply with exactly MER")
+    ));
+}
+
+#[test]
+fn hook_user_is_stored_when_it_is_not_the_echo() {
+    assert!(hook_user_is_new(&[], "Reply with exactly MERGED-OK"));
+    assert!(hook_user_is_new(&vec!["echo 1".into()], "echo 2"));
+    assert!(!hook_user_is_new(&[], "   "));
+}
+
+#[test]
+fn idle_drain_gates_are_dropped() {
+    let t0 = std::time::Instant::now();
+    let mut g = std::collections::HashMap::new();
+    g.insert("old".to_string(), DrainGate { last: Some(t0), again: false });
+    g.insert("recent".to_string(), DrainGate { last: Some(t0 + DRAIN_GATE_KEEP), again: false });
+    g.insert("owes".to_string(), DrainGate { last: Some(t0), again: true });
+    prune_gates(&mut g, t0 + DRAIN_GATE_KEEP + std::time::Duration::from_secs(1));
+    assert!(!g.contains_key("old"), "久沒用又沒欠補跑：帶走");
+    assert!(g.contains_key("recent") && g.contains_key("owes"));
+}
+
+/// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。
+#[test]
+fn the_failure_classifier_keeps_rate_limit_auth_and_interrupts_apart() {
+    use FailureReason::*;
+    assert_eq!(classify_failure(Some("API Error: 429 rate_limit_error")), RateLimit);
+    assert_eq!(classify_failure(Some("You've hit your usage limit")), RateLimit);
+    assert_eq!(classify_failure(Some("You've hit your session limit · resets 5pm")), RateLimit);
+    assert_eq!(classify_failure(Some("API Error: You've hit your weekly limit")), RateLimit);
+    assert_eq!(classify_failure(Some("overloaded_error")), RateLimit);
+    assert_eq!(classify_failure(Some("401 Unauthorized: invalid api key")), Auth);
+    assert_eq!(classify_failure(Some("OAuth token expired; please login")), Auth);
+    assert_eq!(classify_failure(Some("API Error: 500 Internal Server Error")), Api);
+    assert_eq!(classify_failure(Some("[Request interrupted by user]")), Interrupted);
+    assert_eq!(classify_failure(Some("cancelled")), Interrupted);
+    assert_eq!(classify_failure(None), Unknown);
+    assert_eq!(classify_failure(Some("   ")), Unknown);
+}
+
+/// `esc` 這個 needle 是用純字串 `contains` 比對的：`unescaped`／`description`／`prescribed`
+/// 這種一般英文字都含著 `esc` 三個字母，不該被誤判成使用者按了 Esc——那樣一來真正的失敗（API／
+/// 額度）會走進「中斷」那條回傳早退，回合永遠卡在 in_flight，額度也不會被記下來（issue #79／#108
+/// 想防的正是這件事，「esc」子字串比對把它繞回去了）。
+#[test]
+fn a_generic_word_that_merely_contains_esc_is_not_a_user_interrupt() {
+    use FailureReason::*;
+    assert_eq!(
+        classify_failure(Some("invalid_request_error: unescaped control character in string")),
+        Api,
+        "「unescaped」含 esc，但這是一個 API 驗證錯誤，不是使用者按了 Esc"
+    );
+    assert_eq!(
+        classify_failure(Some("A description of the rate limit reached for this account")),
+        RateLimit,
+        "「description」含 esc，不該蓋掉後面真正的 rate limit 分類"
+    );
+    assert_eq!(classify_failure(Some("Cancelled (Esc)")), Interrupted);
+    assert_eq!(classify_failure(Some("esc")), Interrupted);
+}
+
+/// payload 的欄位名還在動：撈得到就留原文，撈不到也照樣收回合（只是說不出原因）。
+#[test]
+fn the_failure_detail_is_read_from_whichever_field_carries_it() {
+    assert_eq!(failure_detail(&json!({"reason": "rate_limit_error"})).as_deref(), Some("rate_limit_error"));
+    assert_eq!(failure_detail(&json!({"error": {"type": "overloaded_error"}})).as_deref(), Some("overloaded_error"));
+    assert_eq!(
+        failure_detail(&json!({"error": {"message": "Internal server error", "type": "api_error"}})).as_deref(),
+        Some("Internal server error"),
+    );
+    assert_eq!(failure_detail(&json!({"hook_event_name": "StopFailure", "session_id": "s"})), None);
+    assert_eq!(failure_detail(&json!({"reason": "  "})), None, "空白不算原因");
+}
+
+/// 分類本身：`StopFailure` 走 `TurnFailed`，一般 `Stop` 不受影響。
+#[test]
+fn stop_failure_classifies_as_a_failed_turn_and_plain_stop_is_untouched() {
+    let v = json!({"hook_event_name": "StopFailure", "session_id": "s1", "prompt_id": "p1", "reason": "429 rate_limit"});
+    match classify("claude", &v) {
+        HookKind::TurnFailed { session_id, turn_id, reason, detail, .. } => {
+            assert_eq!(session_id.as_deref(), Some("s1"));
+            assert_eq!(turn_id.as_deref(), Some("p1"));
+            assert_eq!(reason, FailureReason::RateLimit);
+            assert_eq!(detail.as_deref(), Some("429 rate_limit"));
+        }
+        other => panic!("expected TurnFailed, got {other:?}"),
+    }
+    let v = json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p1"});
+    assert!(matches!(classify("claude", &v), HookKind::TurnComplete { .. }), "一般 Stop 照舊");
+}
+
+/// issue #82：`SubagentStart`／`SubagentStop` 分類成 `SubagentEvent`，帶得到 `agent_id`／
+/// `agent_type`；只有 `SubagentStop` 帶 `agent_transcript_path`（`SubagentStart` 的原生 payload
+/// 本來就沒有這個欄位）。不認得的事件名字（例如 claude 才有的 `TeammateIdle`）照舊被 `Ignore`，
+/// 不會意外冒出一種新的 Turn 副作用。
+#[test]
+fn subagent_start_and_stop_classify_as_a_pure_snapshot() {
+    let start = json!({"hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a1", "agent_type": "general-purpose"});
+    match classify("claude", &start) {
+        HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
+            assert_eq!(event, "start");
+            assert_eq!(agent_id.as_deref(), Some("a1"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+            assert_eq!(transcript_path, None);
+        }
+        other => panic!("expected SubagentEvent, got {other:?}"),
+    }
+    let stop = json!({"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "general-purpose",
+                       "agent_transcript_path": "/tmp/a1.jsonl"});
+    match classify("claude", &stop) {
+        HookKind::SubagentEvent { event, transcript_path, .. } => {
+            assert_eq!(event, "stop");
+            assert_eq!(transcript_path.as_deref(), Some("/tmp/a1.jsonl"));
+        }
+        other => panic!("expected SubagentEvent, got {other:?}"),
+    }
+    assert!(matches!(classify("claude", &json!({"hook_event_name": "TeammateIdle"})), HookKind::Ignore(_)));
+}
+
+/// issue #1770、#2107：`PreCompact` 與 `PostCompact` 分類成 `CompactStarting` 與 `CompactEnding`。
+/// 支援解析子 agent 壓縮事件所帶的 `agent_id` 與 `agent_type`，無欄位時相容主 session。
+#[test]
+fn pre_compact_classifies_as_a_pure_compacting_marker() {
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})),
+        HookKind::CompactStarting { agent_id: None, agent_type: None }
+    ));
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "PostCompact"})),
+        HookKind::CompactEnding { agent_id: None, agent_type: None }
+    ));
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "SessionStart", "session_id": "s-main"})),
+        HookKind::Identity { session_id: Some(ref s), agent_id: None, agent_type: None, .. } if s == "s-main"
+    ));
+
+    let sub_pre = json!({
+        "hook_event_name": "PreCompact",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose",
+        "trigger": "auto"
+    });
+    match classify("claude", &sub_pre) {
+        HookKind::CompactStarting { agent_id, agent_type } => {
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected CompactStarting with agent_id/agent_type, got {other:?}"),
+    }
+
+    let sub_post = json!({
+        "hook_event_name": "PostCompact",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose"
+    });
+    match classify("claude", &sub_post) {
+        HookKind::CompactEnding { agent_id, agent_type } => {
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected CompactEnding with agent_id/agent_type, got {other:?}"),
+    }
+
+    let sub_start = json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "sub-session-123",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose"
+    });
+    match classify("claude", &sub_start) {
+        HookKind::Identity { session_id, agent_id, agent_type, .. } => {
+            assert_eq!(session_id.as_deref(), Some("sub-session-123"));
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected Identity with agent_id/agent_type, got {other:?}"),
+    }
+}
+
+#[test]
+fn nr_relay_legacy_name_only_spool_is_unknown() {
+    assert!(matches!(classify("claude", &json!({"hook_event_name": RELAY_ANNOUNCE_EVENT,
+        "to_agent": "old-name", "text": "不能以舊名猜測這句話的收件身份"})), HookKind::Ignore(_)));
+}
+
+/// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉；只在原文有 Tab 時試去 Tab 候選。
+#[test]
+fn a_prompt_whose_tab_the_tui_swallowed_is_still_the_same_prompt() {
+    let sent = "條碼列印・進貨單\t每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
+    let seen = "條碼列印・進貨單每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
+    assert!(!answers_another_prompt(Some(sent), Some(seen)));
+    assert!(!hook_user_is_new(&[sent.to_string()], seen), "同一句不再多一則使用者訊息");
+    assert!(answers_another_prompt(Some(sent), Some("另一件事")), "真的是另一句照樣分得出來");
 }
