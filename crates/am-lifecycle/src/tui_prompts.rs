@@ -191,7 +191,7 @@ fn sits_on_empty_composer(below: &[&str]) -> bool {
         .is_some_and(|rest| matches!(rest.as_str(), "❯" | "›" | ">"))
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod mode_row_tests {
     use super::*;
 
@@ -1183,7 +1183,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
 }
 
 /// 測試共用的真畫面／抄錄畫面（`lifecycle::prompt` 的整合測試也用）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod screens {
     /// 2026-09-22 build child 停在這裡的畫面（巡檢抄錄的原文，選項與提示逐字；框線照 2.1.278 的樣子）。
     pub const AUTO_MODE: &str = "\
@@ -1305,30 +1305,15 @@ pub mod screens {
 "#;
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod survey_fingerprint_tests {
-    use super::*;
-    use crate::testing as tt;
-
-    #[tokio::test]
-    async fn an_ended_runs_survey_dedupe_record_is_dropped() {
-        let env = tt::env().await;
-        let app = env.app.clone();
-        app.survey_fingerprints.lock().await.insert(
-            "survey-gone".into(),
-            SurveyFingerprintState { fingerprint: 3, attempt_complete: false },
-        );
-        app.survey_fingerprints.lock().await.insert(
-            "survey-kept".into(),
-            SurveyFingerprintState { fingerprint: 4, attempt_complete: false },
-        );
-        retain_survey_runs(&app, &["survey-kept".to_string()]).await;
-        let m = app.survey_fingerprints.lock().await;
-        assert!(!m.contains_key("survey-gone") && m.contains_key("survey-kept"));
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod test_seams {
+    pub const SURVEY_KEY_NOT_TAKEN: &str = super::SURVEY_KEY_NOT_TAKEN;
+    pub fn survey_fingerprint_state(fingerprint: u64, attempt_complete: bool) -> super::SurveyFingerprintState {
+        super::SurveyFingerprintState { fingerprint, attempt_complete }
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     #[derive(Default)]
     struct FakeRunPaneReader {
@@ -1482,8 +1467,6 @@ Grok Build 1.0.46\n\
     }
 
     use super::*;
-    use std::sync::Arc;
-    use crate::state::App;
 
     const SURVEY: &str = r#"
  ● How is Claude doing this session? (optional)
@@ -1514,239 +1497,6 @@ Grok Build 1.0.46\n\
  │    2. No, and tell Claude what to do │
  ╰──────────────────────────────────────╯
 "#;
-
-    async fn survey_test_env() -> (crate::testing::Env, crate::db::Run) {
-        let env = crate::testing::env().await;
-        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "survey").await;
-        let run_id = crate::testing::fake_run(&env.app, &bot.id).await;
-        let run = crate::db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
-        assert_eq!(run.id, run_id);
-        env.herdr.set_screen(run.pane_id.as_deref().unwrap(), screens::FEEDBACK_SURVEY);
-        (env, run)
-    }
-
-    async fn assert_no_survey_key_after_race<F, Fut>(mutate: F)
-    where
-        F: FnOnce(Arc<App>, crate::db::Run) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let (env, run) = survey_test_env().await;
-        let app = env.app.clone();
-        let hook_run = run.clone();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || mutate(app, hook_run));
-
-        assert!(!dismiss_if_survey(&env.app, &run).await, "changed authority must not count as a dismissal");
-        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a changed authority receives no key");
-    }
-
-    #[tokio::test]
-    async fn a_replaced_dialog_receives_no_survey_zero() {
-        let (env, run) = survey_test_env().await;
-        let pane = run.pane_id.clone().unwrap();
-        let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
-            replace(&pane, PERMISSION);
-        });
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a permission dialog must receive no stale 0");
-        assert!(!env.app.survey_fingerprints.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
-    }
-
-    fn press_keys(env: &crate::testing::Env) -> Vec<serde_json::Value> {
-        env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect()
-    }
-
-    /// 像真 herdr 0.9.5：`pane.read` 的 revision 恆為 0（#1910）。畫面放在 `LivePane` 的原樣畫面欄位裡。
-    fn zero_revision_survey(env: &crate::testing::Env, run: &crate::db::Run) -> String {
-        let pane = run.pane_id.clone().unwrap();
-        env.herdr.live_pane(
-            &pane,
-            crate::testing::LivePane {
-                cold_resume_menu: Some(screens::FEEDBACK_SURVEY.to_string()),
-                zero_revision: true,
-                no_spinner: true,
-                ..Default::default()
-            },
-        );
-        pane
-    }
-
-    fn set_live_screen(env: &crate::testing::Env, pane: &str, text: &str) {
-        env.herdr.live.lock().unwrap().get_mut(pane).unwrap().cold_resume_menu = Some(text.to_string());
-    }
-
-    #[tokio::test]
-    async fn a_revision_change_with_identical_survey_text_still_receives_zero() {
-        let (env, run) = survey_test_env().await;
-        let pane = run.pane_id.clone().unwrap();
-        let bump = env.herdr.bump_screen_revision_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
-            bump(&pane);
-        });
-
-        assert!(dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env)[0], serde_json::json!(["0"]), "revision is no evidence; the identical text and the fence are");
-    }
-
-    #[tokio::test]
-    async fn a_survey_is_dismissed_when_herdr_reports_revision_zero() {
-        let (env, run) = survey_test_env().await;
-        zero_revision_survey(&env, &run);
-
-        assert!(dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env), [serde_json::json!(["0"]), serde_json::json!(["enter"])]);
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env).len(), 2, "the same frame is pressed once");
-        assert!(
-            !crate::lifecycle::claude_resume_menu::gave_up()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .first_time(&run.id, SURVEY_KEY_NOT_TAKEN, std::time::Instant::now()),
-            "the unchanged survey must register the one-time give-up warning"
-        );
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env).len(), 2, "the same frame is not retried after warning");
-    }
-
-    #[tokio::test]
-    async fn a_zero_revision_survey_whose_text_changes_between_reads_receives_no_key() {
-        let (env, run) = survey_test_env().await;
-        let pane = zero_revision_survey(&env, &run);
-        let live = env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
-            live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu = Some(PERMISSION.to_string());
-        });
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(press_keys(&env).is_empty(), "a dialog that replaced the survey receives no stale 0");
-        assert!(!env.app.survey_fingerprints.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
-    }
-
-    #[tokio::test]
-    async fn a_zero_revision_screen_that_is_not_a_survey_receives_no_key() {
-        let (env, run) = survey_test_env().await;
-        let pane = zero_revision_survey(&env, &run);
-        set_live_screen(&env, &pane, PERMISSION);
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(press_keys(&env).is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_second_survey_in_the_same_run_is_dismissed_again_with_zero_revision() {
-        let (env, run) = survey_test_env().await;
-        let pane = zero_revision_survey(&env, &run);
-        let live = env.herdr.live.clone();
-        let gone = pane.clone();
-        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
-            live.lock().unwrap().get_mut(&gone).unwrap().cold_resume_menu = Some(screens::IDLE_CLAUDE.to_string());
-        });
-        assert!(dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env), [serde_json::json!(["0"])]);
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        set_live_screen(&env, &pane, screens::FEEDBACK_SURVEY);
-        assert!(dismiss_if_survey(&env.app, &run).await);
-        assert_eq!(press_keys(&env)[..2], [serde_json::json!(["0"]), serde_json::json!(["0"])]);
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_final_survey_read_receives_no_zero() {
-        let (env, run) = survey_test_env().await;
-        let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
-            fail("pane.read", crate::testing::Fault::Refuse);
-        });
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "an unreadable last-moment pane is uncertain");
-    }
-
-    #[tokio::test]
-    async fn classifier_match_without_an_idle_composer_receives_no_zero() {
-        let (env, run) = survey_test_env().await;
-        env.herdr.set_screen(run.pane_id.as_deref().unwrap(), SURVEY);
-        assert!(is_feedback_survey(SURVEY), "the classifier fixture is recognized");
-        assert!(!composer_is_idle(&SURVEY.lines().collect::<Vec<_>>()), "the cursor shape is not an idle composer");
-
-        assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "composer uncertainty fails closed");
-    }
-
-    #[tokio::test]
-    async fn an_active_run_replacement_receives_no_survey_zero() {
-        assert_no_survey_key_after_race(|app, run| async move {
-            sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
-            crate::testing::fake_run(&app, &run.bot_id).await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_pane_replacement_receives_no_survey_zero() {
-        assert_no_survey_key_after_race(|app, run| async move {
-            sqlx::query("UPDATE runs SET pane_id='pane-replaced' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_herdr_session_replacement_receives_no_survey_zero() {
-        assert_no_survey_key_after_race(|app, run| async move {
-            sqlx::query("UPDATE runs SET herdr_session='default' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_native_session_replacement_receives_no_survey_zero() {
-        assert_no_survey_key_after_race(|app, run| async move {
-            sqlx::query("UPDATE runs SET native_session_id='native-replaced' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn one_stage_survey_dismissal_does_not_press_enter() {
-        let (env, run) = survey_test_env().await;
-        let pane = run.pane_id.clone().unwrap();
-        let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
-            replace(&pane, screens::IDLE_CLAUDE);
-        });
-
-        assert!(dismiss_if_survey(&env.app, &run).await, "the authorized 0 key was sent");
-        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
-        assert_eq!(keys, [serde_json::json!(["0"])]);
-    }
-
-    #[tokio::test]
-    async fn a_changed_second_stage_receives_no_stale_enter() {
-        let (env, run) = survey_test_env().await;
-        let pane = run.pane_id.clone().unwrap();
-        let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
-            replace(&pane, PERMISSION);
-        });
-
-        assert!(dismiss_if_survey(&env.app, &run).await, "the first 0 was authorized");
-        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
-        assert_eq!(keys, [serde_json::json!(["0"])]);
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_final_second_stage_read_receives_no_enter() {
-        let (env, run) = survey_test_env().await;
-        let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
-            fail("pane.read", crate::testing::Fault::Refuse);
-        });
-
-        assert!(dismiss_if_survey(&env.app, &run).await, "the first 0 was authorized");
-        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
-        assert_eq!(keys, [serde_json::json!(["0"])]);
-    }
 
     #[test]
     fn survey_is_recognised_even_when_wrapped() {
@@ -2413,7 +2163,7 @@ pub trait SurveyFingerprints: Send + Sync {
 }
 
 /// [`screen_has_answerable_prompt`] 的單元測試：兩種測試設定（有沒有 `daemon-test-harness`）都跑。
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod answerable_prompt_tests {
     use super::screen_has_answerable_prompt as has;
 
