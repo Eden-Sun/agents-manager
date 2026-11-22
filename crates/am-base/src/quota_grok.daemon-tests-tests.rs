@@ -283,4 +283,19 @@
         let now = chrono::DateTime::parse_from_rfc3339("2026-03-08T12:00:00-04:00").unwrap().with_timezone(&chrono_tz::America::New_York);
         let r = parse_reset(" March 9, 02:30", now).unwrap();
         assert_eq!(r, "2026-03-09T06:30:00.000Z");
+
+    #[test]
+    fn a_grok_login_screen_is_not_a_usage_screen() {
+        assert!(is_login_screen("Sign in to Grok\nApprove in your browser to finish signing in.\n3Z46-PGWX\nWaiting for approval..."));
+        assert!(is_login_screen("You are not authenticated."));
+        assert!(is_login_screen("Authentication required. Run `grok login` to re-authenticate."));
+        assert!(!is_login_screen("Weekly limit (SuperGrok)\n████░░░░░░░░░░░░░░░░░░░░░░░░░░  14%\nResets: September 12, 16:28"));
     }
+
+    #[test]
+    fn a_host_marked_logged_out_is_not_probed_until_it_is_seen_logged_in_again() {
+        assert!(!should_probe_grok(Some(false), false));
+        assert!(should_probe_grok(None, false));
+        assert!(should_probe_grok(Some(true), false));
+    }
+}

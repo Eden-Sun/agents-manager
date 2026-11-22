@@ -370,3 +370,23 @@ pub fn forget_host(host: &str) {
 pub fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool {
     logged_in != Some(false) && !cooling
 }
+
+pub fn is_login_screen(screen: &str) -> bool {
+    let low = screen.to_ascii_lowercase();
+    ["sign in to grok", "approve in your browser", "waiting for approval", "you are not authenticated", "not logged in", "authentication required", "run `grok login`"]
+        .iter()
+        .any(|m| low.contains(m))
+}
+
+#[derive(Debug)]
+pub struct NotLoggedIn;
+
+impl std::fmt::Display for NotLoggedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("grok is not logged in on this host")
+    }
+}
+
+impl std::error::Error for NotLoggedIn {}
+
+pub const PROBE_BROWSER: &str = "/usr/bin/true";

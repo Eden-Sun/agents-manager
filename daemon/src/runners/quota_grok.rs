@@ -1,9 +1,9 @@
 //! `quota_grok` runner 與背景額度輪詢。
 
 use crate::quota_grok::{
-    client_for_fence, cooling_down, name_lost, parse_probe_screen, park, probe_label,
-    should_probe_grok, start_when_shell_ready, sweep_stale, wait_for_grok_pane, Probe,
-    DIALOG_TIMEOUT, GROK_POLL, RETRY_AFTER_FAILURE,
+    client_for_fence, cooling_down, is_login_screen, name_lost, parse_probe_screen, park, probe_label,
+    should_probe_grok, start_when_shell_ready, sweep_stale, wait_for_grok_pane, NotLoggedIn, Probe,
+    DIALOG_TIMEOUT, GROK_POLL, PROBE_BROWSER, RETRY_AFTER_FAILURE,
 };
 use crate::state::App;
 use anyhow::{anyhow, bail, Result};
@@ -32,7 +32,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
         return Ok(false);
     }
     let client = client_for_fence(app, &fence).await?;
-    let (ws, pane) = client.workspace_create(&cwd, &probe_label(app, host).await, json!({})).await?;
+    let (ws, pane) = client.workspace_create(&cwd, &probe_label(app, host).await, json!({"BROWSER": PROBE_BROWSER})).await?;
     let probe = Probe::new(client.clone(), ws.workspace_id.clone());
     let pane_id = pane.pane_id.clone();
 
@@ -54,6 +54,10 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
+        if is_login_screen(&last) {
+            drop(probe);
+            return Err(anyhow::Error::new(NotLoggedIn));
+        }
         if let Some(q) = parse_probe_screen(app, host, &last, chrono::Utc::now()).await {
             let published = crate::quota::set_fenced(app, host, "grok", q, &fence).await;
             drop(probe);
@@ -75,10 +79,20 @@ pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bo
     }
     match refresh_grok(app, host).await {
         Ok(v) => Ok(Some(v)),
+        Err(e) if e.downcast_ref::<NotLoggedIn>().is_some() => {
+            mark_logged_out(app, host).await;
+            Ok(None)
+        }
         Err(e) => {
             park(&key, RETRY_AFTER_FAILURE);
             Err(e)
         }
+    }
+}
+
+async fn mark_logged_out(app: &Arc<App>, host: &str) {
+    if let Some(t) = app.tools.lock().await.get_mut(host).and_then(|h| h.tools.get_mut("grok")) {
+        t.logged_in = Some(false);
     }
 }
 
