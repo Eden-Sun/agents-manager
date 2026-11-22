@@ -20,6 +20,8 @@ check "lifecycle_tests::child_alerts:: testing::scratch_leak_guard:: timestamp_c
 check "lifecycle_tests::judge:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/judge.rs"
 check "judge::collision:: lifecycle_tests::judge::collision::" "crates/am-lifecycle/src/judge/collision.rs"
 check "lifecycle_tests::handoff::" "crates/am-lifecycle/src/handoff.rs"
+check "lifecycle::interrupt_grace:: lifecycle_tests::interrupt_grace::" "crates/am-lifecycle/src/lifecycle/interrupt_grace.rs"
+check "lifecycle::interruption:: lifecycle_tests::interruption::" "crates/am-lifecycle/src/lifecycle/interruption.rs"
 check "background_jobs:: lifecycle_tests::background_jobs::" "crates/am-lifecycle/src/background_jobs.rs"
 check "lifecycle_tests::grok_transcript:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/grok_transcript.rs"
 check "lifecycle_tests::claude_child_log:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/claude_child_log.rs"

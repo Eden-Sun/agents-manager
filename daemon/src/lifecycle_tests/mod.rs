@@ -20,6 +20,8 @@ mod fence;
 mod grok_hook;
 mod grok_transcript;
 mod handoff;
+mod interrupt_grace;
+mod interruption;
 pub mod judge;
 mod owed_delivery;
 mod pane_text;
