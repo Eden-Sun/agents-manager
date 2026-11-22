@@ -841,7 +841,7 @@ async fn a_required_resume_refuses_instead_of_starting_fresh() {
     let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(e.app.db()).await.unwrap();
     assert_eq!(sid.as_deref(), Some("sid-pm"));
 
-    sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run_id).execute(e.app.db()).await.unwrap();
+    sqlx::query("UPDATE runs SET native_session_id='sid-live', transcript_path=? WHERE id=?").bind(transcript.to_str().unwrap()).bind(&run_id).execute(e.app.db()).await.unwrap();
     restart_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
     assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-live"]));
     std::fs::remove_file(&transcript).unwrap();
@@ -2319,4 +2319,45 @@ async fn restarts_racing_a_reconcile_loop_always_come_back() {
         .await
         .unwrap();
     assert_eq!(live, 1, "exactly one live run");
+}
+
+#[tokio::test]
+async fn fresh_claude_start_binds_a_daemon_chosen_session_id_and_resume_does_not() {
+    let e = env().await;
+    let bot = claude_bot(&e.app, &e.project_id, "fresh-sid").await;
+    start_bot(&e.app, &bot.id).await.unwrap();
+    let args = started_args(&e).pop().unwrap();
+    let pos = args.iter().position(|a| a == "--session-id").expect("fresh start carries --session-id");
+    let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+    assert_eq!(run.native_session_id.as_deref(), Some(args[pos + 1].as_str()));
+    assert_eq!(args[pos + 1].len(), 36);
+    assert!(!args.iter().any(|a| a == "--exclude-dynamic-system-prompt-sections"));
+    stop_bot(&e.app, &bot.id).await.unwrap();
+
+    start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+    let args = started_args(&e).pop().unwrap();
+    assert!(args.iter().any(|a| a == "--resume"));
+    assert!(!args.iter().any(|a| a == "--session-id"));
+}
+
+#[tokio::test]
+async fn exclude_dynamic_system_prompt_is_off_by_default_and_follows_the_config() {
+    let e = env().await;
+    e.app.cfg.update(|c| { c.claude.exclude_dynamic_system_prompt = true; Ok(()) }).await.unwrap();
+    let bot = claude_bot(&e.app, &e.project_id, "exclude-dyn").await;
+    start_bot(&e.app, &bot.id).await.unwrap();
+    let args = started_args(&e).pop().unwrap();
+    assert_eq!(args.iter().filter(|a| *a == "--exclude-dynamic-system-prompt-sections").count(), 1);
+}
+
+#[test]
+fn fresh_session_id_is_a_valid_uuid_and_yields_to_explicit_session_flags() {
+    let id = super::claude_fresh_session_id(&[]).unwrap();
+    let parts: Vec<&str> = id.split('-').collect();
+    assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12]);
+    assert!(parts[2].starts_with('7') && "89ab".contains(&parts[3][..1]));
+    assert_ne!(id, super::claude_fresh_session_id(&[]).unwrap());
+    for flag in ["--resume", "-c", "--session-id=x", "--fork-session"] {
+        assert!(super::claude_fresh_session_id(&[flag.to_string()]).is_none(), "{flag}");
+    }
 }

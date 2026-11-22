@@ -1810,6 +1810,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 if provider == "claude" || provider == "agy" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
+                if provider == "claude" && body.payload.get("source").and_then(Value::as_str) == Some("startup") {
+                    if let (Some(assigned), Some(seen)) = (r.native_session_id.as_deref(), session_id.as_deref()) {
+                        if assigned != seen {
+                            tracing::warn!(bot = %bot.name, run = %r.id, assigned, seen, "SessionStart 回報的 session id 不是 daemon 啟動時指定的那個");
+                        }
+                    }
+                }
                 let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(?, native_session_id),

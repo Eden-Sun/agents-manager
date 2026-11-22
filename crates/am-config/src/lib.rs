@@ -461,6 +461,8 @@ pub struct ConfigFile {
     /// issue #748：codex 0.159 `instant_interrupt` 的 canary 旗標（預設關）。
     #[serde(default, skip_serializing_if = "CodexCfg::is_default")]
     pub codex: CodexCfg,
+    #[serde(default, skip_serializing_if = "ClaudeCfg::is_default")]
+    pub claude: ClaudeCfg,
     /// issue #749：codex app-server 的 thread 歷史當結構化 turn evidence（SPEC §4.4a）。預設開，可關。
     #[serde(default, skip_serializing_if = "CodexHistoryCfg::is_default")]
     pub codex_history: CodexHistoryCfg,
@@ -731,6 +733,18 @@ pub struct CodexCfg {
 }
 
 impl CodexCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeCfg {
+    #[serde(default)]
+    pub exclude_dynamic_system_prompt: bool,
+}
+
+impl ClaudeCfg {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }

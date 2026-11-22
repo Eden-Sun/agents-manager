@@ -1975,7 +1975,7 @@ pub async fn latest_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT native_session_id FROM runs
           WHERE bot_id = ? AND native_session_id IS NOT NULL
-          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+          ORDER BY (transcript_path IS NULL), started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(pool)
@@ -1987,7 +1987,7 @@ pub async fn last_native_session(pool: &SqlitePool, bot_id: &str) -> Result<Opti
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL
-          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+          ORDER BY (transcript_path IS NULL), started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(pool)

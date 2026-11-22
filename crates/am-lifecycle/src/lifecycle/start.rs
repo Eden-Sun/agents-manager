@@ -1339,6 +1339,26 @@ async fn stage_persona(
 
 /// issue #748：codex 啟動時要不要帶 `-c features.instant_interrupt=true`。`[codex] instant_interrupt` 開著才帶；
 /// 受限的分享 bot 不帶（它的參數由籠子決定）。回傳空＝沒帶，`runs.codex_instant_interrupt` 照這個結果記 0／1。
+pub(crate) fn claude_exclude_dynamic_args(args: &[String]) -> Vec<String> {
+    if args.iter().any(|a| a == "--exclude-dynamic-system-prompt-sections") {
+        Vec::new()
+    } else {
+        vec!["--exclude-dynamic-system-prompt-sections".into()]
+    }
+}
+
+pub(crate) fn claude_fresh_session_id(args: &[String]) -> Option<String> {
+    const CONFLICTS: [&str; 7] = ["--resume", "-r", "--continue", "-c", "--session-id", "--from-pr", "--fork-session"];
+    if args.iter().any(|a| CONFLICTS.contains(&a.as_str()) || CONFLICTS.iter().any(|c| a.starts_with(&format!("{c}=")))) {
+        return None;
+    }
+    let mut bytes = ulid::Ulid::new().0.to_be_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
+}
+
 pub(crate) fn codex_instant_interrupt_args(flag_on: bool, restricted: bool) -> Vec<String> {
     if flag_on && !restricted {
         vec!["-c".into(), "features.instant_interrupt=true".into()]
@@ -1620,6 +1640,15 @@ async fn start_inner_body(
         }
     }
     args.extend(codex_pane_guard_args(&bot.kind));
+    if bot.kind == "claude" {
+        if app.cfg().get().await.claude.exclude_dynamic_system_prompt {
+            args.extend(claude_exclude_dynamic_args(&args));
+        }
+        if let Some(sid) = claude_fresh_session_id(&args) {
+            sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ?").bind(&sid).bind(run_id).execute(app.db()).await.map_err(up)?;
+            args.extend(["--session-id".to_string(), sid]);
+        }
+    }
 
     let cwd = restricted.as_deref().unwrap_or_else(|| bot_cwd(bot, project));
     for w in app.pretrust_for_start(bot, &project.host, cwd).await {

@@ -643,7 +643,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                 .bind(&bot.id).bind(&session).bind(&session).fetch_optional(app.db()).await?
         };
         if latest.is_none() { continue; }
-        let missing_identity = latest.as_ref().is_some_and(|r| r.pane_id.as_deref().is_none_or(str::is_empty) && r.native_session_id.as_deref().is_none_or(str::is_empty));
+        let missing_identity = latest.as_ref().is_some_and(|r| r.pane_id.as_deref().is_none_or(str::is_empty) && (r.state == "starting" || r.native_session_id.as_deref().is_none_or(str::is_empty)));
         let unmapped_start = missing_identity && active.as_ref().is_some_and(|r| r.state == "starting");
         if missing_identity {
             if !unmapped_start || !agents.is_empty() || !client.agent_list().await.is_ok_and(|agents| agents.is_empty()) {

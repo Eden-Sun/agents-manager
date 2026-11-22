@@ -1886,6 +1886,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
    - **泡泡標「插隊」**：真的要打斷一個回合（`send_now: "interrupted"` 那條路）時，新那一則的 user Message 寫 `sent_via = 'send_now'`；
      閒著時按插隊就是一般送出，不標。
+   - **claude 啟動參數**：全新啟動（argv 沒有 `--resume`／`--continue`／`--fork-session`／`--session-id`）時 daemon 產 UUIDv7 帶 `--session-id`，同時先寫進 `runs.native_session_id`；SessionStart 回報的 id 不同時記 WARN 並以 hook 為準。`[claude] exclude_dynamic_system_prompt = true`（預設關）才加 `--exclude-dynamic-system-prompt-sections`。
    - **codex steer**（issue #748，**預設關的 canary**）：`[codex] instant_interrupt = true` ＋ 這個 run 啟動時帶了
      `-c features.instant_interrupt=true`（`runs.codex_instant_interrupt = 1`）＋ 跑著的 codex ≥ `0.159.0`
      （`codex_update::running_version_of`，巡邏從畫面版本行讀到的；沒讀到＝不賭）才放行（`send_now::gate` → `Mode::CodexSteer`）。
