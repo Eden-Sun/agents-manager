@@ -11,6 +11,7 @@ mod claude_child_log;
 mod child_alerts;
 mod claude_resume_menu;
 mod codex_history;
+mod codex_live;
 mod codex_model_migration;
 mod composer_draft;
 mod daemon_notice;
