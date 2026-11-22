@@ -1167,7 +1167,12 @@ async fn detect_with_fence_checked<H: ToolsEnv>(app: &Arc<H>, host: &str, fence:
     };
     let baseline = crate::host_baseline::BaselineReport {
         os: crate::host_baseline::os_of(&out),
-        issues: crate::host_baseline::evaluate(&out),
+        issues: crate::host_baseline::evaluate(&out).map(|mut v| {
+            if host != LOCAL_HOST {
+                v.retain(|i| i.id != "agy.rtk_rewrite");
+            }
+            v
+        }),
         checked_at: crate::db::now(),
         failed_at: None,
         error: None,

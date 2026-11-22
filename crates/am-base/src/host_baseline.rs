@@ -140,7 +140,23 @@ pub fn render_baseline_sh(m: &manifest::Manifest) -> String {
             })),
         )
         .replace("__AM_HERDR_FILES__", &sh_words(names(&m.herdr_files)))
+        .replace("__AM_AGY_RTK__", if m.agy_rtk.is_some() { AGY_RTK_PROBE_SH } else { "" })
 }
+
+const AGY_RTK_PROBE_SH: &str = r#"
+bl_agy_rtk=na
+if [ -d "$HOME/.gemini" ] || command -v agy >/dev/null 2>&1; then
+  bl_rp=$(printf '%s\n' "$bl_paths" | sed -n 's/^AM_BLP rtk //p' | tail -1)
+  case "$bl_rp" in /*) [ -x "$bl_rp" ] || bl_rp="" ;; *) bl_rp="" ;; esac
+  [ -n "$bl_rp" ] || bl_rp=$(command -v rtk 2>/dev/null)
+  case "$bl_rp" in /*) [ -x "$bl_rp" ] || bl_rp="" ;; *) bl_rp="" ;; esac
+  if [ -n "$bl_rp" ]; then
+    bl_cur=$(head -n 1 "$HOME/.config/agents-manager/agy-rtk" 2>/dev/null)
+    case "$bl_cur" in /*) if [ -x "$bl_cur" ]; then bl_agy_rtk=1; else bl_agy_rtk=0; fi ;; *) bl_agy_rtk=0 ;; esac
+  fi
+fi
+printf 'AM_BL agy-rtk %s\n' "$bl_agy_rtk"
+"#;
 
 const BASELINE_SH_TEMPLATE: &str = r#"
 printf 'AM_BL begin\n'
@@ -254,6 +270,7 @@ if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://([^/@[:space:]]+:[^/@[:space:
 else
   printf 'AM_BL gitconfig-token 0\n'
 fi
+__AM_AGY_RTK__
 printf 'AM_BL end\n'
 "#;
 
@@ -436,6 +453,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 if !present(f.get(3)) {
                     let table = &m.herdr_files;
                     issues.push(issue(format!("herdr.{}", f[2]), severity_of(table, f[2]), format!("herdr：缺 {}", f[2])));
+                }
+            }
+            "agy-rtk" if f.len() >= 3 && f[2] == "0" => {
+                if let Some(sev) = m.agy_rtk {
+                    issues.push(BaselineIssue {
+                        note: Some("agy 的 shell 指令不會自動改寫成 rtk（省 token）".into()),
+                        ..issue("agy.rtk_rewrite".into(), sev, "agy：shell 指令的 rtk 改寫還沒啟用".into())
+                    });
                 }
             }
             "gitconfig-token" if f.len() >= 3

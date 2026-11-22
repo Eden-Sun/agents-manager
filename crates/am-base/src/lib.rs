@@ -55,6 +55,7 @@ pub mod herdr_update;
 pub mod herdr_version;
 pub mod home;
 pub mod hook_body;
+pub mod agy_rtk;
 pub mod hook_cmd;
 pub mod hook_inbox;
 pub mod host_baseline;

@@ -721,3 +721,14 @@ async fn a_failed_detection_with_no_earlier_baseline_invents_none() {
     note_failure(&app, "never-measured", &anyhow::anyhow!("boom")).await;
     assert!(app.host_baseline.lock().await.get("never-measured").is_none(), "沒量過就維持「尚未檢查」，不憑空造一份");
 }
+
+#[test]
+fn the_agy_rtk_line_is_a_gap_only_when_agy_and_rtk_exist_and_the_enable_file_is_not_there() {
+    for (state, want) in [("0", true), ("1", false), ("na", false)] {
+        let out = GOOD.replace("AM_BL end", &format!("AM_BL agy-rtk {state}\nAM_BL end"));
+        assert_eq!(ids(&out).contains(&"agy.rtk_rewrite".to_string()), want, "{state}");
+    }
+    assert_eq!(ids(GOOD), Vec::<String>::new(), "舊探測沒有這一行：不報");
+    let out = GOOD.replace("AM_BL end", "AM_BL agy-rtk 0\nAM_BL end");
+    assert_eq!(sev(&out, "agy.rtk_rewrite"), WARN);
+}

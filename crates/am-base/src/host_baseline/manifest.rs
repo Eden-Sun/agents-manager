@@ -58,6 +58,7 @@ pub struct Manifest {
     pub codex_files: Vec<Item>,
     pub codex_keys: Vec<CodexKey>,
     pub herdr_files: Vec<Item>,
+    pub agy_rtk: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +73,15 @@ struct Raw {
     codex: RawCodex,
     #[serde(default)]
     herdr: RawFiles,
+    #[serde(default)]
+    agy: RawAgy,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawAgy {
+    #[serde(default)]
+    rtk_rewrite: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -340,7 +350,11 @@ impl Manifest {
         if !codex_keys.is_empty() && !codex_files.iter().any(|f| f.name == "config.toml") {
             return Err("codex.keys needs `config.toml` in codex.files".into());
         }
-        Ok((Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, herdr_files }, values))
+        let agy_rtk = raw.agy.rtk_rewrite.as_deref().map(|s| severity(s, "agy.rtk_rewrite")).transpose()?;
+        if agy_rtk.is_some() && !tools.iter().any(|t| t.name == "rtk") {
+            return Err("agy.rtk_rewrite needs `rtk` in tools (the probe finds rtk's path with it)".into());
+        }
+        Ok((Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, herdr_files, agy_rtk }, values))
     }
 }
 
@@ -539,6 +553,7 @@ mod tests {
             codex_files: vec![item("XF")],
             codex_keys: vec![CodexKey { key: bad("XK"), check: CodexCheck::Present, severity: super::super::WARN }],
             herdr_files: vec![item("HF")],
+            agy_rtk: Some(super::super::WARN),
         };
         let script = super::super::render_baseline_sh(&m);
         let out = std::process::Command::new("/bin/sh")
@@ -769,6 +784,7 @@ printf 'AM_BL end\n'
             for path in [path_with_jq(), path_without_jq(&scratch.0)] {
                 let old = run(OLD_BASELINE_SH, &h, &path, &envs);
                 let new = run(new_sh, &h, &path, &envs);
+                let new: Vec<u8> = String::from_utf8_lossy(&new).lines().filter(|l| !l.starts_with("AM_BL agy-rtk ")).flat_map(|l| format!("{l}\n").into_bytes()).collect();
                 assert_eq!(String::from_utf8_lossy(&old), String::from_utf8_lossy(&new), "variant {i}");
                 assert_eq!(old, new, "variant {i}");
                 runs += 1;
@@ -806,5 +822,30 @@ printf 'AM_BL end\n'
         for w in want {
             assert!(seen.contains(w), "never exercised `{w}`; seen {seen:?}");
         }
+    }
+
+    #[test]
+    fn the_probe_script_reports_the_agy_rtk_state_from_the_enable_file() {
+        let scratch = crate::hosts::remote_script_support::Scratch::new();
+        let h = scratch.0.join("home");
+        std::fs::create_dir_all(h.join(".gemini")).unwrap();
+        std::fs::create_dir_all(h.join(".local/bin")).unwrap();
+        let rtk = h.join(".local/bin/rtk");
+        std::fs::write(&rtk, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&rtk, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let script = super::super::baseline_sh();
+        let run = |extra_path: &str| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env_clear().env("HOME", &h).env("PATH", format!("{extra_path}:/usr/bin:/bin")).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let line = |out: &str| out.lines().find(|l| l.starts_with("AM_BL agy-rtk ")).map(str::to_string);
+        let bin = h.join(".local/bin");
+        assert_eq!(line(&run(bin.to_str().unwrap())).as_deref(), Some("AM_BL agy-rtk 0"));
+        std::fs::create_dir_all(h.join(".config/agents-manager")).unwrap();
+        std::fs::write(h.join(".config/agents-manager/agy-rtk"), format!("{}\n", rtk.display())).unwrap();
+        assert_eq!(line(&run(bin.to_str().unwrap())).as_deref(), Some("AM_BL agy-rtk 1"));
+        std::fs::write(h.join(".config/agents-manager/agy-rtk"), "/nonexistent/rtk\n").unwrap();
+        assert_eq!(line(&run(bin.to_str().unwrap())).as_deref(), Some("AM_BL agy-rtk 0"));
+        assert_eq!(line(&run("/nonexistent")).as_deref(), Some("AM_BL agy-rtk na"), "沒有 rtk：不啟用也不報");
     }
 }

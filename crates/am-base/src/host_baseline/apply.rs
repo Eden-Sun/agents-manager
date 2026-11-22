@@ -11,7 +11,7 @@
 //! - 還原時主機上的 `manifest` 是不可信輸入：先整份驗過（只認固定幾個目標、編號、權限），任一行不對整個拒絕，
 //!   驗完才開始寫。
 
-use super::plan::{Plan, MERGE_KEY};
+use super::plan::{Plan, MERGE_KEY, WRITE_FILE};
 use crate::hosts::sh_quote;
 use serde::Serialize;
 
@@ -86,6 +86,7 @@ enum Format {
     /// `table` 空字串＝根層的鍵。
     Toml { table: String, key: String, literal: String },
     Json { path: String, literal: String },
+    AgyRtk,
 }
 
 /// 要寫的一個鍵。`token` 是主機上的目標（`codex/config.toml`、`claude-default/settings.json`、`claude-cc<N>/settings.json`），
@@ -120,7 +121,7 @@ fn toml_literal(v: &serde_json::Value) -> Option<String> {
 
 /// 從計畫挑出要寫的鍵。`ids` 省略＝計畫裡全部 `merge_key`；給了就每個都必須是計畫裡的 `merge_key`，否則回那個 id（400）。
 pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> {
-    let fixable: Vec<_> = plan.actions.iter().filter(|a| a.action == MERGE_KEY).collect();
+    let fixable: Vec<_> = plan.actions.iter().filter(|a| a.action == MERGE_KEY || a.action == WRITE_FILE).collect();
     let chosen: Vec<_> = match ids {
         None => fixable,
         Some(ids) => {
@@ -139,6 +140,10 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
         let manual = |reason| Outcome { id: a.id.clone(), result: MANUAL, reason: Some(reason) };
         if a.id.starts_with("gitconfig") || a.target.starts_with("git/") {
             p.manual.push(manual(super::plan::SECRET));
+            continue;
+        }
+        if a.action == WRITE_FILE && a.target == "agy/rtk-rewrite" {
+            p.writes.push(KeyWrite { id: a.id.clone(), token: "agy/rtk-rewrite".into(), format: Format::AgyRtk });
             continue;
         }
         let (Some(key), Some(value)) = (a.key.as_deref(), a.value.as_ref()) else {
@@ -344,6 +349,33 @@ ba_one() {
 }
 "#;
 
+const AGY_RTK_SH: &str = r#"
+ba_agy_rtk() {
+  ba_i=$1
+  if [ "$ba_stop" = 1 ]; then ba_key "$ba_i" "skipped aborted"; return; fi
+  ba_r=""
+  for ba_c in "$(command -v rtk 2>/dev/null)" "$HOME/.local/bin/rtk" /opt/homebrew/bin/rtk /usr/local/bin/rtk "$HOME/.cargo/bin/rtk"; do
+    case "$ba_c" in /*) if [ -x "$ba_c" ]; then ba_r=$ba_c; break; fi ;; esac
+  done
+  [ -n "$ba_r" ] || { ba_key "$ba_i" "skipped rtk_missing"; return; }
+  ba_f="$HOME/.config/agents-manager/agy-rtk"
+  ba_d=$(dirname "$ba_f")
+  if [ -L "$ba_d" ] || [ -L "$ba_f" ]; then ba_key "$ba_i" "skipped symlink"; return; fi
+  if [ -f "$ba_f" ] && [ "$(head -n 1 "$ba_f" 2>/dev/null)" = "$ba_r" ]; then ba_key "$ba_i" present; return; fi
+  mkdir -p "$ba_d" 2>/dev/null || { ba_key "$ba_i" "skipped write_failed"; return; }
+  ba_tmp=$(mktemp "$ba_d/.am-baseline.XXXXXX" 2>/dev/null) || { ba_key "$ba_i" "skipped write_failed"; return; }
+  printf '%s\n' "$ba_r" > "$ba_tmp" 2>/dev/null && chmod 600 "$ba_tmp" 2>/dev/null || { rm -f "$ba_tmp"; ba_key "$ba_i" "skipped write_failed"; return; }
+  if [ -f "$ba_f" ] && ! ba_backup agy/rtk-rewrite "$ba_f"; then
+    rm -f "$ba_tmp"
+    ba_stop=1
+    printf 'AM_BA error backup_failed\n'
+    ba_key "$ba_i" "skipped backup_failed"
+    return
+  fi
+  if mv -f "$ba_tmp" "$ba_f" 2>/dev/null; then ba_key "$ba_i" applied; else rm -f "$ba_tmp"; ba_key "$ba_i" "skipped write_failed"; fi
+}
+"#;
+
 /// 寫完才輪替：只算／只刪備份 id 形狀的真目錄，剛建的那份不刪。
 const APPLY_TAIL_SH: &str = r#"
 if [ -n "$ba_dir" ]; then
@@ -369,10 +401,17 @@ pub fn render_apply_sh(backup_id: &str, plan_rev: &str, writes: &[KeyWrite]) -> 
     s.push_str(COMMON_SH);
     s.push_str(&format!("ba_id={}\nba_rev={}\n", sh_quote(backup_id), sh_quote(plan_rev)));
     s.push_str(&APPLY_SH.replace("__AM_TOML_AWK__", TOML_AWK));
+    if writes.iter().any(|w| matches!(w.format, Format::AgyRtk)) {
+        s.push_str(AGY_RTK_SH);
+    }
     for (i, w) in writes.iter().enumerate() {
         let args = match &w.format {
             Format::Toml { table, key, literal } => format!("toml {} {} {}", sh_quote(table), sh_quote(key), sh_quote(literal)),
             Format::Json { path, literal } => format!("json {} {}", sh_quote(path), sh_quote(literal)),
+            Format::AgyRtk => {
+                s.push_str(&format!("ba_agy_rtk {i}\n"));
+                continue;
+            }
         };
         s.push_str(&format!("ba_one {i} {} {args}\n", sh_quote(&w.token)));
     }
@@ -402,6 +441,7 @@ fn reason_code(s: &str) -> &'static str {
         "invalid_json" => "invalid_json",
         "conflict" => "conflict",
         "backup_failed" => "backup_failed",
+        "rtk_missing" => "rtk_missing",
         _ => "unknown",
     }
 }
@@ -766,6 +806,38 @@ mod tests {
 
     fn act(id: &str, target: &str, key: &str, value: serde_json::Value) -> FixAction {
         FixAction { id: id.into(), action: MERGE_KEY, severity: "warn", target: target.into(), key: Some(key.into()), value: Some(value), reason: None }
+    }
+
+    fn agy_rtk_plan() -> Plan {
+        Plan {
+            actions: vec![FixAction { id: "agy.rtk_rewrite".into(), action: WRITE_FILE, severity: "warn", target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None }],
+            plan_rev: "rev-agy".into(),
+        }
+    }
+
+    #[test]
+    fn the_agy_rtk_write_records_the_absolute_rtk_path_and_is_idempotent() {
+        let home = Home::new();
+        let rtk = home.write(".local/bin/rtk", "#!/bin/sh\n");
+        std::fs::set_permissions(&rtk, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = home.apply(ID1, &agy_rtk_plan());
+        assert_eq!(run.outcomes, vec![Outcome { id: "agy.rtk_rewrite".into(), result: APPLIED, reason: None }]);
+        assert_eq!(home.read(".config/agents-manager/agy-rtk"), format!("{}\n", rtk.display()).into_bytes());
+        assert!(!run.backup_written, "新檔沒有東西可備份");
+        let again = home.apply("20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", &agy_rtk_plan());
+        assert_eq!(again.outcomes[0].result, PRESENT);
+        home.write(".config/agents-manager/agy-rtk", "/old/rtk\n");
+        let changed = home.apply("20261024T120002Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", &agy_rtk_plan());
+        assert_eq!(changed.outcomes[0].result, APPLIED);
+        assert!(changed.backup_written, "舊檔會被換掉才備份");
+    }
+
+    #[test]
+    fn the_agy_rtk_write_skips_when_rtk_is_missing_and_never_writes() {
+        let home = Home::new();
+        let run = home.apply(ID1, &agy_rtk_plan());
+        assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("rtk_missing")));
+        assert!(!home.h.join(".config/agents-manager/agy-rtk").exists());
     }
 
     fn hooks_plan() -> Plan {

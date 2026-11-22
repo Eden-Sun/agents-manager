@@ -105,7 +105,14 @@ fn inner(args: HookArgs) {
     };
     match crate::kill_guard::guard_logged(&args.provider, &args.event, &text, &mut guard_log) {
         crate::kill_guard::Guard::NotPreToolUse => {}
-        crate::kill_guard::Guard::Pass => return,
+        crate::kill_guard::Guard::Pass => {
+            if args.provider == "agy" && crate::kill_guard::event_is_pre_tool_use(&args.event, &text) {
+                if let Some(decision) = crate::agy_rtk::pre_tool_use_decision(&data_dir, &text) {
+                    let _ = writeln!(std::io::stdout(), "{decision}");
+                }
+            }
+            return;
+        }
         crate::kill_guard::Guard::Deny(decision) => {
             let _ = writeln!(std::io::stdout(), "{decision}");
             let _ = writeln!(std::io::stderr(), "agents-managerd hook: PreToolUse denied a broad kill");

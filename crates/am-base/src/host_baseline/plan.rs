@@ -14,6 +14,7 @@ use serde::Serialize;
 
 pub const MERGE_KEY: &str = "merge_key";
 pub const MANUAL: &str = "manual";
+pub const WRITE_FILE: &str = "write_file";
 
 /// 鍵沒有宣告值：不知道該補成什麼。
 pub const NO_VALUE: &str = "no_value";
@@ -34,7 +35,7 @@ pub const UNKNOWN: &str = "unknown";
 pub struct FixAction {
     /// 對應的 issue id。
     pub id: String,
-    /// `merge_key` | `manual`
+    /// `merge_key` | `write_file` | `manual`
     pub action: &'static str,
     pub severity: &'static str,
     /// 顯示用的位置：`<CLI>[:<身份>]/<檔>`（例 `codex/config.toml`、`claude:cc1/settings.json`、`tool/rtk`），不是主機上的路徑。
@@ -60,7 +61,7 @@ pub struct Plan {
 impl Plan {
     /// 可以自動補的差異 id（`hosts[].baseline.fixable`）。
     pub fn fixable(&self) -> Vec<String> {
-        self.actions.iter().filter(|a| a.action == MERGE_KEY).map(|a| a.id.clone()).collect()
+        self.actions.iter().filter(|a| a.action == MERGE_KEY || a.action == WRITE_FILE).map(|a| a.id.clone()).collect()
     }
 }
 
@@ -87,6 +88,9 @@ pub fn build(m: &Manifest, values: &Values, issues: &[BaselineIssue]) -> Plan {
 
 fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&str>, i: &BaselineIssue) -> Option<FixAction> {
     let (id, sev) = (i.id.as_str(), i.severity);
+    if id == "agy.rtk_rewrite" {
+        return Some(FixAction { id: id.into(), action: WRITE_FILE, severity: sev, target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None });
+    }
     if id == "gitconfig.token" {
         return Some(manual(id, sev, "git/.gitconfig".into(), None, SECRET));
     }
@@ -209,6 +213,15 @@ mod tests {
         }
         assert_eq!(by_id(&p, "claude.cc1.settings.json:statusLine").key.as_deref(), Some("statusLine"));
         assert_eq!(p.fixable(), vec!["codex.config.toml:features.hooks".to_string()]);
+    }
+
+    #[test]
+    fn the_agy_rtk_gap_is_a_fixable_write_file() {
+        let (m, v) = shipped();
+        let p = build(m, v, &[issue("agy.rtk_rewrite", WARN), issue("tool.rtk", WARN)]);
+        let a = by_id(&p, "agy.rtk_rewrite");
+        assert_eq!((a.action, a.target.as_str(), a.value.is_none()), (WRITE_FILE, "agy/rtk-rewrite", true));
+        assert_eq!(p.fixable(), vec!["agy.rtk_rewrite".to_string()]);
     }
 
     #[test]

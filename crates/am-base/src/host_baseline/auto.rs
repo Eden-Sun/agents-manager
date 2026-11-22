@@ -98,6 +98,16 @@ mod tests {
     }
 
     #[test]
+    fn the_agy_rtk_gap_follows_the_auto_ask_off_gate() {
+        let issues = vec![BaselineIssue { id: "agy.rtk_rewrite".into(), severity: WARN, message: String::new(), note: None }];
+        let p = build(manifest::shipped().unwrap(), manifest::shipped_values().unwrap(), &issues);
+        let s = AutoState::default();
+        assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, Instant::now()), Gate::Apply);
+        assert_eq!(gate(HostBaselineSyncMode::Ask, &p, &s, Instant::now()), Gate::Skip("not_auto"));
+        assert_eq!(gate(HostBaselineSyncMode::Off, &p, &s, Instant::now()), Gate::Skip("not_auto"));
+    }
+
+    #[test]
     fn nothing_fixable_is_skipped() {
         let p = plan_nothing();
         assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &AutoState::default(), Instant::now()), Gate::Skip("nothing_to_fix"));

@@ -123,3 +123,8 @@ value = true
 [[herdr.files]]
 path = "config.toml"
 severity = "warn"
+
+# agy 的 shell 指令改寫成 rtk（本機；遠端尚未支援，不列此項）。有裝 agy、有 rtk，但啟用檔
+# `~/.config/agents-manager/agy-rtk` 不在或指到不存在的 rtk 時才算缺。severity 同其他選用項。
+[agy]
+rtk_rewrite = "warn"

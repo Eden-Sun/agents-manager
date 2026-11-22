@@ -825,6 +825,14 @@ fn is_pre_tool_use(event: &str, payload: &Value) -> bool {
     event_is_pre(event) || from_payload.is_some_and(event_is_pre)
 }
 
+pub fn event_is_pre_tool_use(event: &str, stdin_text: &str) -> bool {
+    let clean = stdin_text.trim_start_matches('\u{feff}');
+    match serde_json::from_str::<Value>(clean) {
+        Ok(payload) => is_pre_tool_use(event, &payload),
+        Err(_) => event_is_pre(event),
+    }
+}
+
 /// [`guard`] 的結果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Guard {
