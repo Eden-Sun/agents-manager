@@ -101,6 +101,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let mut any = false;
     let mut saw_missing = false;
     let mut touched = false;
+    let mut probe_succeeded = false;
     for t in targets {
         if !app.hosts.is_current(&fence).await {
             anyhow::bail!("host `{host}` was superseded during the Claude quota refresh");
@@ -130,11 +131,15 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                 if t.login_only {
                     if o.logged_in.is_some() {
                         unpark(&full);
+                        if o.logged_in == Some(true) {
+                            probe_succeeded = true;
+                        }
                     } else {
                         park(&full, false);
                     }
                 } else if o.quota.is_some() {
                     any = true;
+                    probe_succeeded = true;
                     unpark(&full);
                     mark_usage_seen(&full);
                 } else {
@@ -156,6 +161,9 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     }
     if touched {
         crate::state::emit_host_changed(app, &fence).await;
+    }
+    if probe_succeeded {
+        crate::runners::claude_login_expiry::refresh_host_on_probe(app, host).await;
     }
     if saw_missing && !any {
         return Ok(false);
@@ -198,6 +206,7 @@ pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> R
     };
     unpark(&full);
     mark_usage_seen(&full);
+    crate::runners::claude_login_expiry::refresh_host_on_probe(app, host).await;
     let stored = app.quotas.lock().await.get(&full).cloned().unwrap_or(q);
     Ok((full, stored))
 }
