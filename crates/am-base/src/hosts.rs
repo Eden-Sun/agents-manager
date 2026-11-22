@@ -64,6 +64,10 @@ pub trait HostHooks: HostsAccess + HostInstance + 'static {
     fn is_shared_host(app: &Arc<Self>, host: &str) -> impl Future<Output = bool> + Send;
     /// 這台的連線狀態變了（連上、斷線、連不上）：推 `host_changed`。
     fn host_changed(app: &Arc<Self>, fence: &HostFence) -> impl Future<Output = ()> + Send;
+    fn baseline_detected(app: &Arc<Self>, host: &str) -> impl Future<Output = ()> + Send {
+        let _ = (app, host);
+        std::future::ready(())
+    }
     /// 本機 herdr 的 ping 結果（`reconnect("local")`）。
     fn set_local_herdr_connected(&self, ok: bool);
     /// 連上之後（重連也一樣）要做的整串事：對帳、重掛 watcher、事件訂閱、spool 重播、偵測、purge、shim／權限補版、autostart。

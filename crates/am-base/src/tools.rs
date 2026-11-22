@@ -1234,6 +1234,7 @@ pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
         match detect_with_fence(&app, &host, &fence).await {
             Ok(_) => {
                 H::host_changed(&app, &fence).await;
+                H::baseline_detected(&app, &host).await;
             }
             Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),

@@ -1593,8 +1593,9 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
             let sync: serde_json::Map<String, Value> = std::iter::once(crate::config::LOCAL_HOST)
                 .chain(cfg.hosts.iter().map(|h| h.name.as_str()))
                 .map(|name| {
-                    let mode = match cfg.host_baseline_sync(name) {
+                    let mode = match cfg.host_baseline_mode(name) {
                         crate::config::HostBaselineSyncMode::Ask => "ask",
+                        crate::config::HostBaselineSyncMode::Auto => "auto",
                         _ => "off",
                     };
                     (name.to_string(), json!(mode))
@@ -4256,7 +4257,7 @@ async fn baseline_backups(
 }
 
 /// 快取的差異＋宣告檔推出的計畫（plan 與 apply 共用同一份推算，`plan_rev` 才對得上）。
-async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(crate::host_baseline::BaselineReport, crate::host_baseline::plan::Plan), LcError> {
+pub(crate) async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(crate::host_baseline::BaselineReport, crate::host_baseline::plan::Plan), LcError> {
     let Some(report) = app.host_baseline.lock().await.get(name).map(|b| b.snapshot(chrono::Utc::now())) else {
         return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "這台主機還沒量過一致性"})));
     };
@@ -4274,12 +4275,16 @@ async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(crate::host
 const BASELINE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 在 fence 綁的那條連線上跑（本機 `/bin/sh`、遠端 ssh）。呼叫端包在 `run_if_current` 裡。
-async fn baseline_run_script(fence: &crate::hosts::HostFence, script: &str) -> anyhow::Result<String> {
+pub(crate) async fn baseline_run_script(fence: &crate::hosts::HostFence, script: &str) -> anyhow::Result<String> {
     if fence.conn().is_local() {
         let out = crate::hosts::sh_local(script, BASELINE_WRITE_TIMEOUT).await?.ok_or_else(|| anyhow::anyhow!("local baseline script timed out"))?;
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     fence.conn().ssh_exec_path_timeout(script, BASELINE_WRITE_TIMEOUT).await
+}
+
+fn sync_busy(name: &str) -> LcError {
+    LcError::conflict("sync_busy", json!({"host": name, "retryable": true}))
 }
 
 fn baseline_superseded(name: &str) -> LcError {
@@ -4308,12 +4313,22 @@ async fn baseline_apply(
 
 async fn baseline_apply_with_fence(app: &Arc<App>, name: &str, fence: &crate::hosts::HostFence, b: BaselineApply) -> Result<Response, LcError> {
     use crate::host_baseline::apply;
-    if app.cfg.get().await.host_baseline_sync(name) == crate::config::HostBaselineSyncMode::Off {
-        return Err(LcError::conflict(
-            "sync_disabled",
-            json!({"host": name, "message": "這台主機沒有開一致性補齊（config.toml 的 [host_baseline.sync]）"}),
-        ));
+    match app.cfg.get().await.host_baseline_mode(name) {
+        crate::config::HostBaselineSyncMode::Off => {
+            return Err(LcError::conflict(
+                "sync_disabled",
+                json!({"host": name, "message": "這台主機沒有開一致性補齊（config.toml 的 [host_baseline.sync]）"}),
+            ));
+        }
+        crate::config::HostBaselineSyncMode::Auto => {
+            return Err(LcError::conflict(
+                "auto_owns_sync",
+                json!({"host": name, "message": "這台主機的一致性補齊由自動模式負責（[host_baseline.sync] 為 auto），手動補齊停用"}),
+            ));
+        }
+        _ => {}
     }
+    let _sync = crate::host_baseline_auto::host_lock(name).try_lock_owned().map_err(|_| sync_busy(name))?;
     let (_, plan) = cached_baseline_plan(app, name).await?;
     if plan.plan_rev != b.plan_rev {
         return Err(LcError::conflict("plan_outdated", json!({"host": name, "plan_rev": plan.plan_rev})));
@@ -4369,6 +4384,7 @@ async fn baseline_restore(
 
 async fn baseline_restore_with_fence(app: &Arc<App>, name: &str, fence: &crate::hosts::HostFence, backup_id: &str) -> Result<Response, LcError> {
     use crate::host_baseline::apply;
+    let _sync = crate::host_baseline_auto::host_lock(name).try_lock_owned().map_err(|_| sync_busy(name))?;
     let script = apply::render_restore_sh(backup_id)
         .map_err(|_| LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_backup_id"})))?;
     let out = app

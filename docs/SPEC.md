@@ -4629,7 +4629,8 @@ daemon 只接受唯一的直接單行 alias 定義。本機 bash（目前 `SHELL
   對外 `stale = 最後一次失敗 || checked_at 超過 RECHECK_EVERY + STALE_GRACE（6h15m）`，讀取時算（`BaselineReport::snapshot`）。失敗當下推 `host_changed`。
   網頁：`stale` 或本機算出超過同一條線（主機一直離線時沒有事件，所以前端自己也算）→ 「一致性：上次檢查於 MM-DD HH:mm，目前無法連線」，舊的差異淡色照列、
   tooltip 寫最後一次失敗的原因；過期時連「與基準一致」也不說。
-- 還沒做：缺檔模板（`write_file`）、工具安裝（永不因 `auto` 安裝）、`auto` 的自動套用、新增身份時自動套設定。
+- **自動補齊（auto，#719 auto 第一片）**：`[host_baseline.sync]` 為 `auto` 的主機，每次工具偵測完成（`baseline_detected` hook）後，在該主機的同步鎖（`host_lock`）與最新 HostFence 下，用快取的計畫只寫 `merge_key`（只補不蓋、寫前備份，沿用手動補齊的腳本），寫完重探。`off`、`ask` 不寫、不連主機。同一個 `plan_rev` 成功後不再重入；失敗依 5 分鐘、30 分鐘、2 小時退避，連續 3 次後停，計畫變了才重置。手動補齊在 `auto` 時回 409 `auto_owns_sync`；手動與自動同鎖，撞到回 409 `sync_busy`；還原在任何模式都可用。
+- 還沒做：缺檔模板（`write_file`，先定 provenance 與目的地）、工具安裝（固定版本 artifact＋雜湊，另一片）、新增身份在 auto 模式下的套用只靠下一次探測（已涵蓋，未有獨立測試）。
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 

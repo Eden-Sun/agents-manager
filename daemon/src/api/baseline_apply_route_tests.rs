@@ -102,6 +102,9 @@ async fn apply_is_user_only_off_by_default_and_checks_the_plan_rev() {
     assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("sync_disabled")), "an orphan key turns nothing on: {body}");
 
     set_sync(&e.app, host, "auto").await;
+    let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+    assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("auto_owns_sync")), "auto owns the sync; manual apply is refused: {body}");
+    set_sync(&e.app, host, "ask").await;
     let (st, body) = apply(&e.app, host, RequestPrincipal::User, "not-the-rev").await;
     assert_eq!((st, body["reason"].as_str(), body["plan_rev"].as_str()), (StatusCode::CONFLICT, Some("plan_outdated"), Some(rev.as_str())), "{body}");
     let b = BaselineApply { plan_rev: rev.clone(), ids: Some(vec!["tool.rtk".into()]) };
@@ -111,7 +114,7 @@ async fn apply_is_user_only_off_by_default_and_checks_the_plan_rev() {
     assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), b"a = 1\n");
 }
 
-/// 開了（`auto` 當 `ask`）：補上缺的鍵、回備份 id 與每項結果（手動項照列），回應不帶路徑或內容；
+/// 開了（`ask`）：補上缺的鍵、回備份 id 與每項結果（手動項照列），回應不帶路徑或內容；
 /// 之後 sync 改回 off，restore 照樣能用，還原後逐 byte 相同，回應只有目標名與結果。
 #[tokio::test]
 async fn apply_then_restore_round_trips_and_restore_works_while_off() {
@@ -121,7 +124,7 @@ async fn apply_then_restore_round_trips_and_restore_works_while_off() {
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     let orig = "approval_policy = \"AM-SECRET\"\n[features]\nx = 1\n";
     std::fs::write(home.join(".codex/config.toml"), orig).unwrap();
-    set_sync(&e.app, host, "auto").await;
+    set_sync(&e.app, host, "ask").await;
     let rev = plan_rev(&e.app, host).await;
     let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
     assert_eq!(st, StatusCode::OK, "{body}");
@@ -194,7 +197,7 @@ async fn orphan_sync_keys_are_in_the_user_state_only() {
     assert!(!view.to_string().contains("gone-host"), "{view}");
 }
 
-/// #719 階段 3b：每台主機生效的模式只在使用者的 `/api/state`——local 與 `[[hosts]]` 都列、`auto` 輸出成 "ask"、沒列是 "off"、
+/// #719 階段 3b：每台主機生效的模式只在使用者的 `/api/state`——local 與 `[[hosts]]` 都列、`auto` 輸出成 "auto"、沒列是 "off"、
 /// 孤兒鍵不列；bot 的視圖沒有這一欄。
 #[tokio::test]
 async fn the_effective_sync_mode_is_in_the_user_state_only() {
@@ -207,10 +210,10 @@ async fn the_effective_sync_mode_is_in_the_user_state_only() {
     let Json(user) = get_state(State(e.app.clone()), Extension(RequestPrincipal::User)).await.unwrap();
     let sync = user["host_baseline_sync"].as_object().expect("使用者有這欄");
     assert_eq!(sync.get(crate::config::LOCAL_HOST), Some(&json!("ask")), "{sync:?}");
-    assert_eq!(sync.get("bl3b-auto"), Some(&json!("ask")), "auto 當 ask：{sync:?}");
+    assert_eq!(sync.get("bl3b-auto"), Some(&json!("auto")), "auto 輸出 auto：{sync:?}");
     assert_eq!(sync.get("bl3b-unset"), Some(&json!("off")), "沒列＝off：{sync:?}");
     assert!(sync.get("gone-host").is_none(), "孤兒鍵不列：{sync:?}");
-    assert!(sync.values().all(|v| v == "off" || v == "ask"), "{sync:?}");
+    assert!(sync.values().all(|v| v == "off" || v == "ask" || v == "auto"), "{sync:?}");
     let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bl3b-bot").await;
     let Json(view) = get_state(State(e.app.clone()), Extension(RequestPrincipal::Bot(bot.id))).await.unwrap();
     assert!(view.as_object().unwrap().get("host_baseline_sync").is_none(), "{view}");
@@ -256,4 +259,56 @@ async fn backup_list_is_user_only_read_only_and_available_while_off() {
     let text = body.to_string();
     assert!(!text.contains("AM-SECRET") && !text.contains(home.to_str().unwrap()) && !text.contains("baseline-backup") && !text.contains("/etc/passwd"), "{text}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn auto_writes_once_after_a_detect_and_ask_or_off_never_touch_the_host() {
+    let e = crate::testing::env().await;
+    let host = "bl3-auto-run";
+    let (home, _calls) = remote_host(&e.app, host).await;
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let orig = "approval_policy = \"never\"\n";
+    std::fs::write(home.join(".codex/config.toml"), orig).unwrap();
+    e.app.host_baseline.lock().await.insert(host.into(), hooks_report());
+    let backups = || std::fs::read_dir(home.join(crate::host_baseline::apply::BACKUP_ROOT_REL)).map(|d| d.count()).unwrap_or(0);
+
+    for mode in ["off", "ask"] {
+        set_sync(&e.app, host, mode).await;
+        crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+        assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), orig, "{mode} must write nothing");
+        assert_eq!(backups(), 0, "{mode} must not back anything up");
+    }
+
+    set_sync(&e.app, host, "auto").await;
+    crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+    let now = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    let v: toml::Value = toml::from_str(&now).unwrap();
+    assert_eq!(v["features"]["hooks"].as_bool(), Some(true), "{now}");
+    assert_eq!(v["approval_policy"].as_str(), Some("never"), "the existing value is never touched: {now}");
+    for k in ["model", "model_reasoning_effort", "service_tier"] {
+        assert!(v.get(k).is_none(), "{k} is never written: {now}");
+    }
+    assert_eq!(backups(), 1, "one backup before the one write");
+
+    crate::host_baseline_auto::after_detect(e.app.clone(), host.into()).await;
+    assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), now, "a second pass on the same plan does nothing");
+    assert_eq!(backups(), 1, "no re-entry on the same plan");
+}
+
+#[tokio::test]
+async fn a_manual_apply_waits_its_turn_behind_the_host_sync_lock() {
+    let e = crate::testing::env().await;
+    let host = "bl3-lock";
+    let (home, _calls) = remote_host(&e.app, host).await;
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), "approval_policy = \"never\"\n").unwrap();
+    e.app.host_baseline.lock().await.insert(host.into(), hooks_report());
+    set_sync(&e.app, host, "ask").await;
+    let rev = plan_rev(&e.app, host).await;
+    let held = crate::host_baseline_auto::host_lock(host).lock_owned().await;
+    let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+    assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("sync_busy")), "{body}");
+    drop(held);
+    let (st, _) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+    assert_eq!(st, StatusCode::OK);
 }

@@ -541,7 +541,7 @@ User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只�
 
 `host_baseline_orphan_sync_keys`（issue #719 階段 3a，只在 User 視圖；Bot 視圖沒有這欄）：`config.toml` 的 `[host_baseline.sync]` 裡對不上 `local` 或任何 `[[hosts]]` 名稱的鍵（主機改名或刪掉後留下的），排好序的字串陣列，沒有就是 `[]`。這些鍵一律當 off、不會自動清，留給使用者手動刪（SPEC §16.7）。只在 `GET /api/state` 回應裡，沒有對應的 WS 事件：改了 config 之後下一次重拉才看得到。
 
-`host_baseline_sync`（issue #719 階段 3b，只在 User 視圖；Bot 視圖沒有這欄）：`{ "<主機名>": "off" | "ask" }`，key 只有 `local` 與 `[[hosts]]` 的 `name`（孤兒鍵不列），值是那台實際生效的模式——跟 apply 先擋的 `sync_disabled` 同一個來源：沒列、值讀不懂＝`"off"`，`auto` 在 3a 當 `"ask"` 輸出。網頁只在 `"ask"` 時畫「補齊」鈕；缺這欄（舊 daemon）一律當 off。同樣只在 `GET /api/state`，沒有 WS 事件。
+`host_baseline_sync`（issue #719 階段 3b，只在 User 視圖；Bot 視圖沒有這欄）：`{ "<主機名>": "off" | "ask" | "auto" }`，key 只有 `local` 與 `[[hosts]]` 的 `name`（孤兒鍵不列），值是那台實際生效的模式——跟 apply 先擋的 `sync_disabled` 同一個來源：沒列、值讀不懂＝`"off"`；`auto` 輸出 `"auto"`（自動模式，網頁不畫手動補齊鈕）。網頁只在 `"ask"` 時畫「補齊」鈕；缺這欄（舊 daemon）一律當 off。同樣只在 `GET /api/state`，沒有 WS 事件。
 
 `restart_batch`（issue #492）：現在正在跑的那一批一鍵重啟（§6.9）的 `batch_id`，沒有就是 `null`。
 唯讀，只為了對帳——進度本身走 WS（`bots_restart_progress` / `bots_restart_done`），而 `done` 有兩條收不到的路
@@ -2538,7 +2538,7 @@ issue #719 階段 3a／3b，SPEC §16.7。三條都只給使用者（Bot、AGM r
   "results": [ { "id": "codex.config.toml:features.hooks", "result": "applied" } ] }
 ```
 
-- 先擋：404 不認得的主機；409 `sync_disabled`＝這台在 `config.toml` 的 `[host_baseline.sync]` 不是 `ask`／`auto`（沒列＝off；鍵對不上主機也是 off；`auto` 在 3a 當 `ask`）；409 `baseline_unknown`（同 §12.6a）；409 `plan_outdated`＝`plan_rev` 跟 daemon 現在算出來的不同（回應帶目前的 `plan_rev`）；400 `not_fixable`（帶 `id`）＝`ids` 裡有不是 `merge_key` 的項目（手動項、不存在的 id）。以上都不連主機。
+- 先擋：404 不認得的主機；409 `sync_disabled`＝這台在 `config.toml` 的 `[host_baseline.sync]` 是 `off`（沒列＝off；鍵對不上主機也是 off）；409 `auto_owns_sync`＝這台是 `auto`，由自動模式負責，手動補齊停用（還原不受影響）；409 `sync_busy`（`retryable: true`）＝同一台的自動補齊或手動補齊／還原正在執行；409 `baseline_unknown`（同 §12.6a）；409 `plan_outdated`＝`plan_rev` 跟 daemon 現在算出來的不同（回應帶目前的 `plan_rev`）；400 `not_fixable`（帶 `id`）＝`ids` 裡有不是 `merge_key` 的項目（手動項、不存在的 id）。以上都不連主機。
 - 執行包在那台主機的 HostFence 裡（`run_if_current`）：主機在這之間重連／改指／被移除 → 409 `host_superseded`，腳本一次都沒送。ssh 失敗 502；腳本輸出被截斷（沒有結尾標記）也是 502，主機上可能已寫一部分（備份照樣在）。
 - `results[]`：每項 `{id, result, reason?}`。`result`：`applied`（補上了）、`present`（鍵已經在，不論值，沒動）、`skipped`（`reason`：`file_missing` 檔不在——3a 不建檔、`symlink` 目標或它的目錄是 symlink、`invalid_json`、`conflict` 中間的鍵不是物件、`write_failed`、`backup_failed`、`aborted` 前面備份失敗後面不做）、`manual`（`reason`：`no_jq` 主機沒有 jq、`unsupported_identity` 自訂的 claude 設定目錄、`unsupported_key`、`unsupported_value`、`secret`）。
 - 只會寫 codex `config.toml`（`$CODEX_HOME`，預設 `~/.codex`）與 claude `~/.claude`／`~/.claude-cc<N>` 的 `settings.json`。codex 的 model／effort／service_tier 鍵、`.gitconfig` 憑證在計畫與 apply 兩層各擋一次；缺檔（`write_file`）與工具安裝維持 `manual`、不會寫。

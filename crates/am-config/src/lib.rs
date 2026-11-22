@@ -497,7 +497,7 @@ impl UpdatesCfg {
     }
 }
 
-/// `[host_baseline.sync]` 一台主機的值。`auto` 在階段 3a 一律當 `ask`；讀不懂的值當 `off`（都只記一次 WARN，不讓設定檔載入失敗）。
+/// `[host_baseline.sync]` 一台主機的值。`auto` 由自動補齊負責；讀不懂的值當 `off`（都只記一次 WARN，不讓設定檔載入失敗）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBaselineSyncMode {
@@ -539,7 +539,17 @@ impl ConfigFile {
         name == LOCAL_HOST || self.hosts.iter().any(|h| h.name == name)
     }
 
-    /// 這台主機實際生效的模式：只會是 `Off` 或 `Ask`。沒列、鍵對不上主機、值讀不懂＝`Off`；`auto` 在 3a 當 `Ask`。
+    pub fn host_baseline_mode(&self, host: &str) -> HostBaselineSyncMode {
+        if !self.host_baseline_known(host) {
+            return HostBaselineSyncMode::Off;
+        }
+        match self.host_baseline.sync.get(host) {
+            Some(HostBaselineSyncMode::Auto) => HostBaselineSyncMode::Auto,
+            Some(HostBaselineSyncMode::Ask) => HostBaselineSyncMode::Ask,
+            _ => HostBaselineSyncMode::Off,
+        }
+    }
+
     pub fn host_baseline_sync(&self, host: &str) -> HostBaselineSyncMode {
         if !self.host_baseline_known(host) {
             return HostBaselineSyncMode::Off;
