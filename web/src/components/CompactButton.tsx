@@ -15,7 +15,7 @@ export function CompactButton({ botId }: { botId: string }) {
   })
   const notify = useStore((s) => s.notify)
   const [busy, setBusy] = useState(false)
-  if (kind !== "claude" && kind !== "codex" && kind !== "claude-api") return null
+  if (kind !== "claude" && kind !== "codex" && kind !== "agy" && kind !== "claude-api") return null
   const go = async () => {
     setBusy(true)
     try {

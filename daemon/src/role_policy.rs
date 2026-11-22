@@ -75,10 +75,7 @@ fn with_role(e: LcError, role: &str) -> LcError {
 pub fn validate_bot(kind: &str, model: &str, v: &Value) -> Result<Value, LcError> {
     let s = parse(v)?;
     if let Some(t) = s.context_tokens {
-        if kind == "agy" {
-            return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "context_unsupported", "kind": "agy"})));
-        }
-    let window = context_window(kind);
+        let window = context_window(kind);
         if t < CONTEXT_MIN || t > window {
             return Err(LcError::BadValue(json!({
                 "error": "bad_request", "reason": "context_out_of_range", "field": "context_tokens", "min": CONTEXT_MIN, "max": window, "got": t,
@@ -127,7 +124,8 @@ mod tests {
         assert!(validate_bot("claude", "haiku", &json!({"context_tokens": 512000})).is_ok());
         assert!(validate_bot("claude", "opus", &json!({"context_tokens": 512000})).is_ok());
         assert!(validate_bot("claude", "", &json!({"context_tokens": 300000})).is_err());
-        assert_eq!(reason(validate_bot("agy", "", &json!({"context_tokens": 300000})).unwrap_err()).0, "context_unsupported");
+        assert!(validate_bot("agy", "", &json!({"context_tokens": 400000})).is_ok());
+        assert_eq!(reason(validate_bot("agy", "", &json!({"context_tokens": 1200000})).unwrap_err()).0, "context_out_of_range");
         assert!(validate_bot("codex", "gpt-6", &json!({"context_tokens": 400000})).is_ok());
         assert!(validate_bot("claude", "opus", &json!({"keep_warm_after_min": 59})).is_ok());
         assert_eq!(reason(validate_bot("claude", "opus", &json!({"keep_warm_after_min": 60})).unwrap_err()).1, "keep_warm_after_min");

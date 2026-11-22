@@ -751,7 +751,7 @@ pub async fn login(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
 /// grok 沒有同名指令，不猜。
 pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
     match kind {
-        "claude" | "codex" | crate::config::CLAUDE_API_KIND => Some("/compact"),
+        "claude" | "codex" | "agy" | crate::config::CLAUDE_API_KIND => Some("/compact"),
         _ => None,
     }
 }
@@ -817,6 +817,24 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;
+    if bot.kind == "agy" {
+        let screen = super::delivery::read_composer(&client, &pane_id).await.map_err(up)?;
+        if let Some(dialog) = crate::agy_screen::blocking_dialog(&screen) {
+            return Err(LcError::conflict(dialog.reason(), json!({"bot_id": bot_id, "run_id": run.id})));
+        }
+        if crate::agy_screen::is_busy(&screen) {
+            return Err(LcError::conflict(SlashBlocked::AgentBusy.reason(), json!({"bot_id": bot_id, "run_id": run.id})));
+        }
+        match super::delivery::box_state("agy", &screen) {
+            super::delivery::BoxState::Empty => {}
+            super::delivery::BoxState::NonEmpty => {
+                return Err(LcError::conflict("composer_busy", json!({"bot_id": bot_id, "run_id": run.id})));
+            }
+            super::delivery::BoxState::Unready => {
+                return Err(LcError::conflict("composer_unreadable", json!({"bot_id": bot_id, "run_id": run.id})));
+            }
+        }
+    }
     mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
     send_slash_line(&client, &pane_id, line).await?;
     if bot.kind == "codex" {
@@ -837,9 +855,10 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
 mod compact_tests {
     use super::compact_slash_command;
     #[test]
-    fn compact_is_offered_for_claude_and_codex_only() {
+    fn compact_is_offered_for_claude_codex_and_agy() {
         assert_eq!(compact_slash_command("claude"), Some("/compact"));
         assert_eq!(compact_slash_command("codex"), Some("/compact"));
+        assert_eq!(compact_slash_command("agy"), Some("/compact"));
         assert_eq!(compact_slash_command("claude-api"), Some("/compact"));
         assert_eq!(compact_slash_command("openai-api"), None);
         assert_eq!(compact_slash_command("grok"), None);

@@ -1045,3 +1045,53 @@
         assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)), "收據為 1");
         drop_window(&run.id);
     }
+
+    #[tokio::test]
+    async fn agy_context_threshold_compacts_when_idle_and_skips_when_below_or_busy() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let bot = tt::claude_bot(&env.app, &env.project_id, "agy-ctx").await;
+        sqlx::query("UPDATE bots SET kind = 'agy', is_primary = 0, runtime_override_json = ? WHERE id = ?")
+            .bind(r#"{"context_tokens":400000}"#)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let set_tokens = |tokens: i64| {
+            let (db, id) = (env.app.db.clone(), run_id.clone());
+            async move {
+                let sj = serde_json::json!({
+                    "_agm_statusline": true,
+                    "context_window": {
+                        "total_input_tokens": tokens,
+                        "context_window_size": 1_048_576,
+                        "used_percentage": 38.1
+                    }
+                })
+                .to_string();
+                sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(sj).bind(id).execute(&db).await.unwrap();
+            }
+        };
+
+        set_tokens(399_999).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+        sweep(&env, &turns, &notes, now).await;
+        assert!(turns.compacts.lock().unwrap().is_empty());
+
+        set_tokens(400_000).await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        sweep(&env, &turns, &notes, now).await;
+        assert!(turns.compacts.lock().unwrap().is_empty());
+
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(*turns.compacts.lock().unwrap(), vec![(bot.id.clone(), Some(run_id.clone()))]);
+        assert!(notes.notes.lock().unwrap().is_empty());
+
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1);
+        drop_window(&run_id);
+    }
+

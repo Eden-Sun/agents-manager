@@ -16,7 +16,8 @@ test('門檻順序：Bot 覆寫 → 角色 policy；沒設＝null', () => {
 test('還沒重啟（policy 改了）或 kind 不支援：不換分母', () => {
   assert.equal(compactThreshold(bot({ role_pending: true }), project), null, '舊 daemon 沒有 policy_pending：退回 role_pending')
   assert.equal(compactThreshold(bot({ policy_pending: true }), project), null)
-  assert.equal(compactThreshold(bot({ kind: 'agy' }), project), null)
+  assert.equal(compactThreshold(bot({ kind: 'grok' }), project), null)
+  assert.equal(compactThreshold(bot({ kind: 'agy' }), project), 400000)
   assert.equal(compactThreshold(undefined, project), null)
 })
 

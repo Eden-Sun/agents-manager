@@ -140,13 +140,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_overlay_is_a_compact_limit_argument_and_agy_is_skipped() {
+    fn codex_overlay_is_a_compact_limit_argument_and_agy_keeps_effective_policy() {
         let eff = Effective { context_tokens: Some(256_000), ..Default::default() };
         let o = build_overlay(&bot("codex", Some("gpt-6"), Some("specialist"), None), &eff, true);
         assert_eq!(o.args, vec!["-c".to_string(), "model_auto_compact_token_limit=256000".to_string()]);
-        assert!(o.env.is_empty() && o.model.as_deref() == Some("gpt-6"), "模型沿用 bot 自己的");
-        let agy = build_overlay(&bot("agy", None, Some("executor"), None), &eff, true);
-        assert_eq!(agy, Overlay { eff: eff.clone(), ..Default::default() }, "agy 不支援 context");
+        assert!(o.env.is_empty() && o.model.as_deref() == Some("gpt-6"));
+        let agy = build_overlay(&bot("agy", Some("gemini-4-argon-medium"), Some("executor"), None), &eff, true);
+        assert_eq!(agy.model.as_deref(), Some("gemini-4-argon-medium"));
+        assert!(agy.env.is_empty() && agy.args.is_empty());
+        assert_eq!(agy.eff.context_tokens, Some(256_000));
         assert_eq!(build_overlay(&bot("codex", None, None, None), &eff, false), Overlay { eff: eff.clone(), ..Default::default() });
     }
 }

@@ -602,11 +602,50 @@ async fn retry_pending_notes<M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
     }
 }
 
+pub fn context_used_tokens(status_json: Option<&str>) -> Option<u32> {
+    let status: serde_json::Value = serde_json::from_str(status_json?).ok()?;
+    let n = status.pointer("/context_window/total_input_tokens")?.as_i64()?;
+    u32::try_from(n).ok().filter(|&n| n > 0)
+}
+
+async fn plan_agy_context_compact(
+    db: &DbContext<SqlitePool>,
+    bot: &db::Bot,
+    run: &db::Run,
+    eff: &crate::runtime_policy::Effective,
+    in_flight: bool,
+    queued: bool,
+) -> anyhow::Result<Option<Plan>> {
+    if bot.kind != "agy" || run.state != "running" || run.agent_status != "idle" || in_flight || queued {
+        return Ok(None);
+    }
+    let Some(limit) = eff.context_tokens.filter(|&n| n > 0) else { return Ok(None) };
+    let Some(used) = context_used_tokens(run.status_json.as_deref()) else { return Ok(None) };
+    if used < limit {
+        return Ok(None);
+    }
+    let anchor = format!("agy-ctx:{}:{used}", run.id);
+    let done: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM primary_cache_actions WHERE bot_id = ? AND anchor = ? AND kind = 'warm_compact')",
+    )
+    .bind(&bot.id)
+    .bind(&anchor)
+    .fetch_one(db.pool())
+    .await?;
+    if done {
+        return Ok(Some(Plan { step: Step::Wait, anchor, age_secs: 0 }));
+    }
+    Ok(Some(Plan { step: Step::WarmCompact, anchor, age_secs: 0 }))
+}
+
 /// 判斷這顆主力現在要不要動。`None`＝不對象（不是主力、忙著、沒有任何活動紀錄…）。只讀，不送任何東西。
 async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
     let in_flight = db::in_flight_turn(db.pool(), &run.id).await?.is_some();
     let queued = db::queued_turn_for_bot(db.pool(), &bot.id).await?.is_some();
     let eff = effective_runtime(db, bot).await?;
+    if bot.kind == "agy" {
+        return plan_agy_context_compact(db, bot, run, &eff, in_flight, queued).await;
+    }
     let tuning = eff.keep_warm_tuning(KEEP_WARM_AFTER_SECS, WARM_COMPACT_AFTER_SECS, warm_compact_min_context_pct(&bot.kind));
     let target = tuning.enabled.unwrap_or(bot.is_primary != 0);
     if !eligible(&bot.kind, target, &run.state, &run.agent_status, in_flight, queued) {
@@ -726,6 +765,7 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
         }
         Step::WarmCompact => {
             let age_min = plan.age_secs / 60;
+            let write_note = bot.kind == "claude";
             match claim_warm_compact(db.pool(), &bot.id, &plan.anchor, &run.id, age_min).await {
                 Ok(true) => {}
                 Ok(false) => return,
@@ -734,6 +774,9 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     return;
                 }
             }
+            if !write_note {
+                let _ = mark_note_written(db.pool(), &bot.id, &plan.anchor).await;
+            }
             open_window(&run.id);
             match turns.compact_bot(bot.id.clone(), Some(run.id.clone())).await {
                 Ok(()) => {
@@ -741,7 +784,9 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     if let Err(e) = settle_warm_compact(db.pool(), &bot.id, &plan.anchor).await {
                         tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not settle the compaction receipt; the claim still blocks a resend");
                     }
-                    write_warm_compact_note(db, messages, bot, &plan.anchor, age_min).await;
+                    if write_note {
+                        write_warm_compact_note(db, messages, bot, &plan.anchor, age_min).await;
+                    }
                 }
                 Err(e @ (TurnError::Busy(_) | TurnError::BotNotFound(_) | TurnError::InvalidRequest(_) | TurnError::QuotaBlocked(_))) => {
                     drop_window(&run.id);
@@ -781,15 +826,17 @@ pub async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventSink, C:
             return;
         }
         let bot = match db::bot(db.pool(), &run.bot_id).await {
-            Ok(Some(b)) if b.is_primary != 0 && b.deleted_at.is_none() => b,
+            Ok(Some(b)) if b.deleted_at.is_none() && (b.is_primary != 0 || b.kind == "agy" || b.runtime_override_json.is_some() || b.role.is_some()) => b,
             _ => continue,
         };
         if windows().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&run.id) {
             let quiet = run.agent_status == "idle" && db::in_flight_turn(db.pool(), &run.id).await.ok().flatten().is_none();
             settle_window(&run.id, quiet);
         }
-        settle_skip_with(db, events, &bot, &run, now).await;
-        retry_pending_notes(db, messages, &bot).await;
+        if bot.kind == "claude" {
+            settle_skip_with(db, events, &bot, &run, now).await;
+            retry_pending_notes(db, messages, &bot).await;
+        }
         match plan_with_db(db, &bot, &run, now).await {
             Ok(Some(p)) if p.step != Step::Wait => act(db, turns, messages, &bot, &run, &p).await,
             Ok(_) => {}

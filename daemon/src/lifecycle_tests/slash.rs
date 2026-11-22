@@ -66,6 +66,30 @@ mod live_slash_tests {
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run).execute(&app.db).await.unwrap();
         assert!(crate::lifecycle::slash::compact(&app, &bot.id, None).await.is_err());
     }
+    #[tokio::test]
+    async fn agy_compact_refuses_non_empty_composer_and_sends_when_empty() {
+        use crate::lifecycle::LcError;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "agy-compact-draft").await;
+        sqlx::query("UPDATE bots SET kind='agy' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let box_screen = |row: &str| format!("Antigravity CLI 1.5.14\n────────────────────────────────────────\n{row}\n────────────────────────────────────────\n? for shortcuts\n");
+        env.herdr.set_screen(&pane, &box_screen("> draft in progress"));
+        match crate::lifecycle::slash::compact(&app, &bot.id, Some(&run)).await.err().expect("draft blocks compact") {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "composer_busy", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(env.herdr.calls_to("pane.send_text").is_empty());
+
+        env.herdr.set_screen(&pane, &box_screen(">"));
+        crate::lifecycle::slash::compact(&app, &bot.id, Some(&run)).await.unwrap();
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").last().and_then(|v| v["text"].as_str()),
+            Some("/compact")
+        );
+    }
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
     async fn model_apply_fixture(
         env: &tt::Env,

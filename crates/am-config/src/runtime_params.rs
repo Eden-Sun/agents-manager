@@ -11,6 +11,7 @@ pub fn context_window(kind: &str) -> u32 {
     match kind {
         "claude" => 1_000_000,
         "codex" => 400_000,
+        "agy" => 1_048_576,
         _ => 0,
     }
 }
@@ -52,6 +53,11 @@ mod tests {
 
     #[test]
     fn context_overlays_preserve_kind_specific_launch_parameters() {
+        assert_eq!(context_window("claude"), 1_000_000);
+        assert_eq!(context_window("codex"), 400_000);
+        assert_eq!(context_window("agy"), 1_048_576);
+        assert_eq!(context_window("grok"), 0);
+
         let claude = launch_params("claude", Some("opus"), Some(512_000));
         assert_eq!(claude.model.as_deref(), Some("opus[1m]"));
         assert_eq!(claude.env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").map(String::as_str), Some("512000"));
@@ -59,6 +65,10 @@ mod tests {
         let codex = launch_params("codex", Some("gpt-6"), Some(256_000));
         assert_eq!(codex.args, vec!["-c".to_string(), "model_auto_compact_token_limit=256000".to_string()]);
         assert_eq!(codex.model.as_deref(), Some("gpt-6"));
-        assert!(launch_params("agy", None, Some(256_000)).args.is_empty());
+
+        let agy = launch_params("agy", Some("gemini-4-argon-medium"), Some(400_000));
+        assert_eq!(agy.model.as_deref(), Some("gemini-4-argon-medium"));
+        assert!(agy.env.is_empty());
+        assert!(agy.args.is_empty());
     }
 }
