@@ -263,6 +263,8 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/hosts/{name}/baseline/backups", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/baseline/apply", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/baseline/restore", Expect::Forbidden, None),
+        rule("GET", "/api/hosts/{name}/identities/sync-plan", Expect::UserOnly, None),
+        rule("POST", "/api/hosts/{name}/identities/sync", Expect::UserOnly, None),
         rule("GET", "/api/bots/{id}/rewind", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/rewind", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/rewind", Expect::Forbidden, None),

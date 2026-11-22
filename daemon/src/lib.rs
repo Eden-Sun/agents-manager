@@ -1,6 +1,7 @@
 //! agents-managerd 的函式庫；`am-base` 模組由此 re-export，`main.rs` 只做 CLI 解析與派發。
 
 mod child_credentials;
+mod identity_sync;
 mod host_baseline_auto;
 pub mod model_mode;
 pub mod user_settings;

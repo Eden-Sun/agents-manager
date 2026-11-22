@@ -396,6 +396,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/identities/{identity}/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/identities/{identity}/logout` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/hosts/{name}/shell-identities/{identity}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only` |
+| GET | `/api/hosts/{name}/identities/sync-plan` | User-only；Bot、AGM role、Service 均 → 403 `user_only`。本機候選身份與遠端 `$HOME`、alias 的比對（唯讀，只讀遠端 rc 的 alias 行）；`local` → 400 `cannot_sync_local`，未知主機 → 409 `unknown_host`，離線 → 409 `host_offline` |
+| POST | `/api/hosts/{name}/identities/sync` | User-only；同上權限。body `{"names":["cc2"],"dry_run":false}`，`names` 空 → 400 `names_required`；`dry_run: true` 只回 `would_create`／`skipped`，不寫任何東西 |
 | POST | `/api/hosts/{name}/reconnect` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1965,6 +1967,16 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
   刪的是**沒寫 host** 的那筆時，遠端的 bot 也算：那台沒有自己同名的身份（config 明寫、或 shell 偵測到的 `ccN`；還沒偵測過照「沒有」算）就是在用這一筆，同樣 409。
   刪除成功時同時清掉該身份的額度讀數（記憶體與 `quota_cache`，key＝`<kind>:<name>`，遠端加 `<host>/` 前綴），並推 `quota_updated {kind, host, quota:null}`；同名的 shell alias（`ccN`）仍在用的那把 key 不清（#1350）。
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
+
+
+### `POST /api/hosts/{name}/identities/sync`（從本機複製身份到遠端）
+
+讓遠端主機新增與本機相同的身份（shell alias `cc0`–`cc6` 與 config 身份 `host = "local"` 的那些），**只新增、不覆寫**。
+
+- **安全**：只允許 User principal；不複製任何憑證、token、登入檔；遠端 alias 寫入前先備份 rc 到 `~/.config/agents-manager/shell-alias-backups/<rc>-<32hex>.bak`（`0600`），寫入經 `<shell> -n` 語法檢查後原子替換；目錄建在遠端 `$HOME` 底下（`0700`）。路徑一律以 `$HOME/...` 表示。
+- **比對**：遠端已有同名 alias 或 config 身份但內容不同 → `status: "different"`、`can_apply: false`、不寫；內容相同 → 計入 `already_synced`、不列出。
+- **回應**：sync-plan `{host, remote_shell, remote_rc, already_synced, items[]}`；sync `{host, dry_run, backup_path, shell, results[]}`，每項 `{name, kind, source, status, reason, alias_line, created_dirs}`，`status` 為 `created`／`skipped`（`already_exists`、`not_found_on_local`）或 dry-run 的 `would_create`。
+- 成功後推 `host_changed` 並排一次遠端偵測。
 
 ### `DELETE /api/hosts/{name}/shell-identities/{identity}?kind=claude`
 只供 User principal；Bot（包含已登記 AGM role）與 Service → 403 `user_only`。`kind=claude` 必填，identity 僅收 `cc0`…`cc6`；沒有 request body。這是**刪該 host shell startup file 裡的 alias**，與上面的 `DELETE /api/identities/{name}?host=` 刪 config.toml 項目不同；config 同名項優先時回 409 `identity_source_mismatch`，不會改 config。

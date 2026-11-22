@@ -282,6 +282,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/identities/{identity}/recheck", post(recheck_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/shell-identities/{identity}", delete(shell_identity_delete::delete_shell_identity))
+        .route("/hosts/{name}/identities/sync-plan", get(crate::identity_sync::sync_plan))
+        .route("/hosts/{name}/identities/sync", post(crate::identity_sync::apply_sync))
         .route("/hosts/{name}/agy/logout", post(logout_agy))
         .route("/hosts/{name}/kinds/{kind}/logout", post(logout_kind_default))
         .route("/hosts/{name}/agy/install", post(install_agy))
@@ -940,6 +942,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/identities/{identity}/recheck", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/hosts/{name}/shell-identities/{identity}", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/identities/sync-plan", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/identities/sync", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/kinds/{kind}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/install", BotRoutePolicy::UserOrAgm),
