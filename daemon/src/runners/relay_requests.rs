@@ -176,7 +176,6 @@ pub(crate) async fn follow_scan(app: &Arc<App>, id: &str, from: &str, to: &str, 
     Ok(FollowScan { ended, own, noticed_through: through, notices: notices.len() as i64, last_notice_at: notices.last().map(|(_, a)| a.clone()) })
 }
 
-/// 目標自己在被追蹤的回合之後派出去的子請求，其結果通知觸發的回合也算自續（不是目標開始新工作）。
 async fn relay_result_of_own_child(app: &Arc<App>, to: &str, crid: Option<&str>, created: &str) -> anyhow::Result<bool> {
     let Some(child) = crid.and_then(|c| c.strip_prefix("relay-result:")).and_then(|r| r.split(':').next()) else { return Ok(false) };
     let child_at: Option<String> = sqlx::query_scalar("SELECT created_at FROM relay_requests WHERE id=? AND from_bot_id=?").bind(child).bind(to).fetch_optional(&app.db).await?;
@@ -807,7 +806,6 @@ mod tests {
         assert_eq!(v["state"], "ended");
     }
 
-    /// 重現：目標收到自己派出去的子請求結果（relay-result）後，觸發的回合寫出的最終報告要以「後續」送回來源。
     #[tokio::test]
     async fn followup_counts_result_turns_of_own_child_requests() {
         let env = crate::testing::env().await;
@@ -842,7 +840,6 @@ mod tests {
         assert!(n[0].1.contains("後續，第 2 則") && n[0].1.contains("最終報告：PR 已開，驗收通過"), "{}", n[0].1);
     }
 
-    /// 無關的子請求結果（目標不是它的發送者）仍結束追蹤，不再送後續。
     #[tokio::test]
     async fn followup_ends_at_result_of_a_child_request_it_did_not_send() {
         let env = crate::testing::env().await;
