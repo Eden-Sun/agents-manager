@@ -2249,9 +2249,6 @@ pub mod test_seams {
     pub async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
         super::arm_fallback_after(app, run_id, bot_id, delay).await
     }
-    pub async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str, seed: bool) -> anyhow::Result<bool> {
-        super::capture_hookless_turn_locked(app, run_id, seed).await
-    }
     pub async fn fail_stalled_turn(
         app: &impl LcHost,
         run_id: &str,
