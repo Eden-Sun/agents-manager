@@ -66,9 +66,13 @@ pub fn rewrite_decision(payload: &Value, rewrite: impl FnOnce(&str) -> Option<St
 }
 
 pub fn pre_tool_use_decision(data_dir: &Path, stdin_text: &str) -> Option<String> {
+    pre_tool_use_decision_with(data_dir, stdin_text, REWRITE_TIMEOUT)
+}
+
+fn pre_tool_use_decision_with(data_dir: &Path, stdin_text: &str, timeout: Duration) -> Option<String> {
     let rtk = rtk_path_from(data_dir)?;
     let payload: Value = serde_json::from_str(stdin_text.trim_start_matches('\u{feff}')).ok()?;
-    rewrite_decision(&payload, |c| run_rtk_rewrite(&rtk, c, REWRITE_TIMEOUT))
+    rewrite_decision(&payload, |c| run_rtk_rewrite(&rtk, c, timeout))
 }
 
 #[cfg(test)]
@@ -138,7 +142,7 @@ mod tests {
         assert_eq!(pre_tool_use_decision(d.path(), &text), None, "沒有啟用檔：不改寫");
         let rtk = fake_rtk(d.path(), "printf 'rtk %s\\n' \"$2\"");
         std::fs::write(d.path().join(ENABLE_FILE), rtk.to_string_lossy().as_bytes()).unwrap();
-        let out = pre_tool_use_decision(d.path(), &text).unwrap();
+        let out = pre_tool_use_decision_with(d.path(), &text, Duration::from_secs(10)).unwrap();
         assert!(out.contains("rtk git status"));
         std::fs::write(d.path().join(ENABLE_FILE), "relative/rtk").unwrap();
         assert_eq!(pre_tool_use_decision(d.path(), &text), None, "相對路徑不收");
