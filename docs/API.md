@@ -271,6 +271,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/hosts/{name}/identities/sync-plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only`（同 GET） |
 | HEAD | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/baseline/backups` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -396,8 +397,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/identities/{identity}/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/identities/{identity}/logout` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/hosts/{name}/shell-identities/{identity}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only` |
-| GET | `/api/hosts/{name}/identities/sync-plan` | User-only；Bot、AGM role、Service 均 → 403 `user_only`。本機候選身份與遠端 `$HOME`、alias 的比對（唯讀，只讀遠端 rc 的 alias 行）；`local` → 400 `cannot_sync_local`，未知主機 → 409 `unknown_host`，離線 → 409 `host_offline` |
-| POST | `/api/hosts/{name}/identities/sync` | User-only；同上權限。body `{"names":["cc2"],"dry_run":false}`，`names` 空 → 400 `names_required`；`dry_run: true` 只回 `would_create`／`skipped`，不寫任何東西 |
+| GET | `/api/hosts/{name}/identities/sync-plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only`。本機候選身份與遠端 `$HOME`、alias 的比對（唯讀，只讀遠端 rc 的 alias 行）；`local` → 400 `cannot_sync_local`，未知主機 → 409 `unknown_host`，離線 → 409 `host_offline` |
+| POST | `/api/hosts/{name}/identities/sync` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only`。body `{"names":["cc2"],"dry_run":false}`，`names` 空 → 400 `names_required`；`dry_run: true` 只回 `would_create`／`skipped`，不寫任何東西 |
 | POST | `/api/hosts/{name}/reconnect` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |

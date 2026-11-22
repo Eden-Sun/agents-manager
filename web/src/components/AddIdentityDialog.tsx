@@ -75,6 +75,8 @@ export function AddIdentityDialog({
   const [phase, setPhase] = useState<Phase>('form')
   const [created, setCreated] = useState<{ host: string; name: string } | null>(null)
   const [openFailed, setOpenFailed] = useState(false)
+  const [alsoCreate, setAlsoCreate] = useState(false)
+  const [alsoCreated, setAlsoCreated] = useState<string[]>([])
   const attemptsRef = useRef(0)
   const [lastOpen, setLastOpen] = useState(open)
   if (lastOpen !== open) {
@@ -88,6 +90,8 @@ export function AddIdentityDialog({
       setPhase('form')
       setCreated(null)
       setOpenFailed(false)
+      setAlsoCreate(false)
+      setAlsoCreated([])
       attemptsRef.current = 0
     }
   }
@@ -168,6 +172,9 @@ export function AddIdentityDialog({
   if (env.errors.length > 0) blocking.push(...env.errors)
   if (hostOffline) blocking.push(t('{host} 目前未連線，不能在那台建立身份。', { host: hostLabel }))
   const canSubmit = nameOk && blocking.length === 0 && phase === 'form'
+  const otherConnected = hosts.filter((h) => h.name !== host && h.connected)
+  const conflictHosts = nameOk ? otherConnected.filter((h) => existing.some((i) => i.name === name && (i.host || 'local') === h.name)) : []
+  const alsoTargets = otherConnected.filter((h) => !conflictHosts.includes(h))
 
   const submit = async () => {
     if (!canSubmit) return
@@ -178,6 +185,14 @@ export function AddIdentityDialog({
       setPhase('form')
       return
     }
+    const extra: string[] = []
+    if (alsoCreate) {
+      for (const h of alsoTargets) {
+        const extraInput: NewIdentityInput = { name, kind, env: env.env, ...(h.name !== 'local' ? { host: h.name } : {}) }
+        if (await onCreate(extraInput, h.name)) extra.push(h.name)
+      }
+    }
+    setAlsoCreated(extra)
     setCreated({ host, name })
     onCreated?.(host, name)
     openLogin(host, name)
@@ -261,6 +276,27 @@ export function AddIdentityDialog({
             ) : (
               <p className="add-identity-host-only">{t('建立於本機')}</p>
             )}
+
+            {otherConnected.length > 0 ? (
+              <div className="add-identity-also">
+                <label className="add-identity-also-toggle">
+                  <input
+                    type="checkbox"
+                    checked={alsoCreate}
+                    disabled={phase === 'creating'}
+                    onChange={(e) => setAlsoCreate(e.target.checked)}
+                  />
+                  <span>{t('同時在其他已連線主機建立（{names}）', { names: otherConnected.map((h) => h.label).join('、') })}</span>
+                </label>
+                {nameOk && conflictHosts.length > 0 ? (
+                  <ul className="add-identity-hint-list">
+                    {conflictHosts.map((h) => (
+                      <li key={h.name}>{t('{host} 已有同名身份，將略過', { host: h.label })}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
 
             <fieldset className="add-identity-field">
               <legend>{t('CLI')}</legend>
@@ -368,6 +404,18 @@ export function AddIdentityDialog({
             <p className="add-identity-created">
               <strong>{created?.name}</strong> · {hosts.find((h) => h.name === created?.host)?.label ?? created?.host}
             </p>
+            {alsoCreated.length > 0 ? (
+              <ul className="add-identity-also-list" aria-label={t('其他已建立的主機')}>
+                {alsoCreated.map((h) => (
+                  <li key={h}>
+                    <span>{hosts.find((x) => x.name === h)?.label ?? h}</span>
+                    <button type="button" className="mini-btn" onClick={() => void onLogin(h, created?.name ?? name)}>
+                      {t('登入')}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <p className={`add-identity-status is-${phase}`} role="status" aria-live="polite">
               {statusText}
             </p>

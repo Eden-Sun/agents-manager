@@ -128,3 +128,62 @@ test('登入一直沒完成：達上限後顯示失敗與「重新檢查」，�
   assert.equal(closed, false)
   assert.ok([...document.querySelectorAll('button')].some((b) => b.textContent === '重新檢查'))
 })
+
+const CONNECTED_REMOTES = [
+  { name: 'local', label: '本機', connected: true },
+  { name: 'm4p', label: 'm4p', connected: true },
+  { name: 'lab', label: 'lab', connected: false },
+]
+const alsoToggle = () => document.querySelector<HTMLInputElement>('.add-identity-also-toggle input')
+const alsoList = () => document.querySelector('.add-identity-also-list')
+
+test('其他已連線主機：checkbox 預設不勾，離線主機不列出', async () => {
+  const p = props({ hosts: CONNECTED_REMOTES, initialHost: 'local' })
+  await mount(<AddIdentityDialog {...p} />)
+  assert.ok(alsoToggle(), '有其他已連線主機就顯示')
+  assert.equal(alsoToggle()!.checked, false, '預設不勾')
+  assert.equal(alsoToggle()!.closest('label')!.textContent!.includes('本機'), false, '主機清單排除目前主機')
+  assert.ok(text().includes('同時在其他已連線主機建立（m4p）'))
+  assert.ok(!alsoToggle()!.closest('label')!.textContent!.includes('lab'), '離線主機不列出')
+  await typeInto(nameInput(), 'work')
+  await click(submitBtn())
+  await until(() => p.created.length === 1, '只建立主目標')
+  assert.equal(p.created[0].host, undefined, '本機主目標照原本的輸入')
+})
+
+test('勾選後：對每台其他已連線主機各建立一次，完成後列出各自的登入按鈕', async () => {
+  const remotes = [
+    { name: 'local', label: '本機', connected: true },
+    { name: 'm4p', label: 'm4p', connected: true },
+    { name: 'mini', label: 'mini', connected: true },
+  ]
+  const p = props({ hosts: remotes, initialHost: 'mini' })
+  await mount(<AddIdentityDialog {...p} />)
+  await typeInto(nameInput(), 'work')
+  await click(alsoToggle()!)
+  await click(submitBtn())
+  await until(() => alsoList() !== null, '完成後列出其他主機')
+  assert.deepEqual(
+    p.created.map((c) => c.host ?? 'local'),
+    ['mini', 'local', 'm4p'],
+    '主目標 mini 先建立，其他已連線主機各一次',
+  )
+  const items = [...alsoList()!.querySelectorAll('li')].map((li) => li.textContent ?? '')
+  assert.equal(items.length, 2)
+  const loginM4p = [...alsoList()!.querySelectorAll('button')].find((b) => b.closest('li')?.textContent?.includes('m4p'))!
+  await click(loginM4p)
+  assert.deepEqual(p.logins.slice(-1), ['m4p/work'])
+})
+
+test('其他主機已有同名身份：顯示略過提示，該台不建立，主機建立不被阻擋', async () => {
+  const existing: Identity[] = [...EXISTING, { name: 'work', kind: 'claude', host: 'm4p', env: {}, args: [] }]
+  const p = props({ hosts: CONNECTED_REMOTES, existing, initialHost: 'local' })
+  await mount(<AddIdentityDialog {...p} />)
+  await typeInto(nameInput(), 'work')
+  assert.ok(text().includes('m4p 已有同名身份，將略過'))
+  await click(alsoToggle()!)
+  await click(submitBtn())
+  await until(() => p.created.length >= 1 && p.logins.length >= 1, '主目標建立並進入登入')
+  assert.deepEqual(p.created.map((c) => c.host ?? 'local'), ['local'], '同名的 m4p 略過')
+  assert.equal(alsoList(), null, '沒有其他主機要登入')
+})

@@ -281,6 +281,18 @@ interface MockHost {
   identities: Record<string, MockIdentityStatus>
 }
 
+interface MockSyncItem {
+  name: string
+  kind: BotKind
+  source: 'shell' | 'config'
+  local_env: Record<string, string>
+  alias_line: string | null
+  status: 'missing' | 'different'
+  can_apply: boolean
+  remote_env: Record<string, string> | null
+  note: string | null
+}
+
 interface MockTool {
   installed: boolean
   path: string | null
@@ -351,6 +363,7 @@ interface MockIdentityStatus {
   plan?: string
   source: 'config' | 'shell'
   config_dir?: string
+  env?: Record<string, string>
 }
 
 const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
@@ -551,6 +564,13 @@ export class MockTransport implements Transport {
       plan: 'pro',
       source: 'shell',
       config_dir: '/Users/me/.claude-cc2',
+    },
+    ccdev: {
+      name: 'ccdev',
+      kind: 'claude',
+      logged_in: null,
+      source: 'shell',
+      config_dir: '/Users/me/.claude-ccdev',
     },
   }
   private quota: Record<string, Rec | null> = {
@@ -1205,6 +1225,10 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
+    if (method === 'GET' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[3] === 'sync-plan' && seg.length === 4) return this.identitySyncPlan(decodeURIComponent(seg[1]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[3] === 'sync' && seg.length === 4) {
+      return this.identitySync(decodeURIComponent(seg[1]), Array.isArray(b.names) ? b.names.map(String) : [], b.dry_run === true)
+    }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'DELETE' && seg[0] === 'hosts' && seg[2] === 'shell-identities' && seg.length === 4) {
       return this.deleteShellIdentity(decodeURIComponent(seg[1]), decodeURIComponent(seg[3]), q.get('kind') ?? '')
@@ -1748,6 +1772,82 @@ export class MockTransport implements Transport {
     return {}
   }
 
+  private identitySyncSources(): { name: string; kind: BotKind; source: 'shell' | 'config'; env: Record<string, string>; alias_line: string | null }[] {
+    const config = this.identities.map((i) => ({ name: i.name, kind: i.kind, source: 'config' as const, env: { ...i.env }, alias_line: null }))
+    const shell = Object.values(this.localIdentityStatus)
+      .filter((st) => st.source === 'shell' && st.config_dir)
+      .map((st) => {
+        const dir = (st.config_dir ?? '').replace(/^\/Users\/[^/]+/, '$HOME')
+        return {
+          name: st.name,
+          kind: st.kind,
+          source: 'shell' as const,
+          env: { CLAUDE_CONFIG_DIR: dir },
+          alias_line: `alias ${st.name}='CLAUDE_CONFIG_DIR=${dir} claude'`,
+        }
+      })
+    return [...config, ...shell]
+  }
+
+  private sameEnv(a: Record<string, string>, b: Record<string, string>): boolean {
+    const ka = Object.keys(a)
+    return ka.length === Object.keys(b).length && ka.every((k) => b[k] === a[k])
+  }
+
+  private identitySyncPlan(host: string) {
+    const remote = this.host(host)
+    const items: MockSyncItem[] = []
+    let alreadySynced = 0
+    for (const src of this.identitySyncSources()) {
+      const st = remote.identities[src.name]
+      if (!st) {
+        items.push({ name: src.name, kind: src.kind, source: src.source, local_env: src.env, alias_line: src.alias_line, status: 'missing', can_apply: true, remote_env: null, note: null })
+      } else if (st.kind === src.kind && this.sameEnv(src.env, st.env ?? {})) {
+        alreadySynced += 1
+      } else {
+        items.push({
+          name: src.name,
+          kind: src.kind,
+          source: src.source,
+          local_env: src.env,
+          alias_line: src.alias_line,
+          status: 'different',
+          can_apply: false,
+          remote_env: st.env ?? {},
+          note: '遠端已有同名身份，設定不同；請到該主機手動處理。',
+        })
+      }
+    }
+    const hasShell = items.some((i) => i.source === 'shell')
+    return {
+      host,
+      remote_shell: hasShell ? '/bin/zsh' : null,
+      remote_rc: hasShell ? '~/.zshrc' : null,
+      already_synced: alreadySynced,
+      items,
+    }
+  }
+
+  private identitySync(host: string, names: string[], dryRun: boolean) {
+    const remote = this.host(host)
+    const plan = this.identitySyncPlan(host)
+    let backup: string | null = null
+    const results: Rec[] = names.map((name) => {
+      const item = plan.items.find((i) => i.name === name)
+      if (!item) throw new ApiError(400, { error: 'bad_request', reason: 'not_in_plan', name }, 'not in sync plan')
+      const base = { name, kind: item.kind, source: item.source, alias_line: item.alias_line, created_dirs: [] as string[] }
+      if (!item.can_apply) return { ...base, status: 'skipped', reason: 'different_settings', message: item.note }
+      if (dryRun) return { ...base, status: 'would_create', reason: null, message: null }
+      remote.identities[name] = { name, kind: item.kind, logged_in: false, source: 'config', env: item.local_env }
+      if (item.source === 'shell') backup = `/mock/${host}/.agents-manager/shell-rc-backups/${name}.bak`
+      return { ...base, status: 'created', reason: null, message: null }
+    })
+    if (!dryRun && results.some((r) => r.status === 'created')) {
+      this.emit('host_changed', { name: host, connected: remote.connected, identities: remote.identities })
+    }
+    return { host, dry_run: dryRun, backup_path: backup, results }
+  }
+
   private deleteShellIdentity(host: string, identity: string, kind: string) {
     if (kind !== 'claude' || !/^cc[0-6]$/.test(identity)) {
       throw new ApiError(400, { error: 'bad_request', reason: 'invalid_shell_identity', host, kind, identity }, 'invalid shell identity')
@@ -2089,8 +2189,8 @@ export class MockTransport implements Transport {
           this.identities.map((i) => [
             i.name,
             Object.keys(i.env).length === 0
-              ? { name: i.name, kind: i.kind, logged_in: true, account: `${name}@example.com`, source: 'config' as const }
-              : { name: i.name, kind: i.kind, logged_in: false, source: 'config' as const },
+              ? { name: i.name, kind: i.kind, logged_in: true, account: `${name}@example.com`, source: 'config' as const, env: i.env }
+              : { name: i.name, kind: i.kind, logged_in: false, source: 'config' as const, env: i.env },
           ]),
         ),
         cc2: {
@@ -2100,6 +2200,7 @@ export class MockTransport implements Transport {
           account: `ops@${name}.example.com`,
           source: 'shell' as const,
           config_dir: `/Users/${name}/.claude-ccompany`,
+          env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-ccompany' },
         },
       },
     }

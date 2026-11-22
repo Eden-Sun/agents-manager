@@ -1,6 +1,7 @@
 import { MockTransport } from './mock'
 import { toHostBaselinePlan, toHostBaselineApplyResult, toHostBaselineBackups, toHostBaselineRestoreResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModelsResponse, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules, type ModelsResponse } from './normalize'
 import { HttpTransport } from './transport'
+import { toIdentitySyncPlan, toIdentitySyncResponse } from './identitySync'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
 import type { SocketHandlers, StreamHandlers, Transport, UploadOptions } from './transport'
@@ -30,6 +31,8 @@ import type {
   IssueDetail,
   QuotaMap,
   NewHostInput,
+  IdentitySyncPlan,
+  IdentitySyncResponse,
   NewIdentityInput,
   MessagesPage,
   NewBotInput,
@@ -390,6 +393,17 @@ export async function deleteProject(projectId: string): Promise<void> {
 
 export async function createIdentity(input: NewIdentityInput): Promise<void> {
   await transport.request('POST', '/identities', input)
+}
+
+export async function getIdentitySyncPlan(host: string): Promise<IdentitySyncPlan> {
+  const name = host || 'local'
+  return toIdentitySyncPlan(await transport.request('GET', `/hosts/${encodeURIComponent(name)}/identities/sync-plan`), name)
+}
+
+export async function syncIdentitiesToHost(host: string, names: string[], dryRun = false): Promise<IdentitySyncResponse> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/identities/sync`, { names, dry_run: dryRun })
+  return toIdentitySyncResponse(raw, name)
 }
 
 export async function deleteIdentity(name: string, host = 'local'): Promise<void> {

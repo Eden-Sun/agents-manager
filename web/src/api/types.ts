@@ -321,6 +321,44 @@ export interface NewIdentityInput {
   args?: string[]
 }
 
+export interface IdentitySyncItem {
+  name: string
+  kind: BotKind
+  source: 'shell' | 'config'
+  status: 'missing' | 'different'
+  can_apply: boolean
+  local_env: Record<string, string>
+  remote_env: Record<string, string> | null
+  alias_line: string | null
+  note: string | null
+}
+
+export interface IdentitySyncPlan {
+  host: string
+  remote_shell: string | null
+  remote_rc: string | null
+  already_synced: number
+  items: IdentitySyncItem[]
+}
+
+export interface IdentitySyncResultItem {
+  name: string
+  kind: BotKind
+  source: 'shell' | 'config'
+  status: 'created' | 'would_create' | 'skipped' | 'failed'
+  reason: string | null
+  message: string | null
+  alias_line: string | null
+  created_dirs: string[]
+}
+
+export interface IdentitySyncResponse {
+  host: string
+  dry_run: boolean
+  backup_path: string | null
+  results: IdentitySyncResultItem[]
+}
+
 export type Lamp = 'disconnected' | 'offline' | 'starting' | 'stopping' | 'idle' | 'working' | 'blocked' | 'unknown'
 
 export interface BlockedReason {

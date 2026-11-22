@@ -498,9 +498,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("am-identity-sync-{tag}-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testing::scratch_dir(&format!("am-identity-sync-{tag}"))
     }
 
     #[test]

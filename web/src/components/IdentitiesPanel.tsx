@@ -10,6 +10,7 @@ import { IdentityKindCard } from './IdentityKindCard'
 import { IdentityHostTabs, IDENTITY_HOST_PANEL_ID, type HostTabItem } from './IdentityHostTabs'
 import { AddIdentityDialog } from './AddIdentityDialog'
 import { recheckIdentity } from '../api'
+import { CopyLocalIdentitiesDialog } from './CopyLocalIdentitiesDialog'
 import './identitiesPanel.css'
 
 export { IdentityBadge } from './IdentityRow'
@@ -49,6 +50,7 @@ export function IdentitiesPanel() {
   const [picked, setPicked] = useState<string | null>(() => readLastTab())
   const active = picked && hostNames.includes(picked) ? picked : 'local'
   const [adding, setAdding] = useState<{ kind?: BotKind } | null>(null)
+  const [copying, setCopying] = useState(false)
   const [fresh, setFresh] = useState<{ host: string; name: string } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -101,6 +103,11 @@ export function IdentitiesPanel() {
         <button type="button" className="btn primary" onClick={() => setAdding({})}>
           {t('新增帳號')}
         </button>
+        {active !== 'local' ? (
+          <button type="button" className="btn" disabled={!activeConnected} onClick={() => setCopying(true)}>
+            {t('從本機複製身份')}
+          </button>
+        ) : null}
       </div>
       {hostNames.length > 1 ? <IdentityHostTabs tabs={tabs} value={active} onChange={choose} /> : null}
       <div role={hostNames.length > 1 ? 'tabpanel' : undefined} id={IDENTITY_HOST_PANEL_ID} aria-labelledby={hostNames.length > 1 ? `identity-tab-${active}` : undefined} className="identity-host-panel" ref={listRef}>
@@ -167,6 +174,9 @@ export function IdentitiesPanel() {
         }}
         onClose={() => setAdding(null)}
       />
+      {active !== 'local' ? (
+        <CopyLocalIdentitiesDialog open={copying} host={active} onClose={() => setCopying(false)} />
+      ) : null}
     </div>
   )
 }
