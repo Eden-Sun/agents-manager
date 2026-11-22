@@ -279,6 +279,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
         .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
+        .route("/hosts/{name}/identities/{identity}/recheck", post(recheck_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/shell-identities/{identity}", delete(shell_identity_delete::delete_shell_identity))
         .route("/hosts/{name}/agy/logout", post(logout_agy))
@@ -936,6 +937,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/baseline/apply", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/baseline/restore", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/identities/{identity}/recheck", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/hosts/{name}/shell-identities/{identity}", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
@@ -4451,6 +4453,17 @@ async fn login_identity(
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
     identity_auth(app, name, identity, false).await
+}
+
+/// 對話框等待登入時的「重新檢查」：重驗這一個身份的登入狀態（翻成已登入會連帶重新探額度）。回 `{logged_in}`，問不出來是 `null`。
+async fn recheck_identity(
+    State(app): State<Arc<App>>,
+    Path((name, identity)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    require_user(&principal)?;
+    let logged_in = crate::tools::recheck_identity_login(&app, &name, &identity).await;
+    Ok(Json(json!({"logged_in": logged_in})))
 }
 
 /// 登出走同一條路：開臨時 pane、帶同一組環境變數下指令、等 CLI 結束再重驗登入狀態。

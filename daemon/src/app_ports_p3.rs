@@ -223,6 +223,12 @@ impl crate::tools::ToolsEnv for App {
         async move { self.cfg.get().await.identities.clone() }
     }
 
+    fn identity_logged_in(app: &Arc<Self>, host: &str, name: &str, _fence: &crate::hosts::HostFence) -> impl Future<Output = ()> + Send {
+        let app = app.clone();
+        let (host, name) = (host.to_string(), name.to_string());
+        async move { crate::runners::quota_agy::on_identity_logged_in(&app, &host, &name).await }
+    }
+
     fn clear_login_prompt(&self, host: &str, name: &str) {
         crate::login_prompt::clear(self, host, name);
     }

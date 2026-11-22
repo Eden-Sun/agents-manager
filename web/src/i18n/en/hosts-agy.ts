@@ -179,6 +179,7 @@ const dict: Dict = {
   '{host} 上這個帳號未登入，上面是登出前的舊讀數。': 'This account is signed out on {host}; the readings above are from before it signed out.',
   '已登入，但額度暫時拿不到：{error}（{time} 起；會自動重試）': 'Signed in, but quota temporarily unavailable: {error} (since {time}; will retry automatically)',
   '背景查詢中': 'Checking in background',
+  '查詢中…': 'Checking…',
   '尚未取得（啟動一個 {kind} bot 後回報）': 'Not obtained yet (will report after starting a {kind} bot)',
   '所有{title}': 'All {title}',
   '看全部（{count}）': 'View all ({count})',

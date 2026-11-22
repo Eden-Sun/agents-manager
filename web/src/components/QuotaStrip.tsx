@@ -421,6 +421,8 @@ function Gauge({
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
   const argon = entry.kind === 'agy' ? remaining(q?.argon_weekly) : null
+  const noReading = five === null && seven === null && fable === null && argon === null
+  const placeholder = loggedOut ? t('未登入') : t('查詢中…')
   const disabledMap = useDisabledQuota()
   const expiryMap = useStore((s) =>
     host === LOCAL_HOST ? s.localClaudeLoginExpiresAt : (s.hosts.find((h) => h.name === host)?.claude_login_expires_at ?? EMPTY_EXPIRY),
@@ -447,8 +449,8 @@ function Gauge({
     if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
     if (argon !== null) cands.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
     windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
-  } else if (five === null && seven === null && fable === null && argon === null) {
-    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
+  } else if (noReading) {
+    windows = []
   } else {
     windows = []
     if (five !== null) {
@@ -581,6 +583,11 @@ function Gauge({
       >
       {compact ? (
         <span className="quota-compact">
+          {noReading ? (
+            <span className="quota-compact-win nodata">
+              <span className="quota-compact-pct quota-placeholder">{placeholder}</span>
+            </span>
+          ) : null}
           {windows.map((w) => {
             const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
             const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
@@ -611,6 +618,7 @@ function Gauge({
             </span>
           </span>
         ) : null}
+        {noReading ? <span className="quota-placeholder">{placeholder}</span> : null}
         {windows.map((w) => winRow(w, countdownRows.some((r) => r.name === w.name)))}
         {resetLine ? (
           <span className={`quota-reset-line ${resetLineLevel}`} title={resetLine.title}>

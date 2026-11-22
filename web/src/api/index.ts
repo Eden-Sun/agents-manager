@@ -1012,6 +1012,14 @@ async function identityAuth(host: string, identity: string, op: 'login' | 'logou
   return toHostShell(raw, name)
 }
 
+/// 重新檢查這一個身份的登入狀態（伺服器真的重驗，不只讀快取）；問不出來是 `null`。
+export async function recheckIdentity(host: string, identity: string): Promise<boolean | null> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/identities/${encodeURIComponent(identity)}/recheck`)
+  const value = (raw as { logged_in?: unknown } | null)?.logged_in
+  return typeof value === 'boolean' ? value : null
+}
+
 export async function installTool(host: string, kind: BotKind, viaBotId: string): Promise<InstallToolResult> {
   return toInstallResult(
     await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/install`, { kind, via_bot_id: viaBotId }),

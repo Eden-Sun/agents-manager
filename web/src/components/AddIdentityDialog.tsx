@@ -32,6 +32,7 @@ export interface AddIdentityDialogProps {
   onOpenTerminal?: () => void
   loggedIn: (host: string, name: string) => boolean | null
   refreshStatus: () => Promise<void>
+  recheck?: (host: string, name: string) => Promise<unknown>
   onCreated?: (host: string, name: string) => void
   onClose: () => void
   pollMs?: number
@@ -56,6 +57,7 @@ export function AddIdentityDialog({
   onOpenTerminal,
   loggedIn,
   refreshStatus,
+  recheck,
   onCreated,
   onClose,
   pollMs = 3000,
@@ -90,9 +92,9 @@ export function AddIdentityDialog({
     }
   }
 
-  const latest = useRef({ refreshStatus, loggedIn })
+  const latest = useRef({ refreshStatus, loggedIn, recheck })
   useEffect(() => {
-    latest.current = { refreshStatus, loggedIn }
+    latest.current = { refreshStatus, loggedIn, recheck }
   })
 
   useDialogFocus(open, dialogRef, { initialFocus: () => nameRef.current })
@@ -127,6 +129,10 @@ export function AddIdentityDialog({
     attemptsRef.current += 1
     const { host: h, name: n } = created
     void (async () => {
+      try {
+        await latest.current.recheck?.(h, n)
+      } catch {
+      }
       try {
         await latest.current.refreshStatus()
       } catch {

@@ -102,6 +102,23 @@ test('送出：建立（不帶 host＝本機）→ 開登入 → 輪詢到已登
   assert.deepEqual(p.logins, ['local/cc3'])
 })
 
+test('等待登入：輪詢時先呼叫伺服器重新檢查（不是只讀快取），檢查到已登入就完成', async () => {
+  const rechecks: string[] = []
+  let state: boolean | null = null
+  const p = props({
+    loggedIn: () => state,
+    recheck: async (h, n) => {
+      rechecks.push(`${h}/${n}`)
+      state = true
+    },
+  })
+  await mount(<AddIdentityDialog {...p} />)
+  await typeInto(nameInput(), 'cc5')
+  await click(submitBtn())
+  await until(() => text().includes('已登入'), '重新檢查到已登入後顯示已登入')
+  assert.deepEqual(rechecks, ['local/cc5'])
+})
+
 test('登入一直沒完成：達上限後顯示失敗與「重新檢查」，對話框不關', async () => {
   let closed = false
   await mount(<AddIdentityDialog {...props({ onClose: () => (closed = true) })} />)

@@ -815,6 +815,7 @@ async fn host_management_and_shell_read_endpoints_are_user_only() {
         ("POST", "/api/hosts/no-such-host/tools/install", r#"{"kind":"claude"}"#),
         ("POST", "/api/hosts/no-such-host/identities/cc1/login", ""),
         ("POST", "/api/hosts/no-such-host/identities/cc1/logout", ""),
+        ("POST", "/api/hosts/no-such-host/identities/cc1/recheck", ""),
         ("GET", "/api/hosts/no-such-host/gh", ""),
         ("POST", "/api/hosts/no-such-host/gh/login", "{}"),
         ("POST", "/api/hosts/no-such-host/gh/cancel", ""),

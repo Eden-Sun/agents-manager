@@ -176,35 +176,99 @@ pub async fn refresh_agy_identities(app: &Arc<App>, host: &str) {
         if backoff_active(&backoff_key, &fence) {
             continue;
         }
-        let env: BTreeMap<String, String> = idn
-            .env
-            .iter()
-            .filter(|(k, _)| crate::tools::valid_env_name(k))
-            .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
-            .collect();
-        let parsed = if fence.conn().is_local() {
-            match crate::hosts::sh_local_capture(&probe_script_with_env(Some(&exe), &env), PROBE_TIMEOUT).await {
-                Ok(run) => read_local_run(host, run.timed_out, &String::from_utf8_lossy(&run.stdout), &String::from_utf8_lossy(&run.stderr), PROBE_TIMEOUT.as_secs()),
-                Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
-            }
-        } else {
-            pane_probe(app, host, &fence, &exe, &env).await
-        };
-        match parsed {
-            Ok(rows) => {
-                if let Some((_, q)) = rows.into_iter().next() {
-                    if crate::quota::set_fenced(app, host, &base, q, &fence).await.is_err() {
-                        return;
-                    }
-                }
-                backoff().lock().unwrap().remove(&backoff_key);
-            }
-            Err(fail) => {
-                tracing::debug!(host, identity = %idn.name, reason = ?fail, "agy identity quota probe failed; keeping the last reading");
-                backoff().lock().unwrap().insert(backoff_key, BackoffEntry { until: std::time::Instant::now() + RETRY_AFTER_FAILURE, authority: fence.authority_key() });
-            }
+        if !probe_identity(app, host, &fence, &exe, &home, idn, &base, &backoff_key).await {
+            return;
         }
     }
+}
+
+/// 身份出現「剛登入」的訊號（重驗翻成已登入）時呼叫：清掉它的探測冷卻（同世代），並立刻探測這一個身份，不等下一輪輪詢。
+pub async fn on_identity_logged_in(app: &Arc<App>, host: &str, name: &str) {
+    let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
+    let Some(fence) = app.hosts.fence(host).await else { return };
+    if crate::identity_prefs::kind_disabled(&app.db, host, "agy").await {
+        return;
+    }
+    if crate::db::disabled_identities(&app.db, host, "agy").await.unwrap_or_default().iter().any(|n| n == name) {
+        return;
+    }
+    let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return };
+    let Ok(home) = crate::hosts::home_for_fence(&fence).await else { return };
+    let identities = crate::tools::identities_for_host(app, host).await;
+    let Some(idn) = identities.iter().find(|i| i.kind == "agy" && i.name == name) else { return };
+    let shares = crate::quota::identity_shares_default("agy", &idn.env);
+    if shares {
+        return;
+    }
+    let base = crate::quota::quota_base_default_aware("agy", Some(&idn.name), shares);
+    let backoff_key = format!("{host}#{base}");
+    clear_identity_backoff(&backoff_key, &fence);
+    probe_identity(app, host, &fence, &exe, &home, idn, &base, &backoff_key).await;
+}
+
+/// 清掉身份的探測冷卻：只清記下它的同一個主機世代（換代的舊冷卻不能壓住新主機）。
+pub(crate) fn clear_identity_backoff(key: &str, fence: &crate::hosts::HostFence) {
+    let mut map = backoff().lock().unwrap();
+    if map.get(key).is_some_and(|entry| entry.authority.matches(fence)) {
+        map.remove(key);
+    }
+}
+
+/// 一個身份的探測結果怎麼記：明確未登入＝只翻旗標（不冷卻，登入後才能立刻再探）；其他失敗＝15 分鐘冷卻、保留上次讀數。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdentityFailPlan {
+    MarkLoggedOut,
+    Cooldown,
+}
+
+pub(crate) fn identity_fail_plan(fail: &ProbeFail) -> IdentityFailPlan {
+    match fail {
+        ProbeFail::AuthRequired => IdentityFailPlan::MarkLoggedOut,
+        ProbeFail::Other { .. } => IdentityFailPlan::Cooldown,
+    }
+}
+
+/// 探測單一身份並記結果。回 `false` ＝主機已換代，呼叫端應停止這一輪。
+#[allow(clippy::too_many_arguments)]
+async fn probe_identity(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, exe: &str, home: &str, idn: &crate::config::IdentityCfg, base: &str, backoff_key: &str) -> bool {
+    let env: BTreeMap<String, String> = idn
+        .env
+        .iter()
+        .filter(|(k, _)| crate::tools::valid_env_name(k))
+        .map(|(k, v)| (k.clone(), crate::config::expand_home(v, home)))
+        .collect();
+    let parsed = if fence.conn().is_local() {
+        match crate::hosts::sh_local_capture(&probe_script_with_env(Some(exe), &env), PROBE_TIMEOUT).await {
+            Ok(run) => read_local_run(host, run.timed_out, &String::from_utf8_lossy(&run.stdout), &String::from_utf8_lossy(&run.stderr), PROBE_TIMEOUT.as_secs()),
+            Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
+        }
+    } else {
+        pane_probe(app, host, fence, exe, &env).await
+    };
+    match parsed {
+        Ok(rows) => {
+            if let Some((_, q)) = rows.into_iter().next() {
+                if crate::quota::set_fenced(app, host, base, q, fence).await.is_err() {
+                    return false;
+                }
+            }
+            backoff().lock().unwrap().remove(backoff_key);
+        }
+        Err(fail) => match identity_fail_plan(&fail) {
+            IdentityFailPlan::MarkLoggedOut => {
+                tracing::info!(host, identity = %idn.name, "agy identity probe reports authentication required; marking it logged out");
+                if crate::tools::record_identity_login_fenced(app, host, &idn.name, fence, Some(false), None, None).await {
+                    crate::state::emit_host_changed(app, fence).await;
+                }
+                backoff().lock().unwrap().remove(backoff_key);
+            }
+            IdentityFailPlan::Cooldown => {
+                tracing::debug!(host, identity = %idn.name, reason = ?fail, "agy identity quota probe failed; keeping the last reading");
+                backoff().lock().unwrap().insert(backoff_key.to_string(), BackoffEntry { until: std::time::Instant::now() + RETRY_AFTER_FAILURE, authority: fence.authority_key() });
+            }
+        },
+    }
+    true
 }
 
 /// 同 [`refresh_agy`]，另外回傳這一輪真正用到的 fence（`None` ＝主機不存在），讓呼叫端把冷卻綁在同一個世代上（#873）。
@@ -585,6 +649,19 @@ pub fn spawn_agy_identity_poller(app: Arc<App>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod identity_recheck_tests {
+    use super::*;
+
+    /// 明確未登入只翻旗標、不進冷卻：登入後下一拍就能再探（不然要等 15 分鐘）；其他失敗才冷卻。
+    #[test]
+    fn an_auth_required_identity_is_marked_logged_out_without_a_cooldown() {
+        assert_eq!(identity_fail_plan(&ProbeFail::AuthRequired), IdentityFailPlan::MarkLoggedOut);
+        assert_eq!(identity_fail_plan(&ProbeFail::other("timeout", "slow")), IdentityFailPlan::Cooldown);
+        assert_eq!(identity_fail_plan(&ProbeFail::other("pane", "gone")), IdentityFailPlan::Cooldown);
+    }
 }
 
 #[cfg(test)]

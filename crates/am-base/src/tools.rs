@@ -37,6 +37,8 @@ pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks 
     fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl std::future::Future<Output = ()> + Send;
     /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身份、回補 quota 限制、排著的 prompt 撞限。
     fn host_tools_installed(app: &Arc<Self>, host: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 身份的登入狀態剛由未登入／未知翻成已登入（重驗、登入 pane 收尾、對話框重新檢查都會走到）：立刻重新探額度。
+    fn identity_logged_in(app: &Arc<Self>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// One identity as seen *from one host*.
@@ -605,6 +607,9 @@ pub async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str
     let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
     if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
         H::host_changed(app, fence).await;
+        if logged_in {
+            H::identity_logged_in(app, host, name, fence).await;
+        }
     }
     if !app.hosts().is_current(fence).await {
         return None;

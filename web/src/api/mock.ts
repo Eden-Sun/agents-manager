@@ -1210,6 +1210,7 @@ export class MockTransport implements Transport {
       return this.deleteShellIdentity(decodeURIComponent(seg[1]), decodeURIComponent(seg[3]), q.get('kind') ?? '')
     }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'logout' && seg.length === 4) return this.logoutAgy(decodeURIComponent(seg[1]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'recheck') return { logged_in: null }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'kinds' && seg[4] === 'logout' && seg.length === 5) return this.logoutKindDefault(decodeURIComponent(seg[1]), decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'install' && seg.length === 4) return this.installAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))

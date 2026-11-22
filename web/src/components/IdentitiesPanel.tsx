@@ -9,6 +9,7 @@ import { ShellIdentityRows } from './IdentityShellRows'
 import { IdentityKindCard } from './IdentityKindCard'
 import { IdentityHostTabs, IDENTITY_HOST_PANEL_ID, type HostTabItem } from './IdentityHostTabs'
 import { AddIdentityDialog } from './AddIdentityDialog'
+import { recheckIdentity } from '../api'
 import './identitiesPanel.css'
 
 export { IdentityBadge } from './IdentityRow'
@@ -159,6 +160,7 @@ export function IdentitiesPanel() {
             : (hosts.find((h) => h.name === host)?.identity_status[name]?.logged_in ?? null)
         }
         refreshStatus={refreshState}
+        recheck={(host, name) => recheckIdentity(host, name)}
         onCreated={(host, name) => {
           choose(host)
           setFresh({ host, name })

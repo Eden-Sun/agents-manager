@@ -120,11 +120,12 @@ it('手機：只有 Fable 有值時仍只寫一個窗口，寫出 F 的 %，並�
   }
 })
 
-it('5h、7d、F 全部沒有值時保留「5h —」佔位', async () => {
+it('5h、7d、F 全部沒有值時顯示「查詢中…」佔位，不畫窗口列', async () => {
   resetStoreForTest()
   const cell = await openWith({ five: false, seven: false, fable: false })
   const names = [...cell.querySelectorAll('.quota-window-name')].map((el) => el.textContent)
-  assert.deepEqual(names, ['5h'], `佔位仍是 5h，實際 ${JSON.stringify(names)}`)
+  assert.deepEqual(names, [], `沒有讀數時不該有窗口列，實際 ${JSON.stringify(names)}`)
+  assert.equal(cell.querySelector('.quota-placeholder')?.textContent, '查詢中…')
 })
 
 test('cc0 共用裸 claude 額度：舊的 claude:cc0 殘留格不能蓋過落點（照 quotaBaseKey，只讀裸 key）', { timeout: 30_000 }, async () => {
