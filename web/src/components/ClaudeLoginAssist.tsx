@@ -83,11 +83,13 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
 
   const device = status?.flow === 'device'
   return (
-    <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || (device ? 'codex' : 'claude') })}>
+    <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || (device ? 'codex' : status?.kind === 'agy' ? 'agy' : 'claude') })}>
       <div className="login-assist-title">
         {device
           ? t.x('登入 codex 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })
-          : t.x('登入 claude 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
+          : status?.kind === 'agy'
+            ? t.x('登入 agy 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })
+            : t.x('登入 claude 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
       </div>
       {phase === 'ended' ? (
         <div className="login-assist-done" role="status">

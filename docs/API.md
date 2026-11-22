@@ -403,7 +403,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/reconnect` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只服務 daemon 為 claude 身份登入開的 pane（見 §「手機版登入協助」），其餘 404 |
+| GET | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只服務 daemon 為 claude／codex／agy 身份登入開的 pane（見 §「手機版登入協助」），其餘 404 |
 | POST | `/api/hosts/{name}/shells/{pane_id}/login/code` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/tools/install` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -1848,7 +1848,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/stream?source=visible&format=ansi&token=…` | WebSocket 推送畫面，見下方「畫面推送」。認證同 `/ws`：Origin 必須本機、只收 UI token（query `token`）；帶 bot／service／child 憑證 401 |
 | POST | `/api/hosts/{name}/shells/{pane_id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只服務 daemon 為 claude 身份登入開的 pane（見 §「手機版登入協助」），其餘 404 |
+| GET | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只服務 daemon 為 claude／codex／agy 身份登入開的 pane（見 §「手機版登入協助」），其餘 404 |
 | POST | `/api/hosts/{name}/shells/{pane_id}/login/code` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | DELETE | `/api/hosts/{name}/shells/{pane_id}[?confirm=true]` | `pane.close`（分頁空了一起收）。記憶體清單裡的直接關；清單沒有就照 `panes` 表關，規則同 `POST /api/panes/{id}/close`：`confirm` 沒帶＝false，服務 pane 或讀不到事實時回 `409 {"reason":"service_pane","pane":{…含 kind／listen_ports／read_only},"unverified":bool}`，agent／active run 403；兩邊都沒有 404 |
 
@@ -2004,7 +2004,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 ### 手機版登入協助：`GET …/shells/{pane_id}/login`、`POST …/shells/{pane_id}/login/code`（#838，2026-10-04）
 手機上要從終端選取 `claude auth login` 的長 OAuth 網址、再把網站給的 code 貼回終端幾乎做不到。`POST …/identities/{identity}/login` 開出的 **claude** 登入 pane（登出與別的 kind 不算）因此多兩個端點，讓網頁直接給「打開登入網站」按鈕與 code 輸入框（UI-DECISIONS）。兩個都只有使用者本人（`user_only`），而且**只服務 daemon 自己開的登入 pane**：記憶體帳 `(host, pane_id)`，pane 關了（watcher 收尾、手動關）就清；不在帳上、或帳上那顆 shell 已被收掉／pane id 被別的 shell 重用，一律 `404 {"what":"login pane"}`。
 
-`GET /api/hosts/{name}/shells/{pane_id}/login` → `200 {"host","pane_id","identity","kind","flow","url","device_code","awaiting_code","code_sent","failure"}`，`Cache-Control: no-store`。`kind` 是 `claude` 或 `codex`；`flow` 是 `code`（claude：網址＋把網站給的 code 貼回來）或 `device`（codex：網址＋一次性碼，到網站輸入即可，**不貼回終端**）。`device_code`：codex 裝置碼的一次性碼（`XXXX-XXXX` 這類英數字與 `-`，4–24 字），畫面還沒印出來或不是裝置碼流程＝`null`；claude 永遠 `null`。daemon 讀 pane 的 `recent_unwrapped` 畫面（折行還原成一整行；硬折的舊讀法也接得起來）：
+`GET /api/hosts/{name}/shells/{pane_id}/login` → `200 {"host","pane_id","identity","kind","flow","url","device_code","awaiting_code","code_sent","failure"}`，`Cache-Control: no-store`。`kind` 是 `claude`、`codex` 或 `agy`；`flow` 是 `code`（claude／agy：網址＋把網站給的 code 貼回來；agy 的網址只收 `https://accounts.google.com/o/oauth2/…`，等 code 的提示是 `If you aren't automatically redirected, paste the authorization code below:`，失敗字樣是 `Got an error: …`，daemon 另在登入選單自動選 Google、登入成功後送 `/quit`）或 `device`（codex：網址＋一次性碼，到網站輸入即可，**不貼回終端**）。`device_code`：codex 裝置碼的一次性碼（`XXXX-XXXX` 這類英數字與 `-`，4–24 字），畫面還沒印出來或不是裝置碼流程＝`null`；claude 永遠 `null`。daemon 讀 pane 的 `recent_unwrapped` 畫面（折行還原成一整行；硬折的舊讀法也接得起來）：
 - `url`：claude 是畫面上最後一個 `https://` 網址，**原樣**；只有 https、host 是 `claude.com`／`claude.ai`／`anthropic.com`（含子網域）、路徑含 `/oauth/authorize` 才交出，否則 `null`（畫面是任意終端輸出，不能讓它塞別的網址）。codex 只認固定的 `https://auth.openai.com/codex/device`。CLI 還沒印出來也是 `null`。
 - `awaiting_code`：最後一個非空行**正好是** `Paste code here if prompted >`（claude 2.1.289 實測）。CLI 吐出錯誤（那一行後面接 `Login failed: …`）、結束、回到 shell 提示，都不再是。
 - `code_sent`：這顆 pane 已經送過 code；`failure`：畫面上的 `Login failed: …` 那一句（最多 200 字）。

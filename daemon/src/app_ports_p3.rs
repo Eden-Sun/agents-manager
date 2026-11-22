@@ -243,6 +243,16 @@ impl crate::tools::ToolsEnv for App {
         crate::quota_claude::unpark_identity(host, name, crate::quota::identity_shares_default("claude", env));
     }
 
+    fn login_pane_assist(app: &Arc<Self>, host: &str, pane_id: &str, kind: &str, logged_in: bool) -> impl Future<Output = ()> + Send {
+        let app = app.clone();
+        let (host, pane_id, kind) = (host.to_string(), pane_id.to_string(), kind.to_string());
+        async move {
+            if kind == "agy" {
+                crate::runners::login_assist::agy_assist_tick(&app, &host, &pane_id, logged_in).await;
+            }
+        }
+    }
+
     fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl Future<Output = ()> + Send {
         let app = app.clone();
         let (host, pane_id) = (host.to_string(), pane_id.to_string());

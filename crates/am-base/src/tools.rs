@@ -35,6 +35,10 @@ pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks 
     fn unpark_claude_identity(&self, host: &str, name: &str, env: &std::collections::BTreeMap<String, String>);
     /// 關掉為了登入／登出開的 shell pane。
     fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 登入 pane 的每拍輔助（agy：選登入方式、登入成功後離開 TUI）；預設什麼都不做。
+    fn login_pane_assist(_app: &Arc<Self>, _host: &str, _pane_id: &str, _kind: &str, _logged_in: bool) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
     /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身份、回補 quota 限制、排著的 prompt 撞限。
     fn host_tools_installed(app: &Arc<Self>, host: &str) -> impl std::future::Future<Output = ()> + Send;
     /// 身份的登入狀態剛由未登入／未知翻成已登入（重驗、登入 pane 收尾、對話框重新檢查都會走到）：立刻重新探額度。
@@ -664,6 +668,9 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
             if ended || now >= deadline {
                 finish_identity_login_pane(&app, &host, &name, &fence, &pane_id, logout).await;
                 return;
+            }
+            if kind == "agy" && !logout && cli_active {
+                H::login_pane_assist(&app, &host, &pane_id, &kind, agy_logged_in_seen).await;
             }
             if agy_login_recheck_due(&kind, logout, agy_logged_in_seen, cli_active, now, next_agy_check) {
                 next_agy_check = now + AGY_LOGIN_RECHECK_EVERY;

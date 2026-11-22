@@ -452,3 +452,101 @@ fn a_failed_device_login_reports_the_cli_line() {
     let s = parse_device_screen("Login failed: device code expired\n");
     assert_eq!(s.failure.as_deref(), Some("Login failed: device code expired"));
 }
+
+const AGY_MENU: &str = include_str!("agy_1_menu.txt");
+const AGY_URL: &str = include_str!("agy_2_url.txt");
+const AGY_FAILED: &str = include_str!("agy_4_failed.txt");
+
+const AGY_FULL_URL: &str = "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com&code_challenge=AZACQEgomic4tzhEkHOik4tsX_Jonr9Sieqvx2zgZ9s&code_challenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcclog+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fexperimentsandconfigs+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Faicode+openid&state=sBA1zPfivfOXbw8g4b6zjA";
+
+#[test]
+fn the_real_agy_screens_give_menu_url_prompt_and_failure() {
+    assert_eq!(agy_menu_cursor(AGY_MENU), Some(true));
+    assert_eq!(agy_menu_cursor(AGY_URL), None);
+    let menu = parse_agy_screen(AGY_MENU);
+    assert_eq!((menu.url, menu.awaiting_code, menu.failure), (None, false, None));
+    let s = parse_agy_screen(AGY_URL);
+    assert_eq!(s.url.as_deref(), Some(AGY_FULL_URL), "TUI 折行的網址要接回一整條");
+    assert!(s.awaiting_code);
+    assert_eq!(s.failure, None);
+    let f = parse_agy_screen(AGY_FAILED);
+    assert!(!f.awaiting_code);
+    assert_eq!(f.failure.as_deref(), Some("Got an error: token exchange failed: oauth2: \"invalid_grant\" \"Malformed auth code.\""));
+    let failed_after_prompt = format!("{AGY_URL}\n{AGY_FAILED}");
+    assert!(!parse_agy_screen(&failed_after_prompt).awaiting_code);
+    assert!(!parse_agy_screen("user@host:~$ agy\n").awaiting_code, "沒有提示就不算在等 code");
+}
+
+#[test]
+fn only_google_accounts_urls_are_handed_to_the_page_for_agy() {
+    assert!(is_agy_login_url(AGY_FULL_URL));
+    for bad in [
+        "http://accounts.google.com/o/oauth2/auth?a=b",
+        "https://accounts.google.com.evil.example/o/oauth2/auth?a=b",
+        "https://evilaccounts.google.com/o/oauth2/auth?a=b",
+        "https://accounts.google.com@evil.example/o/oauth2/auth?a=b",
+        "https://accounts.google.com:8443/o/oauth2/auth?a=b",
+        "https://www.google.com/o/oauth2/auth?a=b",
+        "https://accounts.google.com/other?a=b",
+        "https://accounts.google.com/o/oauth2/auth?x=\"<script>",
+        "",
+    ] {
+        assert!(!is_agy_login_url(bad), "{bad}");
+    }
+    let evil = AGY_URL.replace("https://accounts.google.com/", "https://evil.example/");
+    assert_eq!(parse_agy_screen(&evil).url, None);
+}
+
+async fn agy_login_pane(screen: &str) -> Fx {
+    let env = tt::env().await;
+    let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
+    reserve(&env.app, "local", "ag9").unwrap().register(&shell.pane_id, &shell.created_at, "agy");
+    env.herdr.set_screen(&shell.pane_id, screen);
+    env.herdr.set_shell_pid(&shell.pane_id, 41101);
+    *env.app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+    env.herdr.argvs.lock().unwrap().insert(shell.pane_id.clone(), vec!["agy".into()]);
+    Fx { env, pane: shell.pane_id }
+}
+
+#[tokio::test]
+async fn an_agy_login_pane_is_registered_and_serves_url_and_code() {
+    let f = agy_login_pane(AGY_URL).await;
+    assert!(is_registered(&f.env.app, "local", &f.pane));
+    let v = status(&f.env.app, "local", &f.pane).await.unwrap();
+    assert_eq!((v["kind"].clone(), v["flow"].clone(), v["identity"].clone()), (json!("agy"), json!("code"), json!("ag9")));
+    assert_eq!(v["url"], AGY_FULL_URL);
+    assert_eq!(v["awaiting_code"], true);
+    let out = submit_code(&f.env.app, "local", &f.pane, "4/0AXgood-code").await.unwrap();
+    assert_eq!(out["sent"], true);
+    assert_eq!(f.typed().len(), 1);
+    assert!(conflict(submit_code(&f.env.app, "local", &f.pane, "4/0AXgood-code").await)["reason"] == "code_already_sent");
+}
+
+#[tokio::test]
+async fn agy_without_the_prompt_gets_no_code() {
+    let f = agy_login_pane(AGY_MENU).await;
+    assert_eq!(conflict(submit_code(&f.env.app, "local", &f.pane, "4/0AXgood-code").await)["reason"], "not_awaiting_code");
+    assert!(f.typed().is_empty());
+}
+
+#[tokio::test]
+async fn the_agy_assist_picks_google_only_on_the_menu_and_quits_only_after_a_confirmed_login() {
+    use crate::runners::login_assist::agy_assist_tick;
+    let f = agy_login_pane(AGY_MENU).await;
+    agy_assist_tick(&f.env.app, "local", &f.pane, false).await;
+    assert_eq!(f.keys(), vec![json!(["enter"])]);
+    f.env.herdr.set_screen(&f.pane, AGY_URL);
+    agy_assist_tick(&f.env.app, "local", &f.pane, false).await;
+    agy_assist_tick(&f.env.app, "local", &f.pane, true).await;
+    assert_eq!(f.keys().len(), 1, "網址／等 code 畫面不送鍵，登入確認了也不在這種畫面送 /quit");
+    f.env.herdr.set_screen(&f.pane, AGY_FAILED);
+    agy_assist_tick(&f.env.app, "local", &f.pane, true).await;
+    assert!(f.typed().is_empty(), "錯誤頁不送 /quit");
+    f.env.herdr.set_screen(&f.pane, "\n Antigravity CLI ready\n\n > \n");
+    agy_assist_tick(&f.env.app, "local", &f.pane, false).await;
+    assert!(f.typed().is_empty(), "還沒確認登入不送 /quit");
+    agy_assist_tick(&f.env.app, "local", &f.pane, true).await;
+    assert_eq!(f.typed().len(), 1);
+    agy_assist_tick(&f.env.app, "local", &f.pane, true).await;
+    assert_eq!(f.typed().len(), 1, "/quit 只送一次");
+}

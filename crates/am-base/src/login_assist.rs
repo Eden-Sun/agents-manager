@@ -41,6 +41,8 @@ pub struct Entry {
     pub shell_created_at: String,
     pub opened: Instant,
     pub code_sent: bool,
+    pub menu_picks: u8,
+    pub quit_sent: bool,
 }
 
 /// `App.login_panes`：掛在 App 上而不是 process 全域（同一個 process 裡的另一個 App，例如測試，pane id 會撞）。
@@ -152,6 +154,60 @@ pub fn parse_screen(text: &str) -> LoginScreen {
     let last = lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
     out.awaiting_code = last == Some(PROMPT);
     out.failure = failure_line(&lines);
+    out
+}
+
+pub const AGY_CODE_PROMPT: &str = "If you aren't automatically redirected, paste the authorization code below:";
+pub const AGY_MENU_TITLE: &str = "Select login method:";
+pub const AGY_MENU_GOOGLE: &str = "1. Google OAuth";
+const AGY_FAILURE_PREFIX: &str = "Got an error:";
+const AGY_BACK_HINT: &str = "Press any key to go back.";
+pub const AGY_MAX_MENU_PICKS: u8 = 3;
+
+/// agy 的授權網址只收 https、host 正好是 accounts.google.com、路徑是 `/o/oauth2/`（agy 1.5.14 實測印的就是這個）。
+pub fn is_agy_login_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    if url.len() > MAX_URL_LEN || !url.chars().all(is_url_char) {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    host == "accounts.google.com" && rest[host.len()..].starts_with("/o/oauth2/")
+}
+
+/// agy 登入選單目前停在哪一項：`Some(true)`＝游標在 Google OAuth、`Some(false)`＝選單在但游標在別項、`None`＝不是選單畫面。
+pub fn agy_menu_cursor(text: &str) -> Option<bool> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let at = lines.iter().position(|l| *l == AGY_MENU_TITLE)?;
+    let options = &lines[at + 1..];
+    let on_google = options.iter().any(|l| l.strip_prefix('>').is_some_and(|r| r.trim() == AGY_MENU_GOOGLE));
+    let has_google = options.iter().any(|l| l.trim_start_matches('>').trim() == AGY_MENU_GOOGLE);
+    has_google.then_some(on_google)
+}
+
+/// agy（1.5.14 實測）的登入畫面：網址被 TUI 以固定寬度折成幾列（每列前面一個空白）、等 code 的提示是
+/// `If you aren't automatically redirected, paste the authorization code below:`（輸入框在它下面，畫面較矮時被捲出去，所以不能要求它是最後一行）。
+pub fn parse_agy_screen(text: &str) -> LoginScreen {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r').trim()).collect();
+    let mut out = LoginScreen::default();
+    for (i, line) in lines.iter().enumerate().rev() {
+        if !line.starts_with("https://") {
+            continue;
+        }
+        let mut url = line.to_string();
+        for next in &lines[i + 1..] {
+            if next.is_empty() || next.chars().any(char::is_whitespace) || !next.chars().all(is_url_char) {
+                break;
+            }
+            url.push_str(next);
+        }
+        if is_agy_login_url(&url) {
+            out.url = Some(url);
+            break;
+        }
+    }
+    out.failure = lines.iter().rev().find_map(|l| l.starts_with(AGY_FAILURE_PREFIX).then(|| l.chars().take(200).collect::<String>()));
+    let prompt_at = lines.iter().rposition(|l| *l == AGY_CODE_PROMPT);
+    out.awaiting_code = prompt_at.is_some_and(|at| !lines[at + 1..].iter().any(|l| l.starts_with(AGY_FAILURE_PREFIX) || *l == AGY_BACK_HINT));
     out
 }
 

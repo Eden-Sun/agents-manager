@@ -460,3 +460,32 @@ async fn unknown_host_is_404_host_not_cli_missing() {
     assert_eq!(body["error"], "not_found");
     assert_eq!(body["what"], "host", "{body}");
 }
+
+#[tokio::test]
+async fn agy_identity_login_registers_login_assist_pane() {
+    let e = crate::testing::env().await;
+    with_identity(&e.app, "ag1", "agy").await;
+    e.herdr.set_default_shell_pid(41101);
+    *e.app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+    e.app.tools.lock().await.insert(
+        "local".into(),
+        crate::tools::HostTools {
+            tools: [("agy".into(), crate::tools::ToolInfo { installed: true, path: Some("/usr/bin/agy".into()), version: Some("1.5.14".into()), logged_in: Some(false) })].into(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        },
+    );
+    let resp = login_identity(State(e.app.clone()), Path(("local".into(), "ag1".into())), Extension(RequestPrincipal::User))
+        .await
+        .expect("agy identity login opens and registers a pane");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let shell: Value = serde_json::from_slice(&bytes).unwrap();
+    let pane_id = shell["pane_id"].as_str().expect("pane_id");
+    assert!(crate::login_assist::is_registered(&e.app, "local", pane_id));
+    let st = crate::runners::login_assist::status(&e.app, "local", pane_id).await.unwrap();
+    assert_eq!((st["identity"].as_str(), st["kind"].as_str(), st["flow"].as_str()), (Some("ag1"), Some("agy"), Some("code")));
+}

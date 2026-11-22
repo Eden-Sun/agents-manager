@@ -4619,7 +4619,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         crate::tools::identity_login_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
-    let login_reservation = if !logout && matches!(idn.kind.as_str(), "claude" | "codex") {
+    let login_reservation = if !logout && matches!(idn.kind.as_str(), "claude" | "codex" | "agy") {
         crate::runners::login_assist::prune_dead(&app, &name, &identity).await;
         Some(crate::runners::login_assist::reserve(&app, &name, &identity)?)
     } else {
@@ -4762,7 +4762,7 @@ async fn host_shell_text(
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
-/// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為 claude 身份登入開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
+/// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為身份登入（claude／codex／agy）開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
 /// 網址不進 log／事件，所以不快取。不是登入 pane 一律 404。
 async fn host_shell_login_status(
     State(app): State<Arc<App>>,

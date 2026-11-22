@@ -102,7 +102,7 @@ function withQuotaFlags(q: Rec | null): Rec | null {
 
 const WORKSPACE_COLUMNS = 185
 
-const MOCK_AGY_LOGIN_URL = 'https://accounts.example.test/o/oauth2/auth?client=agy-mock'
+const MOCK_AGY_LOGIN_URL = 'https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=mock.apps.googleusercontent.com&response_type=code&state=mock'
 const MOCK_CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device'
 const MOCK_CODEX_DEVICE_CODE = 'MOCK-7K2Q'
 const MOCK_LOGIN_URL =
@@ -556,6 +556,7 @@ export class MockTransport implements Transport {
     cc0: { name: 'cc0', kind: 'claude', logged_in: true, account: 'me@example.com', plan: 'max', source: 'config' },
     cc1: { name: 'cc1', kind: 'claude', logged_in: false, source: 'config' },
     cx1: { name: 'cx1', kind: 'codex', logged_in: false, source: 'config' },
+    ag1: { name: 'ag1', kind: 'agy', logged_in: false, source: 'config' },
     cc2: {
       name: 'cc2',
       kind: 'claude',
@@ -1893,6 +1894,9 @@ export class MockTransport implements Transport {
     if (st.kind === 'claude') {
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Opening browser to sign in…', `If the browser didn't open, visit: ${MOCK_LOGIN_URL}`, 'Paste code here if prompted >')
       this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false })
+    } else if (st.kind === 'agy') {
+      pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Select login method:', '> 1. Google OAuth', `Open: ${MOCK_AGY_LOGIN_URL}`, "If you aren't automatically redirected, paste the authorization code below:")
+      this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false, kind: 'agy' })
     } else if (st.kind === 'codex') {
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Follow these steps to sign in with ChatGPT using device code authorization:', '1. Open this link in your browser and sign in to your account', `   ${MOCK_CODEX_DEVICE_URL}`, '2. Enter this one-time code (expires in 15 minutes)', `   ${MOCK_CODEX_DEVICE_CODE}`, '')
       this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false, kind: 'codex' })
@@ -1911,6 +1915,9 @@ export class MockTransport implements Transport {
     if (lp.kind === 'codex') {
       return { host, pane_id: pane, identity: lp.identity, kind: 'codex', flow: 'device', url: MOCK_CODEX_DEVICE_URL, device_code: MOCK_CODEX_DEVICE_CODE, awaiting_code: false, code_sent: false, failure: null }
     }
+    if (lp.kind === 'agy') {
+      return { host, pane_id: pane, identity: lp.identity, kind: 'agy', flow: 'code', url: MOCK_AGY_LOGIN_URL, device_code: null, awaiting_code: !lp.codeSent, code_sent: lp.codeSent, failure: null }
+    }
     return { host, pane_id: pane, identity: lp.identity, kind: 'claude', flow: 'code', url: MOCK_LOGIN_URL, device_code: null, awaiting_code: !lp.codeSent, code_sent: lp.codeSent, failure: null }
   }
 
@@ -1925,7 +1932,7 @@ export class MockTransport implements Transport {
     lp.codeSent = true
     if (code.trim().startsWith('bad')) {
       lp.codeSent = false
-      return { sent: true, outcome: 'failed', message: 'Login failed: Request failed with status code 400' }
+      return { sent: true, outcome: 'failed', message: lp.kind === 'agy' ? 'Got an error: token exchange failed: oauth2: "invalid_grant" "Malformed auth code."' : 'Login failed: Request failed with status code 400' }
     }
     this.shells.delete(`${host}/${pane}`)
     this.loginPanes.delete(`${host}/${pane}`)
@@ -4030,7 +4037,7 @@ export class MockTransport implements Transport {
     }
   }
 
-  private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean; kind?: 'codex' }>()
+  private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean; kind?: 'codex' | 'agy' }>()
 
   private openShell(host: string, cwd: string) {
     if (host !== 'local') {

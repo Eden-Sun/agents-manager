@@ -251,6 +251,7 @@ export default {
   '開始後這個帳號原本的登入會立即失效，用這個身份的 codex bot 要等你完成登入才能繼續。': 'Once it starts, this account’s current sign-in stops working right away. codex bots using this identity have to wait until you finish signing in.',
   '開始登入': 'Start sign-in',
   '先不要': 'Not now',
+  '登入 agy 身份 {identity}（{where}）': 'Sign in agy identity {identity} ({where})',
   '登入 codex 身份 {identity}（{where}）': 'Sign in codex identity {identity} ({where})',
   '等 CLI 印出一次性碼…': 'Waiting for the CLI to print the one-time code…',
   '一次性碼': 'One-time code',

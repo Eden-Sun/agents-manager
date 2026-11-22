@@ -3,8 +3,8 @@
 use crate::api::shell;
 use crate::lc_error::{LcError, LcResult};
 use crate::login_assist::{
-    claim_code_send, parse_device_screen, parse_screen, valid_code, Entry, LoginScreen, Target, MAX_AGE, OUTCOME_POLL, OUTCOME_WAIT,
-    READ_LINES,
+    agy_menu_cursor, claim_code_send, parse_agy_screen, parse_device_screen, parse_screen, valid_code, Entry, LoginScreen, Target,
+    AGY_MAX_MENU_PICKS, MAX_AGE, OUTCOME_POLL, OUTCOME_WAIT, READ_LINES,
 };
 use crate::state::App;
 use serde_json::{json, Value};
@@ -31,6 +31,8 @@ impl IdentityReservation {
                 shell_created_at: shell_created_at.to_string(),
                 opened: Instant::now(),
                 code_sent: false,
+                menu_picks: 0,
+                quit_sent: false,
             },
         );
         drop(panes);
@@ -99,7 +101,60 @@ pub async fn prune_dead(app: &Arc<App>, host: &str, identity: &str) {
 async fn read_screen(app: &Arc<App>, host: &str, pane_id: &str, kind: &str) -> LcResult<LoginScreen> {
     let v = shell::read(app, host, pane_id, "recent_unwrapped", READ_LINES).await?;
     let text = v.get("text").and_then(Value::as_str).unwrap_or("");
-    Ok(if kind == "codex" { parse_device_screen(text) } else { parse_screen(text) })
+    Ok(match kind {
+        "codex" => parse_device_screen(text),
+        "agy" => parse_agy_screen(text),
+        _ => parse_screen(text),
+    })
+}
+
+async fn read_text(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<String> {
+    let v = shell::read(app, host, pane_id, "recent_unwrapped", READ_LINES).await?;
+    Ok(v.get("text").and_then(Value::as_str).unwrap_or("").to_string())
+}
+
+/// agy 登入 pane 的每拍輔助（由登入 watcher 呼叫）：畫面正好是登入方式選單才選 Google（最多 [`AGY_MAX_MENU_PICKS`] 次）；
+/// 身份已確認登入、而且畫面已不是登入畫面（沒有選單、沒在等 code、沒有錯誤頁）才送一次 `/quit`。其他畫面一律不送鍵。
+pub async fn agy_assist_tick(app: &Arc<App>, host: &str, pane_id: &str, logged_in: bool) {
+    let key = (host.to_string(), pane_id.to_string());
+    let (picks, quit_sent) = {
+        let m = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+        match m.get(&key).filter(|e| e.kind == "agy" && e.opened.elapsed() < MAX_AGE) {
+            Some(e) => (e.menu_picks, e.quit_sent),
+            None => return,
+        }
+    };
+    let Ok(text) = read_text(app, host, pane_id).await else { return };
+    if let Some(on_google) = agy_menu_cursor(&text) {
+        if logged_in || picks >= AGY_MAX_MENU_PICKS {
+            return;
+        }
+        if let Some(e) = app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&key) {
+            e.menu_picks += 1;
+        }
+        let keys: &[&str] = if on_google { &["enter"] } else { &["up", "enter"] };
+        let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+        if let Err(e) = shell::send_keys(app, host, pane_id, &keys).await {
+            tracing::warn!(host, pane_id, error = ?e, "could not pick the agy login method");
+        }
+        return;
+    }
+    if !logged_in || quit_sent {
+        return;
+    }
+    let screen = parse_agy_screen(&text);
+    if screen.awaiting_code || screen.failure.is_some() || text.contains("Press any key to go back.") {
+        return;
+    }
+    if foreground_pids(app, host, pane_id, "agy").await.map(|p| p.is_empty()).unwrap_or(true) {
+        return;
+    }
+    if let Some(e) = app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&key) {
+        e.quit_sent = true;
+    }
+    if shell::send_text(app, host, pane_id, "/quit", false).await.is_ok() {
+        let _ = shell::send_keys(app, host, pane_id, &["enter".to_string()]).await;
+    }
 }
 
 /// 帳上有、而且就是現在這顆 shell（pane id 被重用、shell 已被收掉都算沒有）。
@@ -144,13 +199,13 @@ fn not_awaiting(why: &str) -> LcError {
     )
 }
 
-/// 這顆 pane 前景程序裡 argv 是 `claude` 的那幾個 pid（`pid` 沒給＝`None`）；空＝沒有 claude 在跑。問不到就當沒有。
-async fn foreground_claude_pids(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Vec<Option<i64>>> {
+/// 這顆 pane 前景程序裡 argv 是 `cli` 的那幾個 pid（`pid` 沒給＝`None`）；空＝沒有該 CLI 在跑。問不到就當沒有。
+async fn foreground_pids(app: &Arc<App>, host: &str, pane_id: &str, cli: &str) -> LcResult<Vec<Option<i64>>> {
     let Some(fence) = app.hosts.fence(host).await else { return Err(LcError::NotFound("host".into())) };
     Ok(match fence.conn().client.pane_process_info(pane_id).await {
         Ok(ps) => ps
             .iter()
-            .filter(|p| p.argv.iter().chain(p.argv0.iter()).any(|a| std::path::Path::new(a).file_name().and_then(|v| v.to_str()) == Some("claude")))
+            .filter(|p| p.argv.iter().chain(p.argv0.iter()).any(|a| std::path::Path::new(a).file_name().and_then(|v| v.to_str()) == Some(cli)))
             .map(|p| p.pid)
             .collect(),
         Err(_) => Vec::new(),
@@ -187,20 +242,20 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
     if !screen.awaiting_code {
         return Err(not_awaiting(if screen.url.is_some() { "提示已經不在畫面最後一行" } else { "畫面上還沒有等 code 的提示" }));
     }
-    let claude_pids = foreground_claude_pids(app, host, pane_id).await?;
+    let claude_pids = foreground_pids(app, host, pane_id, &t.kind).await?;
     if claude_pids.is_empty() {
-        return Err(not_awaiting("claude 已經不在這個終端裡跑了"));
+        return Err(not_awaiting(&format!("{} 已經不在這個終端裡跑了", t.kind)));
     }
     claim_code_send(app, host, pane_id)?;
     shell::send_text(app, host, pane_id, code, false).await?;
     #[cfg(test)]
     crate::race_point::hit("login_code_typed", pane_id).await;
-    let still_there = foreground_claude_pids(app, host, pane_id).await.map(|now| now.iter().any(|p| claude_pids.contains(p))).unwrap_or(false);
+    let still_there = foreground_pids(app, host, pane_id, &t.kind).await.map(|now| now.iter().any(|p| claude_pids.contains(p))).unwrap_or(false);
     if !still_there {
         if let Err(e) = shell::send_keys(app, host, pane_id, &["ctrl+u".to_string()]).await {
             tracing::warn!(host, pane_id, error = ?e, "could not clear the login code typed into the shell");
         }
-        return Err(not_awaiting("送出前 claude 已經結束；code 沒有送出，請重新登入"));
+        return Err(not_awaiting(&format!("送出前 {} 已經結束；code 沒有送出，請重新登入", t.kind)));
     }
     shell::send_keys(app, host, pane_id, &["enter".to_string()]).await?;
     tracing::info!(host, pane_id, identity = %t.identity, "a login code was typed into the login pane");

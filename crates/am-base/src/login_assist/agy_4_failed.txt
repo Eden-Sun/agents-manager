@@ -1,0 +1,12 @@
+
+     ▄▀▀▄
+    ▀▀▀▀▀▀
+   ▀▀▀▀▀▀▀▀
+  ▄▀▀    ▀▀▄
+ ▄▀▀      ▀▀▄
+
+ Got an error: token exchange failed: oauth2: "invalid_grant" "Malformed auth code."
+
+ Press any key to go back.
+
+  shift+up/down Navigate
