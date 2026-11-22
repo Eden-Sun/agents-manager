@@ -6712,11 +6712,13 @@ async fn openai_api_native_start_reads_only_openai_settings_and_names_its_refusa
     env.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
     assert_ne!(reason(go().await), "api_bot_turn_cost_cap_missing", "openai 沒設上限也能啟動");
     assert_ne!(reason(go().await), "api_bot_config_invalid");
+    let zero = insert_openai_bot(&env, "openai-refuse-zero").await;
+    let go_zero = || env.app.api_native_start(&zero, ApiNativeStartMode::Resume { required: false });
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(0); Ok(()) }).await.unwrap();
-    assert_eq!(reason(go().await), "api_bot_config_invalid", "0 是無效值，不是不限");
+    assert_eq!(reason(go_zero().await), "api_bot_config_invalid", "0 是無效值，不是不限");
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = None; Ok(()) }).await.unwrap();
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(1000); Ok(()) }).await.unwrap();
-    assert_ne!(reason(go().await), "api_bot_turn_cost_cap_too_low");
+    assert_ne!(reason(go_zero().await), "api_bot_turn_cost_cap_too_low");
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state NOT IN ('running','starting')").bind(&bot).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(runs, 0);
 }

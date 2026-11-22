@@ -34,6 +34,12 @@ async fn start_body_inner(app: &Arc<crate::state::App>, bot: &str, mode: Mode) -
     #[cfg(not(all(test, feature = "daemon-test-harness")))]
     let lock = super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot).await.map_err(|e| { failed(bot, "bot_lock")(e); E::Unconfirmed })?;
     if app.api_bot_runtime.explicit_retire_quarantined(bot) { refused(bot, "retire_quarantined"); return Err(E::Unconfirmed); }
+    if let Mode::Resume { required: false } = mode {
+        if let Some(run_id) = active_run(app, bot).await? {
+            tracing::info!(bot, run_id = %run_id, "api native start: run already active, reusing it");
+            return Err(E::ActiveRun { run_id });
+        }
+    }
     app.api_bot_runtime.native_start_dependencies_ready(app, bot).await?;
     let (cleared, required) = match mode {
         Mode::Resume { required } => (false, required),
@@ -49,6 +55,17 @@ async fn start_body_inner(app: &Arc<crate::state::App>, bot: &str, mode: Mode) -
     }
 }
 
+async fn active_run(app: &crate::state::App, bot: &str) -> Result<Option<String>, E> {
+    sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state IN ('starting','running') LIMIT 1")
+        .bind(bot)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| {
+            failed(bot, "active_run_lookup")(e);
+            E::Unconfirmed
+        })
+}
+
 fn create_run<'a>(app: &'a crate::state::App, bot: &'a str, required: bool, cleared: bool) -> impl Future<Output = Result<(String, bool), E>> + Send + 'a {
     Box::pin(create_run_inner(app, bot, required, cleared))
 }
@@ -56,20 +73,6 @@ async fn create_run_inner(app: &crate::state::App, bot: &str, required: bool, cl
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() || app.api_bot_runtime.explicit_retire_quarantined(bot) {
         refused(bot, "gate_not_ready_or_quarantined");
         return Err(E::Unconfirmed);
-    }
-    if !cleared && !required {
-        let active: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state IN ('starting','running') LIMIT 1")
-            .bind(bot)
-            .fetch_optional(&app.db)
-            .await
-            .map_err(|e| {
-                failed(bot, "active_run_lookup")(e);
-                E::Unconfirmed
-            })?;
-        if let Some(run_id) = active {
-            tracing::info!(bot, run_id = %run_id, "api native start: run already active, reusing it");
-            return Err(E::ActiveRun { run_id });
-        }
     }
     let id = crate::db::ulid();
     let key = crate::lifecycle::api_bot_port::ApiRunKey { bot_id: bot.to_owned(), run_id: id.clone() };
