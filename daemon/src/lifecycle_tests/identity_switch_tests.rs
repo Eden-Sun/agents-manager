@@ -10,7 +10,9 @@
 //! 5. B 的第一回合在飛時，A 遲到的撞額度 `StopFailure` 與半截回覆才到——擋下；B 自己的 `Stop` 照常收尾。
 //! 6. 撞額度那一則**從頭到尾沒有被重送**：換身份、接回、放行都不會把它再打進 pane。
 
-use super::*;
+#![allow(unused_imports)]
+use crate::lifecycle::*;
+use crate::lifecycle_tests::prelude::*;
 use crate::testing as tt;
 
 const S: &str = "sess-continuous";
@@ -475,7 +477,7 @@ async fn a_dispatch_held_for_quota_goes_out_once_when_identity_a_gets_its_quota_
 /// daemon 重啟：行程內的東西（`app.quotas`、重看的 timer、`recently_held`）全沒了，DB 與活著的 pane 還在。
 async fn restarted(e: &tt::Env, bot_id: &str) -> Arc<App> {
     forget_queue_retry_timer(bot_id);
-    super::quota_hold::forget_held(bot_id);
+    crate::lifecycle::quota_hold::forget_held(bot_id);
     tt::restart_app(e).await
 }
 

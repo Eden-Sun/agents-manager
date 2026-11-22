@@ -141,11 +141,6 @@ pub mod transitions;
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod native_transport_prototype;
-/// issue #77 探索用的原型，同一個做法：`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，
-/// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
-/// issue #92 的端到端情境：撞額度 → 換身份 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub mod identity_switch_tests;
 /// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。
 #[cfg(test)]
 pub use crate::race_point;

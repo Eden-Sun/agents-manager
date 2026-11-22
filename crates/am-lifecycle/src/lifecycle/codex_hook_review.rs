@@ -32,7 +32,7 @@ pub fn review_open(screen: &str) -> bool {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 
