@@ -286,6 +286,9 @@ pub fn model_slug_from_statusline(payload: &Value) -> Option<String> {
     let model = payload.get("model")?.as_object()?;
     let id = model.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
     let id_lower = id.to_ascii_lowercase();
+    if crate::models::agy_is_orchestrator(&id_lower) {
+        return Some(id_lower);
+    }
     let effort = model
         .get("effort")
         .and_then(Value::as_str)

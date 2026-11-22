@@ -282,6 +282,10 @@
             }
         });
         assert_eq!(model_slug_from_statusline(&payload).as_deref(), Some("gemini-4-argon-medium"));
+        let orch = json!({"model": {"id": "gemini-pro-orchestrator-g1-pro", "display_name": "Orchestrator (Argon)", "effort": "xhigh"}});
+        assert_eq!(model_slug_from_statusline(&orch).as_deref(), Some("gemini-pro-orchestrator-g1-pro"));
+        let neon = json!({"model": {"id": "gemini-pro-orchestrator-neon", "effort": "xhigh"}});
+        assert_eq!(model_slug_from_statusline(&neon).as_deref(), Some("gemini-pro-orchestrator-neon"));
         let raw = status_json_from_statusline(&payload, None, Some("gemini-3.8-flash-medium"), 400_000).expect("status_json");
         assert!(has_statusline(Some(&raw)));
         let v: Value = serde_json::from_str(&raw).unwrap();

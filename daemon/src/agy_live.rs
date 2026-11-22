@@ -36,6 +36,9 @@ pub fn parse_footer(screen: &str) -> Option<String> {
     if tail.is_empty() || tail.len() > FOOTER_LINES {
         return None;
     }
+    if tail.iter().any(|l| l.contains("Orchestrator")) {
+        return None;
+    }
     tail.iter().rev().find_map(|line| {
         let at = line.rfind("Gemini ")?;
         let (name, effort) = line[at..].trim_end().split_once(" · ")?;
@@ -213,6 +216,12 @@ mod tests {
         let quoted = format!("我們用 Gemini 3.8 Flash · low 試過\n{RULE}\n>\n{RULE}\n  esc to cancel\n");
         assert_eq!(parse_footer(&quoted), None, "框底沒有模型就是讀不到，不往上找");
         assert_eq!(parse_footer("沒有框 Gemini 3.8 Flash · high\n"), None);
+    }
+
+    #[test]
+    fn an_orchestrator_footer_names_the_planner_not_the_model_so_it_is_unread() {
+        let s = screen("  auto · Orchestrator · Gemini 4 Neon · xhigh");
+        assert_eq!(parse_footer(&s), None, "框底的 Gemini 4 Neon 是規劃者，不是 orchestrator 本身，不能校正成一般模型");
     }
 
     #[test]
