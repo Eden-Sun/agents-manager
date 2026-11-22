@@ -24,6 +24,10 @@ pub async fn observe_claude_menu(app: &impl LcHost, run: Option<&db::Run>, activ
     }
 }
 
+pub async fn observe_claude_permission_notification(app: &impl LcHost, run: &db::Run, at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+    observed_status::observe_permission_notification(app, run, at).await
+}
+
 /// Safety net for a run left at `working` after its turn ended (see `observed_status::settle_stale_working`).
 pub async fn settle_stale_working(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
     observed_status::settle_stale_working(app, run).await

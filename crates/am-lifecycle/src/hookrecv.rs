@@ -554,6 +554,21 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
     process_for(app, body, None).await
 }
 
+async fn permission_notification<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
+    if body.truncated || body.payload.get("agent_id").is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+        || body.payload.get("agent_type").is_some_and(|v| !v.is_null() && v.as_str() != Some("")) {
+        return Ok(());
+    }
+    let Some(at) = body.received_at.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) else { return Ok(()) };
+    if (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds().unsigned_abs() > 120 { return Ok(()) }
+    let Some(bot) = db::bot(app.db(), &body.bot_id).await? else { return Ok(()) };
+    if bot.kind != "claude" || bot.deleted_at.is_some() || app.db().bot_handed_off_to(&bot.id).await?.is_some() { return Ok(()) }
+    let Some(run) = db::active_run(app.db(), &bot.id).await? else { return Ok(()) };
+    let Some(session) = body.payload.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return Ok(()) };
+    if body.run_id.as_deref() != Some(run.id.as_str()) || run.native_session_id.as_deref() != Some(session) { return Ok(()) }
+    app.observe_permission_notification(&run, at.with_timezone(&chrono::Utc)).await
+}
+
 /// 同 [`process`]，多帶這則 hook 在收件匣的 `hook_events.id`（只有 `hook_inbox` 的 worker 有）。
 ///
 /// 收件匣是 at-least-once：回合與訊息 commit 之後、worker 標 `processed_at` 之前 daemon 重啟，同一列會再處理一次。
@@ -561,6 +576,12 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
 /// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
 /// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
 pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+    if body.provider.eq_ignore_ascii_case("claude")
+        && body.payload.get("hook_event_name").and_then(Value::as_str) == Some("Notification")
+        && body.payload.get("notification_type").and_then(Value::as_str) == Some("permission_prompt")
+    {
+        return permission_notification(app, body).await;
+    }
     if is_claim_collision(body) {
         process_locked_for_with_outcome(app, body, event_id, &mut None).await?;
         return Ok(());
@@ -2618,6 +2639,7 @@ pub trait HookHost:
 {
     /// 叫醒 durable hook 收件匣的 worker（commit 之後才叫）。
     fn wake_hook_inbox(&self);
+    fn observe_permission_notification<'a>(&'a self, run: &'a db::Run, at: chrono::DateTime<chrono::Utc>) -> impl std::future::Future<Output = Result<()>> + Send + 'a;
     /// 處理遠端 issue claim 的撞題查詢；hook inbox 只有在 durable reservation／結果已落帳後才 ACK。
     fn check_claim_collision<'a>(
         &'a self,

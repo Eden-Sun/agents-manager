@@ -344,14 +344,20 @@ async fn eligible_menu_turn(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
 
 /// One fresh read only. No transcript or pane content is retained in the receipt.
 pub(super) async fn observe_menu(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
-    let result = observe_menu_inner(app, run).await;
+    let result = observe_menu_inner(app, run, None, None).await;
     if result.is_err() { reset_menu_clear_count(&menu_key(&run.id)); }
     result
 }
 
-async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+pub(super) async fn observe_permission_notification(app: &impl LcHost, run: &db::Run, at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+    let Some(turn) = db::in_flight_turn(app.db(), &run.id).await?.filter(|t| t.delivery == "ok") else { return Ok(()) };
+    observe_menu_inner(app, run, Some(&turn.id), Some(at)).await?;
+    Ok(())
+}
+
+async fn observe_menu_inner(app: &impl LcHost, run: &db::Run, expected_turn: Option<&str>, at: Option<chrono::DateTime<chrono::Utc>>) -> anyhow::Result<bool> {
     let key = menu_key(&run.id);
-    if run.state != "running" || !matches!(run.agent_status.as_str(), "idle" | "unknown" | "blocked") { return Ok(false) }
+    if run.state != "running" || (!matches!(run.agent_status.as_str(), "idle" | "unknown" | "blocked") && !(expected_turn.is_some() && run.agent_status == "working")) { return Ok(false) }
     if run.agent_status == "blocked" && !menu_owned(&run.id) { return Ok(false) }
     if !matches!(db::bot(app.db(), &run.bot_id).await?, Some(bot) if bot.kind == "claude") { return Ok(false) }
     if run.agent_status != "blocked" && eligible_menu_turn(app, run).await?.is_none() { return Ok(false) }
@@ -371,31 +377,40 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
     };
     let plain = crate::composer_parse::strip_ansi(&read.text);
     if other_menu_owner(&plain) {
-        if let Some(owner) = receipt(&key) { forget(&key, &owner); }
+        if expected_turn.is_none() { if let Some(owner) = receipt(&key) { forget(&key, &owner); } }
         return Ok(true);
     }
-    let open = super::super::delivery::claude_open_choice_menu(&plain);
+    let open = if expected_turn.is_some() { crate::tui_prompts::permission_prompt(&plain).is_some() } else { super::super::delivery::claude_open_choice_menu(&plain) };
+    if expected_turn.is_some() && !open { return Ok(true) }
     let clear = !open && (super::pane_awaits_input("claude", &plain) || crate::capture::claude::PARSER.still_busy(&plain));
     if !open && !clear { reset_menu_clear_count(&key); return Ok(true); }
 
     let lock = app.bot_lock(&run.bot_id).await;
-    let Ok(guard) = lock.try_lock() else { reset_menu_clear_count(&key); return Ok(true) };
+    let Ok(guard) = lock.try_lock() else {
+        if expected_turn.is_some() { return Err(anyhow::anyhow!("permission screen observation busy")) }
+        reset_menu_clear_count(&key);
+        return Ok(true);
+    };
     let changed = client.fence.run_current(Box::pin(async {
         if db::bot_host(app.db(), &run.bot_id).await? != client.fence.conn().name { reset_menu_clear_count(&key); return Ok::<_, anyhow::Error>(false) }
         let Some(fresh) = db::run(app.db(), &run.id).await? else { reset_menu_clear_count(&key); return Ok(false) };
         if !stamp.matches(app, &fresh).await? { reset_menu_clear_count(&key); return Ok(false) }
-        let prior = receipt(&key);
+        if at.is_some_and(|t| (chrono::Utc::now() - t).num_seconds().unsigned_abs() > 120) { return Ok(false) }
+        if expected_turn.is_some() && stamp.generation.is_some_and(|was| client.fence.target_epoch().is_some_and(|now| now != was)) { return Ok(false) }
+        let mut prior = receipt(&key);
         if let Some(ref owner) = prior {
             if fresh.agent_status != "blocked" || fresh.agent_status_since != owner.since
                 || !owner.authority.matches(&client.fence) || !owner.stamp.matches(app, &fresh).await? {
                 forget(&key, owner);
-                return Ok(false);
+                if expected_turn.is_none() || fresh.agent_status == "blocked" { return Ok(false) }
+                prior = None;
             }
         }
         if open {
             if prior.is_some() { reset_menu_clear_count(&key); return Ok(false) }
-            if !matches!(fresh.agent_status.as_str(), "idle" | "unknown") { return Ok(false) }
+            if !matches!(fresh.agent_status.as_str(), "idle" | "unknown") && !(expected_turn.is_some() && fresh.agent_status == "working") { return Ok(false) }
             let Some(turn) = eligible_menu_turn(app, &fresh).await? else { return Ok(false) };
+            if expected_turn.is_some_and(|expected| expected != turn) { return Ok(false) }
             #[cfg(all(test, feature = "daemon-test-harness"))]
             super::super::race_point::hit("observed_menu_before_cas", &fresh.id).await;
             let mut tx = app.db().begin().await?;
@@ -403,17 +418,19 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
                 "UPDATE runs SET agent_status='blocked' WHERE id=? AND state='running' AND ended_at IS NULL
                  AND agent_status=? AND agent_status_since IS ? AND pane_id IS ? AND herdr_session IS ?
                  AND native_session_id IS ? AND terminal_id IS ? AND host IS ? AND host_generation IS ?
+                 AND (? IS NULL OR ABS((julianday('now') - julianday(?)) * 86400) <= 120)
                  AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
                             WHERE b.id=runs.bot_id AND b.kind='claude' AND b.deleted_at IS NULL AND p.host=?)
                  AND ?=(SELECT id FROM turns WHERE run_id=runs.id ORDER BY created_at DESC,id DESC LIMIT 1)
-                 AND EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id AND (
+                 AND EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id AND (?=0 OR (t.status='in_flight' AND t.delivery='ok')) AND (
                        (t.status='in_flight' AND t.delivery='ok') OR
                        (NOT EXISTS(SELECT 1 FROM turns live WHERE live.run_id=runs.id AND live.status='in_flight')
                         AND (t.status='completed_fallback' OR (t.status IN ('completed','failed') AND t.completed_at>=?)))))")
                 .bind(&fresh.id).bind(&fresh.agent_status).bind(&fresh.agent_status_since)
                 .bind(&stamp.run.pane_id).bind(&stamp.run.herdr_session).bind(&stamp.run.native_session_id)
                 .bind(&stamp.run.terminal_id).bind(&stamp.host).bind(stamp.generation)
-                .bind(&client.fence.conn().name).bind(&turn).bind(&turn).bind(db::iso_in(-1800)).execute(&mut *tx).await?.rows_affected() == 1;
+                .bind(at.map(|t| t.to_rfc3339())).bind(at.map(|t| t.to_rfc3339()))
+                .bind(&client.fence.conn().name).bind(&turn).bind(&turn).bind(expected_turn.is_some()).bind(db::iso_in(-1800)).execute(&mut *tx).await?.rows_affected() == 1;
             let since: Option<String> = if applied {
                 sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id=?").bind(&fresh.id).fetch_one(&mut *tx).await?
             } else { None };

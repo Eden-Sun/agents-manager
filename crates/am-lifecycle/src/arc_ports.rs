@@ -39,6 +39,9 @@ mod arc_port_2_hookhost {
     use serde_json::Value;
     impl<T: crate::hookrecv::HookHost + ?Sized> crate::hookrecv::HookHost for std::sync::Arc<T> {
         fn wake_hook_inbox(&self) { <T as crate::hookrecv::HookHost>::wake_hook_inbox(self.as_ref()) }
+        fn observe_permission_notification<'a>(&'a self, run: &'a db::Run, at: chrono::DateTime<chrono::Utc>) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
+            <T as crate::hookrecv::HookHost>::observe_permission_notification(self.as_ref(), run, at)
+        }
         fn check_claim_collision<'a>(
             &'a self,
             ask: crate::judge::collision::ClaimAsk,

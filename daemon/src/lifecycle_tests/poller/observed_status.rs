@@ -68,6 +68,150 @@ use crate::lifecycle::poller::observed_status::test_seams::*;
             .set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
     }
 
+    const PERMISSION: &str = "────────────────────────────────
+ Bash command
+ echo fixture
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+ Esc to cancel
+";
+
+    async fn permission_fixture() -> Fixture {
+        let f = fixture().await;
+        sqlx::query("UPDATE runs SET native_session_id='native-1',agent_status='working' WHERE id=?")
+            .bind(&f.run.id).execute(f.env.app.db()).await.unwrap();
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), PERMISSION);
+        f
+    }
+
+    fn notification(f: &Fixture) -> crate::hookrecv::HookBody {
+        crate::hookrecv::HookBody {
+            bot_id: f.run.bot_id.clone(), provider: "claude".into(),
+            payload: json!({"hook_event_name":"Notification", "notification_type":"permission_prompt", "session_id":"native-1"}),
+            received_at: Some(db::now()), truncated: false, run_id: Some(f.run.id.clone()),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_notification_wakes_fresh_screen_and_replay_is_idempotent() {
+        let f = permission_fixture().await;
+        assert!(crate::tui_prompts::permission_prompt(PERMISSION).is_some());
+        let body = notification(&f);
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        let since = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap().agent_status_since;
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap().agent_status_since, since);
+        assert_eq!(db::in_flight_turn(f.env.app.db(), &f.run.id).await.unwrap().unwrap().id, f.turn);
+    }
+
+    #[tokio::test]
+    async fn remote_permission_notification_is_processed_once_from_inbox() {
+        let f = permission_fixture().await;
+        let body = notification(&f);
+        assert!(crate::hook_inbox::accept(f.env.app.db(), &body, crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        assert_eq!(crate::runners::hook_inbox::drain_once(&f.env.app).await.unwrap(), 1);
+        assert_eq!(status(&f).await, "blocked");
+        assert!(!crate::hook_inbox::accept(f.env.app.db(), &body, crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        assert_eq!(crate::runners::hook_inbox::drain_once(&f.env.app).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn permission_notification_retries_when_bot_lock_is_busy() {
+        let f = permission_fixture().await;
+        let body = notification(&f);
+        let lock = f.env.app.bot_lock(&f.run.bot_id).await;
+        let guard = lock.lock().await;
+        assert!(crate::hookrecv::process(&f.env.app, &body).await.is_err());
+        assert_eq!(status(&f).await, "working");
+        drop(guard);
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn permission_notification_rejects_old_or_unrelated_input() {
+        let f = permission_fixture().await;
+        let body = notification(&f);
+        for variant in 0..10 {
+            let mut event = body.clone();
+            match variant {
+                0 => event.run_id = Some("old-run".into()),
+                1 => event.run_id = None,
+                2 => event.payload["session_id"] = json!("old-session"),
+                3 => event.payload["session_id"] = json!(null),
+                4 => event.received_at = Some(db::iso_in(-300)),
+                5 => event.received_at = None,
+                6 => event.payload["notification_type"] = json!("idle_prompt"),
+                7 => event.payload["agent_id"] = json!("child"),
+                8 => event.payload["agent_id"] = json!(1),
+                _ => event.truncated = true,
+            }
+            crate::hookrecv::process(&f.env.app, &event).await.unwrap();
+            assert_eq!(status(&f).await, "working", "{variant}");
+        }
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(status(&f).await, "working");
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(status(&f).await, "working");
+    }
+
+    #[tokio::test]
+    async fn late_permission_notification_cannot_reopen_a_terminal_turn() {
+        let f = permission_fixture().await;
+        let body = notification(&f);
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+            .bind(db::now()).bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        assert_eq!(status(&f).await, "working");
+        assert!(!menu_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn permission_notification_cannot_reopen_a_turn_completed_during_read() {
+        let f = permission_fixture().await;
+        let app = f.env.app.clone();
+        let turn = f.turn.clone();
+        crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+            sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+                .bind(db::now()).bind(&turn).execute(app.db()).await.unwrap();
+        });
+        crate::hookrecv::process(&f.env.app, &notification(&f)).await.unwrap();
+        assert_eq!(status(&f).await, "working");
+        assert!(!menu_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn permission_notification_cannot_cross_session_or_run_change_during_read() {
+        for field in ["native_session_id", "state"] {
+            let f = permission_fixture().await;
+            let app = f.env.app.clone();
+            let id = f.run.id.clone();
+            crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+                let query = if field == "state" { "UPDATE runs SET state='stopped' WHERE id=?" } else { "UPDATE runs SET native_session_id='new-session' WHERE id=?" };
+                sqlx::query(query).bind(&id).execute(app.db()).await.unwrap();
+            });
+            crate::hookrecv::process(&f.env.app, &notification(&f)).await.unwrap();
+            assert_eq!(status(&f).await, "working", "{field}");
+            assert!(!menu_owned(&f.run.id));
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_submit_does_not_confirm_delivery() {
+        let f = permission_fixture().await;
+        sqlx::query("UPDATE turns SET delivery_verified=0 WHERE id=?").bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        let mut body = notification(&f);
+        body.payload = json!({"hook_event_name":"UserPromptSubmit", "session_id":"native-1", "prompt":"fixture"});
+        crate::hookrecv::process(&f.env.app, &body).await.unwrap();
+        let verified: i64 = sqlx::query_scalar("SELECT delivery_verified FROM turns WHERE id=?").bind(&f.turn).fetch_one(f.env.app.db()).await.unwrap();
+        assert_eq!(verified, 0);
+        assert_eq!(status(&f).await, "working");
+    }
+
     #[tokio::test]
     async fn p63_synthetic_in_flight_menu_is_blocked() {
         let f = fixture().await;

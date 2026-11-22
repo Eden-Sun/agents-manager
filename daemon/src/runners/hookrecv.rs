@@ -17,6 +17,10 @@ impl HookHost for App {
         self.hook_inbox_wake.notify_one();
     }
 
+    async fn observe_permission_notification(&self, run: &db::Run, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        crate::lifecycle::poller::observe_claude_permission_notification(&self.shared(), run, at).await
+    }
+
     fn check_claim_collision<'a>(
         &'a self,
         ask: crate::judge::collision::ClaimAsk,
