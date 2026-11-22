@@ -624,7 +624,15 @@ async fn plan_agy_context_compact(
     if used < limit {
         return Ok(None);
     }
-    let anchor = format!("agy-ctx:{}:{used}", run.id);
+    let last_turn: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT id FROM turns WHERE run_id = ? AND status IN ('completed','completed_fallback')
+           AND (client_request_id IS NULL OR NOT {}) ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        cache_clock::keep_warm_crid_sql("client_request_id")
+    ))
+    .bind(&run.id)
+    .fetch_optional(db.pool())
+    .await?;
+    let anchor = format!("agy-ctx:{}:{}", run.id, last_turn.as_deref().unwrap_or(&run.id));
     let done: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM primary_cache_actions WHERE bot_id = ? AND anchor = ? AND kind = 'warm_compact')",
     )
@@ -725,7 +733,7 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     }))
 }
 
-/// 這顆 bot 生效的執行期設定：bot 覆寫（`bots.runtime_override_json`）＋它角色在專案的 policy（`projects.role_policy_json`）。
+/// 這顆 bot 生效的執行期設定：bot 覆寫（`bots.runtime_override_json`）＞ 它角色在專案的 policy（`projects.role_policy_json`）＞ kind 預設（agy 400k）。
 /// 讀不懂的 JSON 一律當沒設（不因此誤開保溫）。
 pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> anyhow::Result<crate::runtime_policy::Effective> {
     use crate::runtime_policy::{effective, RuntimeSettings};
@@ -734,7 +742,7 @@ pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> any
         (Some(p), Some(role)) => p.role_policy().get(role).and_then(|v| serde_json::from_value(v.clone()).ok()),
         _ => None,
     };
-    Ok(effective(ov.as_ref(), role.as_ref()))
+    Ok(crate::runtime_policy::effective_for_kind(&bot.kind, ov.as_ref(), role.as_ref()))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]

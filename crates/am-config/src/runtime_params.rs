@@ -16,6 +16,15 @@ pub fn context_window(kind: &str) -> u32 {
     }
 }
 
+/// bot 覆寫與角色 policy 都沒設時，這個 kind 的預設 context 上限（自動壓縮門檻）。agy 沒有 statusLine 的視窗數字，預設 400k（同 codex）。
+/// claude／codex 不設＝`None`（行為不變）。只影響門檻，不產生啟動參數（`launch_params` 對 agy 本來就不補）。
+pub fn default_context_tokens(kind: &str) -> Option<u32> {
+    match kind {
+        "agy" => Some(400_000),
+        _ => None,
+    }
+}
+
 /// 將 role policy／bot 覆寫的 context 上限轉成 CLI 啟動參數。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchParams {
@@ -57,6 +66,9 @@ mod tests {
         assert_eq!(context_window("codex"), 400_000);
         assert_eq!(context_window("agy"), 1_048_576);
         assert_eq!(context_window("grok"), 0);
+        assert_eq!(default_context_tokens("agy"), Some(400_000));
+        assert_eq!(default_context_tokens("claude"), None);
+        assert_eq!(default_context_tokens("codex"), None);
 
         let claude = launch_params("claude", Some("opus"), Some(512_000));
         assert_eq!(claude.model.as_deref(), Some("opus[1m]"));

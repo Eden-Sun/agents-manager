@@ -1095,3 +1095,65 @@
         drop_window(&run_id);
     }
 
+    #[tokio::test]
+    async fn agy_context_defaults_to_400k_and_resends_only_after_a_new_turn() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let bot = tt::claude_bot(&env.app, &env.project_id, "agy-ctx-default").await;
+        sqlx::query("UPDATE bots SET kind = 'agy', is_primary = 0 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let set_tokens = |tokens: i64| {
+            let (db, id) = (env.app.db.clone(), run_id.clone());
+            async move {
+                let sj = serde_json::json!({
+                    "_agm_statusline": true,
+                    "context_window": { "total_input_tokens": tokens, "context_window_size": 1_048_576, "used_percentage": 38.1 }
+                })
+                .to_string();
+                sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(sj).bind(id).execute(&db).await.unwrap();
+            }
+        };
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+
+        set_tokens(399_999).await;
+        sweep(&env, &turns, &notes, now).await;
+        assert!(turns.compacts.lock().unwrap().is_empty(), "沒設也低於 400k 不壓");
+
+        set_tokens(400_000).await;
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "沒設覆寫、沒 policy：預設 400k 觸發");
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "讀數仍超過門檻、沒有新回合：不重送");
+
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, completed_at)
+             VALUES ('agy-t1', ?, ?, 'web', 'completed', 'ok', NULL, ?, ?)",
+        )
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(at(2, now))
+        .bind(at(1, now))
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 2, "新完成的回合之後可再壓一次");
+
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, completed_at)
+             VALUES ('agy-kw', ?, ?, 'web', 'completed', 'ok', 'keep-warm:2026-11-22T10:00:00.000Z', ?, ?)",
+        )
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(at(0, now))
+        .bind(at(0, now))
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 2, "保溫回合不算新回合");
+        drop_window(&run_id);
+    }
+

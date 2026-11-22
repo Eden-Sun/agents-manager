@@ -60,6 +60,13 @@ pub fn effective(bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSe
     }
 }
 
+/// 這顆 bot（依 kind）的生效結果：bot 覆寫 > 角色 policy > kind 預設（只補 `context_tokens`）。
+pub fn effective_for_kind(kind: &str, bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSettings>) -> Effective {
+    let mut eff = effective(bot_override, role);
+    eff.context_tokens = eff.context_tokens.or(am_config::runtime_params::default_context_tokens(kind));
+    eff
+}
+
 /// 保溫／熱壓真正用的門檻（秒與百分比），缺的用現有常數。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeepWarmTuning {
@@ -140,6 +147,17 @@ mod tests {
 
         let bad = effective(None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 20}"#)));
         assert_eq!(bad.keep_warm_tuning(58 * 60, 110 * 60, None).warm_compact_after_secs, 110 * 60);
+    }
+
+    #[test]
+    fn kind_default_context_applies_only_when_no_layer_sets_it() {
+        let role = s(r#"{"context_tokens": 300000}"#);
+        let ov = s(r#"{"context_tokens": 500000}"#);
+        assert_eq!(effective_for_kind("agy", None, None).context_tokens, Some(400_000));
+        assert_eq!(effective_for_kind("agy", None, Some(&role)).context_tokens, Some(300_000), "角色 policy 蓋過預設");
+        assert_eq!(effective_for_kind("agy", Some(&ov), Some(&role)).context_tokens, Some(500_000), "bot 覆寫最優先");
+        assert_eq!(effective_for_kind("claude", None, None).context_tokens, None);
+        assert_eq!(effective_for_kind("codex", None, None).context_tokens, None);
     }
 
     #[test]

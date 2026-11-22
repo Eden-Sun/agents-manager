@@ -18,6 +18,10 @@ test('還沒重啟（policy 改了）或 kind 不支援：不換分母', () => {
   assert.equal(compactThreshold(bot({ policy_pending: true }), project), null)
   assert.equal(compactThreshold(bot({ kind: 'grok' }), project), null)
   assert.equal(compactThreshold(bot({ kind: 'agy' }), project), 400000)
+  assert.equal(compactThreshold(bot({ kind: 'agy', role: null }), undefined), 400000, 'agy 沒覆寫、沒 policy：預設 400k')
+  assert.equal(compactThreshold(bot({ kind: 'agy', role: null, runtime_override: { context_tokens: 300000 } }), undefined), 300000, '覆寫優先')
+  assert.equal(compactThreshold(bot({ kind: 'claude', role: null }), undefined), null, 'claude 不設預設')
+  assert.equal(compactThreshold(bot({ kind: 'agy', role: null, policy_pending: true }), undefined), null, 'policy 待套用不換分母')
   assert.equal(compactThreshold(undefined, project), null)
 })
 
