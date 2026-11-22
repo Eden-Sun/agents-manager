@@ -738,10 +738,16 @@ impl CodexCfg {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeCfg {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub exclude_dynamic_system_prompt: bool,
+}
+
+impl Default for ClaudeCfg {
+    fn default() -> Self {
+        Self { exclude_dynamic_system_prompt: true }
+    }
 }
 
 impl ClaudeCfg {
@@ -4058,5 +4064,29 @@ mod retry_cross_provider_tests {
         assert_eq!(api_provider_of_model("gpt-6.2-astra"), API_PROVIDER_OPENAI, "帳本與計價認得 astra 是 OpenAI");
         assert!(claude_api_group_problem("translate", &group("gpt-9-unknown")).is_some(), "不認得的模型擋下");
         assert!(claude_api_group_problem("translate", &group("not a model")).is_some());
+    }
+}
+
+#[cfg(test)]
+mod claude_exclude_dynamic_default_tests {
+    use super::*;
+
+    #[test]
+    fn the_exclude_flag_is_on_unless_the_file_says_false() {
+        assert!(ClaudeCfg::default().exclude_dynamic_system_prompt);
+        assert!(serde_json::from_str::<ClaudeCfg>("{}").unwrap().exclude_dynamic_system_prompt);
+        assert!(!serde_json::from_str::<ClaudeCfg>(r#"{"exclude_dynamic_system_prompt": false}"#).unwrap().exclude_dynamic_system_prompt);
+        let (empty, _) = parse_config("").unwrap();
+        assert!(empty.claude.exclude_dynamic_system_prompt);
+        let (off, _) = parse_config("[claude]\nexclude_dynamic_system_prompt = false\n").unwrap();
+        assert!(!off.claude.exclude_dynamic_system_prompt);
+        let (on, _) = parse_config("[claude]\nexclude_dynamic_system_prompt = true\n").unwrap();
+        assert!(on.claude.exclude_dynamic_system_prompt);
+    }
+
+    #[test]
+    fn an_empty_config_does_not_write_the_default_claude_section() {
+        let v = serde_json::to_value(ConfigFile::default()).unwrap();
+        assert!(v.get("claude").is_none(), "{v}");
     }
 }

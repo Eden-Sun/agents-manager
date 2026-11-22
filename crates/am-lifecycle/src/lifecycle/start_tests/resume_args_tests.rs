@@ -2331,7 +2331,7 @@ async fn fresh_claude_start_binds_a_daemon_chosen_session_id_and_resume_does_not
     let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
     assert_eq!(run.native_session_id.as_deref(), Some(args[pos + 1].as_str()));
     assert_eq!(args[pos + 1].len(), 36);
-    assert!(!args.iter().any(|a| a == "--exclude-dynamic-system-prompt-sections"));
+    assert_eq!(args.iter().filter(|a| *a == "--exclude-dynamic-system-prompt-sections").count(), 1, "{args:?}");
     stop_bot(&e.app, &bot.id).await.unwrap();
 
     start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -2341,13 +2341,40 @@ async fn fresh_claude_start_binds_a_daemon_chosen_session_id_and_resume_does_not
 }
 
 #[tokio::test]
-async fn exclude_dynamic_system_prompt_is_off_by_default_and_follows_the_config() {
+async fn exclude_dynamic_system_prompt_is_on_by_default_and_follows_the_config() {
     let e = env().await;
-    e.app.cfg.update(|c| { c.claude.exclude_dynamic_system_prompt = true; Ok(()) }).await.unwrap();
-    let bot = claude_bot(&e.app, &e.project_id, "exclude-dyn").await;
-    start_bot(&e.app, &bot.id).await.unwrap();
+    let on = claude_bot(&e.app, &e.project_id, "exclude-dyn-on").await;
+    start_bot(&e.app, &on.id).await.unwrap();
     let args = started_args(&e).pop().unwrap();
-    assert_eq!(args.iter().filter(|a| *a == "--exclude-dynamic-system-prompt-sections").count(), 1);
+    assert_eq!(args.iter().filter(|a| *a == "--exclude-dynamic-system-prompt-sections").count(), 1, "{args:?}");
+
+    e.app.cfg.update(|c| { c.claude.exclude_dynamic_system_prompt = false; Ok(()) }).await.unwrap();
+    let off = claude_bot(&e.app, &e.project_id, "exclude-dyn-off").await;
+    start_bot(&e.app, &off.id).await.unwrap();
+    let args = started_args(&e).pop().unwrap();
+    assert!(!args.iter().any(|a| a == "--exclude-dynamic-system-prompt-sections"), "{args:?}");
+}
+
+#[tokio::test]
+async fn exclude_dynamic_system_prompt_is_carried_once_on_the_resume_path() {
+    let e = env().await;
+    let pm = claude_bot(&e.app, &e.project_id, "exclude-dyn-resume").await;
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+         VALUES (?,?,'stopped','idle',?,?,?)",
+    )
+    .bind(db::ulid())
+    .bind(&pm.id)
+    .bind("native-previous")
+    .bind("2026-09-07T00:00:00Z")
+    .bind("2026-09-07T00:01:00Z")
+    .execute(e.app.db())
+    .await
+    .unwrap();
+    start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+    let args = started_args(&e).pop().unwrap();
+    assert!(args.iter().any(|a| a == "--resume"), "{args:?}");
+    assert_eq!(args.iter().filter(|a| *a == "--exclude-dynamic-system-prompt-sections").count(), 1, "{args:?}");
 }
 
 #[test]
