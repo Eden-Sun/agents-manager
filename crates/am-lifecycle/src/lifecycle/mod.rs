@@ -94,7 +94,7 @@ pub mod poller;
 pub mod codex_rollout;
 pub mod codex_rollout_scan;
 pub mod transcript_origin;
-pub use transcript_origin::starter_origin_kind_at;
+pub use transcript_origin::starter_origin_at;
 pub mod screen;
 pub mod transcript_stage;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]

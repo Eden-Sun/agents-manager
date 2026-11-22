@@ -648,36 +648,45 @@ async fn hook_user_text(from_hook: Option<&str>, payload: &Value, transcript_pat
 /// 遠端 `hook.sh` 塞進 Stop payload 的另一個鍵：這一回合的起點（transcript 的 `origin.kind`，`human`／`task-notification`…）。
 const CARRIED_ORIGIN_KIND: &str = "agm_origin_kind";
 
-/// 這一回合**確定是人打的**時，那一句使用者訊息原文；起點不是 `human`、或讀不到起點（舊 CLI、讀不到 transcript、
-/// 舊版 hook.sh）＝ `None`（issue #754）。
+/// 遠端 `hook.sh` 塞進 Stop payload 的再一個鍵：起點那筆條目的 `timestamp`（原樣）。
+const CARRIED_ORIGIN_AT: &str = "agm_origin_at";
+
+/// 這一回合**確定是人打的**時，那一句使用者訊息原文與起點的時間；起點不是 `human`、或讀不到起點（舊 CLI、讀不到 transcript、
+/// 舊版 hook.sh）＝ `None`（issue #754）。起點時間沒有就是 `None`。
 ///
 /// 背景工作完成喚醒 claude 的那一輪沒有新 prompt、transcript 最後一則使用者訊息是上一句，所以不能只憑「讀得到最後一句」
 /// 就存：要起點是 `human`。遠端 transcript 在 agm-host 讀不到，起點跟文字一起由 `hook.sh` 從本機 transcript 帶來；
 /// 本機就直接讀檔。Stop 到的時候這一輪的起點一定已經寫進 transcript，不像回合剛開（`-> working` 邊）時可能還讀到上一輪的。
-async fn human_started_prompt(payload: &Value, transcript_path: Option<&str>) -> Option<String> {
+async fn human_started_prompt(payload: &Value, transcript_path: Option<&str>) -> Option<(String, Option<String>)> {
     if let Some(kind) = payload.get(CARRIED_ORIGIN_KIND).and_then(Value::as_str) {
-        return if kind == "human" { hook_user_text(None, payload, None).await } else { None };
+        if kind != "human" {
+            return None;
+        }
+        let at = payload.get(CARRIED_ORIGIN_AT).and_then(Value::as_str).map(str::to_string);
+        return hook_user_text(None, payload, None).await.map(|t| (t, at));
     }
     let path = std::path::PathBuf::from(transcript_path?);
-    let kind = {
+    let origin = {
         let path = path.clone();
-        tokio::task::spawn_blocking(move || lifecycle::starter_origin_kind_at(&path)).await.ok().flatten()
+        tokio::task::spawn_blocking(move || lifecycle::starter_origin_at(&path)).await.ok().flatten()
     };
-    if kind.as_deref() != Some("human") {
+    let (kind, at) = origin?;
+    if kind != "human" {
         return None;
     }
-    tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten()
+    tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten().map(|t| (t, at))
 }
 
 /// 外部回合沒有任何使用者訊息、而 Stop 證明起點是人打的：補記那一句。`begin_external_turn` 在回音跟上一句已答完的 prompt
 /// 一樣時不存（為了擋背景工作喚醒那一輪，見 [`repeats_answered_prompt`]）；使用者真的重送同一句時這裡補回來。
-/// 回合上已有使用者訊息就不動。
+/// 回合上已有使用者訊息就不動；起點其實早於上一句已答完（見 [`is_stale_resend`]）也不動。
 async fn store_resent_prompt_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     conv: &str,
     turn: &db::Turn,
     run: Option<&db::Run>,
     text: &str,
+    started_at: Option<&str>,
 ) -> Result<Option<db::Message>> {
     if turn.origin != "external" || text.trim().is_empty() {
         return Ok(None);
@@ -689,6 +698,10 @@ async fn store_resent_prompt_tx(
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::lifecycle::race_point::hit("resent_prompt_after_count_read", &turn.id).await;
     if have > 0 {
+        return Ok(None);
+    }
+    if is_stale_resend_tx(&mut **tx, conv, &turn.id, text, started_at).await? {
+        tracing::info!(turn = %turn.id, "external turn: starter predates the previous answer; not a resend");
         return Ok(None);
     }
     tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
@@ -703,9 +716,9 @@ async fn store_resent_prompt(app: &(impl crate::capabilities::Db + crate::events
     if turn.origin != "external" {
         return Ok(());
     }
-    let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
+    let Some((text, started_at)) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
     let mut tx = db::begin_write(app.db()).await?;
-    let added = store_resent_prompt_tx(&mut tx, conv, turn, run, &text).await?;
+    let added = store_resent_prompt_tx(&mut tx, conv, turn, run, &text, started_at.as_deref()).await?;
     tx.commit().await?;
     if let Some(m) = added {
         app.emit_message_added(bot_id, m).await;
@@ -756,20 +769,51 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     !existing.iter().any(|e| prompt_texts_match(e, incoming))
 }
 
-/// 外部回合的 hook 帶的「使用者訊息」其實是 transcript 裡最後一則 prompt：claude 自己接著做（背景 shell 跑完、
-/// 排程叫醒）的那一輪沒有新的 prompt，hook 還是回報上一則（2026-10-01 cf-ox-2：「ui 審查你自己做」多存一則）。
-/// 跟這一輪以外最近一則使用者訊息一樣、而且那一則的回合已經收掉，就是舊的那句，不再存。
-pub async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, incoming: &str) -> Result<bool> {
-    let last: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT m.content, t.status FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
+/// 這個對話裡、這一回合以外最近一則使用者訊息：內容、它那一回合的狀態、那一回合的完成時間。
+async fn last_other_user_message(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str) -> Result<Option<(String, Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT m.content, t.status, t.completed_at FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
           WHERE m.conversation_id = ? AND m.role = 'user' AND (m.turn_id IS NULL OR m.turn_id <> ?)
           ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1",
     )
     .bind(conv)
     .bind(turn_id)
     .fetch_optional(&mut *conn)
-    .await?;
-    Ok(matches!(last, Some((content, Some(status))) if matches!(status.as_str(), "completed" | "completed_fallback" | "failed") && prompt_texts_match(&content, incoming)))
+    .await?)
+}
+
+fn answered_status(status: &str) -> bool {
+    matches!(status, "completed" | "completed_fallback" | "failed")
+}
+
+/// 外部回合的 hook 帶的「使用者訊息」其實是 transcript 裡最後一則 prompt：claude 自己接著做（背景 shell 跑完、
+/// 排程叫醒）的那一輪沒有新的 prompt，hook 還是回報上一則（2026-10-01 cf-ox-2：「ui 審查你自己做」多存一則）。
+/// 跟這一輪以外最近一則使用者訊息一樣、而且那一則的回合已經收掉，就是舊的那句，不再存。
+pub async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, incoming: &str) -> Result<bool> {
+    let last = last_other_user_message(conn, conv, turn_id).await?;
+    Ok(matches!(last, Some((content, Some(status), _)) if answered_status(&status) && prompt_texts_match(&content, incoming)))
+}
+
+/// 2 秒以內的時鐘差不算數：起點與回合完成時間只差這點，仍視為回合之後才打的。
+const RESEND_CLOCK_SKEW: chrono::Duration = chrono::Duration::seconds(2);
+
+/// 這一句是上一則已答完的 prompt 的重送、而不是使用者新打的：文字相符，且起點時間早於那一回合完成（容許 [`RESEND_CLOCK_SKEW`]）；
+/// 起點時間缺席（舊 hook.sh、舊 CLI）時文字相符就保守當成舊的。起點晚於完成＝真的重送；文字不同＝另一句。
+fn is_stale_resend(answered_text: &str, answered_at: Option<&str>, text: &str, started_at: Option<&str>) -> bool {
+    if !prompt_texts_match(answered_text, text) {
+        return false;
+    }
+    let Some(started) = started_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) else { return true };
+    let Some(done) = answered_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) else { return false };
+    started + RESEND_CLOCK_SKEW < done
+}
+
+async fn is_stale_resend_tx(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, text: &str, started_at: Option<&str>) -> Result<bool> {
+    let Some((content, Some(status), done)) = last_other_user_message(conn, conv, turn_id).await? else { return Ok(false) };
+    if !answered_status(&status) {
+        return Ok(false);
+    }
+    Ok(is_stale_resend(&content, done.as_deref(), text, started_at))
 }
 
 /// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
@@ -1948,7 +1992,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                             added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
                         }
                     } else if let Some(text) = resent_prompt {
-                        added.extend(store_resent_prompt_tx(&mut tx, &conv, &t, run.as_ref(), &text).await?);
+                        added.extend(store_resent_prompt_tx(&mut tx, &conv, &t, run.as_ref(), &text.0, text.1.as_deref()).await?);
                     }
                 }
                 if !body_text.is_empty() {
@@ -2616,3 +2660,37 @@ mod agy_pre_invocation_delivery_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "hookrecv_tests/codex_stop_delivery_tests.rs"]
 mod codex_stop_delivery_tests;
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+mod resend_staleness_tests {
+    use super::*;
+
+    const ANSWERED_AT: &str = "2026-11-22T01:21:40.000Z";
+
+    #[test]
+    fn a_starter_from_before_the_answer_is_not_a_resend() {
+        assert!(is_stale_resend("現在部 demo", Some(ANSWERED_AT), "現在部 demo", Some("2026-11-22T01:21:00.000Z")));
+    }
+
+    #[test]
+    fn a_starter_after_the_answer_is_a_real_resend() {
+        assert!(!is_stale_resend("現在部 demo", Some(ANSWERED_AT), "現在部 demo", Some("2026-11-22T01:30:00.000Z")));
+    }
+
+    #[test]
+    fn two_seconds_of_clock_skew_is_allowed() {
+        assert!(!is_stale_resend("現在部 demo", Some(ANSWERED_AT), "現在部 demo", Some("2026-11-22T01:21:39.000Z")));
+        assert!(is_stale_resend("現在部 demo", Some(ANSWERED_AT), "現在部 demo", Some("2026-11-22T01:21:37.000Z")));
+    }
+
+    #[test]
+    fn a_missing_starter_time_is_conservatively_stale_when_the_text_matches() {
+        assert!(is_stale_resend("現在部 demo", Some(ANSWERED_AT), "現在部 demo", None));
+        assert!(!is_stale_resend("現在部 demo", Some(ANSWERED_AT), "另一句新的話", None));
+    }
+
+    #[test]
+    fn a_different_text_is_never_stale() {
+        assert!(!is_stale_resend("現在部 demo", Some(ANSWERED_AT), "另一句新的話", Some("2026-11-22T01:21:00.000Z")));
+    }
+}

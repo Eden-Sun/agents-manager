@@ -2829,24 +2829,47 @@ async fn user_texts_on(app: &Arc<App>, turn_id: &str) -> Vec<String> {
         .bind(turn_id).fetch_all(&app.db).await.unwrap()
 }
 
+/// 起點時間晚於上一句已答完：使用者這次真的又送了一次。
+fn typed_after_the_answer() -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 起點時間早於上一句已答完（那一句打的時候）：這一輪是喚醒，不是重送。
+fn typed_long_before_the_answer() -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn resent_stop(bot_id: &str, origin: &str, origin_at: Option<String>) -> HookBody {
+    let mut extra = json!({"agm_user_text": "現在部 demo", "agm_origin_kind": origin});
+    if let Some(at) = origin_at {
+        extra["agm_origin_at"] = json!(at);
+    }
+    claude_stop_for(bot_id, extra)
+}
+
 /// issue #754：背景工作完成喚醒的外部回合不能掛上一句使用者訊息；但使用者真的在 pane 裡重送同一句時要照記。
-/// 遠端 transcript 在 agm-host 讀不到，起點由遠端 hook.sh 從本機 transcript 讀出、跟 Stop 一起帶來（`agm_origin_kind`）：
-/// `human` 才補記（`begin_external_turn` 開回合時為了擋喚醒那一輪而沒存的回音），其他起點或沒證據都不存。
+/// 遠端 transcript 在 agm-host 讀不到，起點由遠端 hook.sh 從本機 transcript 讀出、跟 Stop 一起帶來（`agm_origin_kind`、`agm_origin_at`）：
+/// `human` 而且起點晚於上一句已答完才補記；起點早於、其他起點、或沒證據都不存。
 #[tokio::test]
 async fn a_resent_prompt_is_stored_but_a_background_wake_up_is_not() {
     let env = tt::env().await;
     let app = env.app.clone();
-    for (origin, expect_stored) in [(Some("human"), true), (Some("task-notification"), false), (None, false)] {
+    for (origin, origin_at, expect_stored) in [
+        ("human", Some(typed_after_the_answer()), true),
+        ("human", Some(typed_long_before_the_answer()), false),
+        ("human", None, false),
+        ("task-notification", Some(typed_after_the_answer()), false),
+    ] {
         let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
-        let mut extra = json!({"agm_user_text": "現在部 demo"});
-        if let Some(k) = origin {
-            extra["agm_origin_kind"] = json!(k);
-        }
-        process(&app, &claude_stop_for(&bot_id, extra)).await.unwrap();
+        process(&app, &resent_stop(&bot_id, origin, origin_at.clone())).await.unwrap();
         let stored = user_texts_on(&app, &external).await;
-        assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin:?}");
-        assert_eq!(turn_row(&app, &external).await.status, "completed", "origin={origin:?}");
+        assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin} at={origin_at:?}");
+        assert_eq!(turn_row(&app, &external).await.status, "completed", "origin={origin} at={origin_at:?}");
     }
+    let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
+    let no_origin = claude_stop_for(&bot_id, json!({"agm_user_text": "現在部 demo"}));
+    process(&app, &no_origin).await.unwrap();
+    assert_eq!(user_texts_on(&app, &external).await, Vec::<String>::new(), "沒有起點的舊 hook.sh：照舊不存");
 }
 
 #[tokio::test]
@@ -2855,7 +2878,7 @@ async fn stop_and_late_stop_need_only_one_available_pool_connection() {
     let app = env.app.clone();
     for fallback_closed in [false, true] {
         let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, fallback_closed).await;
-        let hook = claude_stop_for(&bot_id, json!({"agm_user_text": "現在部 demo", "agm_origin_kind": "human"}));
+        let hook = resent_stop(&bot_id, "human", Some(typed_after_the_answer()));
         let mut held = Vec::new();
         for _ in 1..app.db.options().get_max_connections() {
             held.push(app.db.acquire().await.unwrap());
@@ -2875,8 +2898,7 @@ async fn a_late_stop_after_the_fallback_still_stores_a_resent_prompt() {
     let app = env.app.clone();
     for (origin, expect_stored) in [("human", true), ("task-notification", false)] {
         let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, true).await;
-        let extra = json!({"agm_user_text": "現在部 demo", "agm_origin_kind": origin});
-        process(&app, &claude_stop_for(&bot_id, extra)).await.unwrap();
+        process(&app, &resent_stop(&bot_id, origin, Some(typed_after_the_answer()))).await.unwrap();
         let stored = user_texts_on(&app, &external).await;
         assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin}");
     }
@@ -2891,8 +2913,7 @@ async fn an_unrelated_writer_between_the_user_count_and_the_insert_does_not_lose
     let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, true).await;
     let other = tt::arm_app_foreign_writer(&app, "resent_prompt_after_count_read", &external);
 
-    let extra = json!({"agm_user_text": "現在部 demo", "agm_origin_kind": "human"});
-    process(&app, &claude_stop_for(&bot_id, extra)).await.expect("an unrelated writer must not make the Stop fail");
+    process(&app, &resent_stop(&bot_id, "human", Some(typed_after_the_answer()))).await.expect("an unrelated writer must not make the Stop fail");
 
     assert_eq!(*other.lock().unwrap(), Some(false), "the insert holds the write lock from its read on; the other writer waits");
     assert_eq!(user_texts_on(&app, &external).await, vec!["現在部 demo".to_string()]);
@@ -3016,23 +3037,27 @@ async fn a_typed_compact_command_turn_is_closed_and_noted_as_manual() {
 async fn a_local_transcript_decides_whether_the_stop_stores_a_resent_prompt() {
     let env = tt::env().await;
     let app = env.app.clone();
-    let line = |origin: Option<&str>, text: &str| {
-        let mut v = json!({"type": "user", "message": {"role": "user", "content": text}});
+    let line = |origin: Option<&str>, at: &str, text: &str| {
+        let mut v = json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": text}});
         if let Some(k) = origin {
             v["origin"] = json!({"kind": k});
         }
         format!("{v}\n")
     };
-    for (origin, expect_stored) in [("human", true), ("task-notification", false)] {
+    for (origin, at, expect_stored) in [
+        ("human", typed_after_the_answer(), true),
+        ("human", typed_long_before_the_answer(), false),
+        ("task-notification", typed_after_the_answer(), false),
+    ] {
         let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
-        let path = own_projects_file(&app, &bot_id, &env.dir, &format!("t-{origin}.jsonl")).await;
-        std::fs::write(&path, [line(Some("human"), "現在部 demo"), line(Some(origin), if origin == "human" { "現在部 demo" } else { "<task-notification/>" })].concat()).unwrap();
+        let path = own_projects_file(&app, &bot_id, &env.dir, &format!("t-{origin}-{}.jsonl", db::ulid())).await;
+        std::fs::write(&path, [line(Some("human"), &at, "現在部 demo"), line(Some(origin), &at, if origin == "human" { "現在部 demo" } else { "<task-notification/>" })].concat()).unwrap();
         process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}))).await.unwrap();
         let stored = user_texts_on(&app, &external).await;
         if expect_stored {
-            assert_eq!(stored, vec!["現在部 demo".to_string()], "origin={origin}");
+            assert_eq!(stored, vec!["現在部 demo".to_string()], "origin={origin} at={at}");
         } else {
-            assert!(stored.is_empty(), "喚醒那一輪不掛上一句：{stored:?}");
+            assert!(stored.is_empty(), "喚醒那一輪不掛上一句（origin={origin} at={at}）：{stored:?}");
         }
     }
 }

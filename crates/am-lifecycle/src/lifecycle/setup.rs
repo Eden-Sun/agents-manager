@@ -254,10 +254,13 @@ def _am_user(p,data):
         if isinstance(v,dict) and v.get("type")=="user":
             users.append(v)
     kind=None
+    kat=None
     for v in users:
         o=v.get("origin")
         if isinstance(o,dict) and isinstance(o.get("kind"),str):
             kind=o["kind"]
+            t=v.get("timestamp")
+            kat=t if isinstance(t,str) else None
             break
     echo=("<command-name>","<command-message>","<command-args>","<local-command-","<system-reminder>","Caveat: The messages below")
     for v in users:
@@ -277,6 +280,8 @@ def _am_user(p,data):
             p["agm_user_text"]=c
             if kind is not None:
                 p["agm_origin_kind"]=kind
+                if kat is not None:
+                    p["agm_origin_at"]=kat
             return True
         break
     return False
@@ -2515,6 +2520,34 @@ mod remote_hook_tests {
         let p = spooled(&sb);
         assert_eq!(p["agm_user_text"].as_str(), Some("舊版"), "{p}");
         assert!(p.get("agm_origin_kind").is_none(), "{p}");
+    }
+
+    /// 起點那筆條目的時間跟著 `agm_origin_kind` 一起帶來：喚醒那一輪的使用者條目沒有 origin，起點要是它前面那筆 `human`，時間也是那筆的。
+    #[cfg(not(feature = "daemon-test-harness"))]
+    #[test]
+    fn a_remote_stop_carries_when_the_starter_was_typed() {
+        let line = |v: serde_json::Value| format!("{v}\n");
+        let stop = |path: &std::path::Path| {
+            serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": path, "stop_hook_active": false}).to_string()
+        };
+        let spooled = |sb: &Sandbox| -> serde_json::Value {
+            let events = sb.read("hook-spool.jsonl");
+            let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+            serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone()
+        };
+        let human = line(serde_json::json!({"type": "user", "origin": {"kind": "human"}, "timestamp": "2026-11-22T01:21:00.000Z", "message": {"role": "user", "content": "現在部 demo"}}));
+        let reply = line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}}));
+        let wake_without_origin = line(serde_json::json!({"type": "user", "timestamp": "2026-11-22T01:30:09.000Z", "message": {"role": "user", "content": "定時檢查"}}));
+
+        let sb = Sandbox::new(false);
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let t = project_dir.join("wake-no-origin.jsonl");
+        std::fs::write(&t, [human, reply, wake_without_origin].concat()).unwrap();
+        sb.run(&["claude", &sb.bot, "-"], &stop(&t));
+        let p = spooled(&sb);
+        assert_eq!(p["agm_origin_kind"].as_str(), Some("human"), "{p}");
+        assert_eq!(p["agm_origin_at"].as_str(), Some("2026-11-22T01:21:00.000Z"), "{p}");
     }
 
     /// 去重 B：Stop 的 transcript 只讀一次、`_am_transcript` 只由一顆 python3 執行（使用者文字與 AskUserQuestion 共用）。
