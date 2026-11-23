@@ -22,7 +22,7 @@ pub mod runners;
 pub mod codex_reset;
 pub mod schedules;
 pub use am_base::config;
-pub use am_lifecycle::{child_done, daemon_notice};
+pub use am_lifecycle::{ask_answers, child_done, daemon_notice};
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/arc_ports.rs"]
 mod am_lifecycle_arc_ports;
@@ -31,7 +31,6 @@ mod am_lifecycle_arc_ports;
 mod am_lifecycle_ports_impl;
 #[cfg(not(test))]
 pub use am_lifecycle::{
-    ask_answers,
     background_jobs,
     blocked_reason,
     child_alerts,
@@ -52,9 +51,6 @@ pub use am_lifecycle::{
 pub use am_supervisor::{build_info, relay_auth, supervisor};
 #[cfg(test)]
 mod lifecycle_tests;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/ask_answers.rs"]
-pub mod ask_answers;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/background_jobs.rs"]
 pub mod background_jobs;

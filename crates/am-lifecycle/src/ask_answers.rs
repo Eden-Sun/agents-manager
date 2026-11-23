@@ -209,7 +209,7 @@ fn normalize(at: &str) -> Option<String> {
 }
 
 async fn record_on_turn(
-    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     bot_id: &str,
     conversation_id: &str,
     turn_id: &str,
@@ -246,14 +246,14 @@ async fn record_on_turn(
         }
         added += 1;
         let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(app.db()).await?;
-        app.emit_message_added(bot_id, m).await;
+        app.emit("message_added", json!({ "bot_id": bot_id, "message": m })).await;
     }
     Ok(added)
 }
 
 /// Record answers on the turn accepted by the Stop handler; never infer the target from the latest conversation turn.
 pub async fn record_for_turn(
-    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     bot_id: &str,
     conversation_id: &str,
     run_id: Option<&str>,
@@ -277,7 +277,7 @@ pub async fn record_for_turn(
 /// PostToolUse arrives before Stop creates a terminal-typed external turn. Attach its early copy only
 /// to a turn that is actually in flight; if there is none, Stop will record it from the transcript.
 pub async fn record_in_flight(
-    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     bot_id: &str,
     conversation_id: &str,
     records: Vec<AskRecord>,
