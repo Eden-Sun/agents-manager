@@ -22,6 +22,7 @@ pub mod runners;
 pub mod codex_reset;
 pub mod schedules;
 pub use am_base::config;
+pub use am_lifecycle::{child_done, daemon_notice};
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/arc_ports.rs"]
 mod am_lifecycle_arc_ports;
@@ -34,12 +35,10 @@ pub use am_lifecycle::{
     background_jobs,
     blocked_reason,
     child_alerts,
-    child_done,
     codex_history,
     compaction,
     codex_live,
     codex_model_migration,
-    daemon_notice,
     default_session,
     dangerous_rm,
     events,
@@ -66,9 +65,6 @@ pub mod blocked_reason;
 #[path = "../../crates/am-lifecycle/src/child_alerts.rs"]
 pub mod child_alerts;
 #[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/child_done.rs"]
-pub mod child_done;
-#[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/compaction.rs"]
 pub mod compaction;
 #[cfg(test)]
@@ -80,9 +76,6 @@ pub mod codex_live;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/codex_model_migration.rs"]
 pub mod codex_model_migration;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/daemon_notice.rs"]
-pub mod daemon_notice;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/default_session.rs"]
 pub mod default_session;

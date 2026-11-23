@@ -26,3 +26,24 @@ daemon lib test 位於兩種編譯的關鍵路徑。起點的 `daemon/src/lib.rs
 舊選擇器對兩組路徑都回 `__all__`，因此兩列共用同一組全套基準。總測試數是 Bash 或 Python wrapper 數，測試程序內的測試案例可能更多。基準與部分 Rust 測量重疊，無獨占負載。差值是這次觀測，不是端到端速度保證。
 
 schema 路徑仍選 daemon。ops 保留讀真實 schema 的 `daemon-swap_test.sh` 和 `project-transfer_test.sh`，再加三支共用守門測試。無副檔名的 project-transfer 保留自己的測試與三支守門測試。若指定測試缺失、路徑不認得、或修改分派器／護欄，維持全套 ops。原始日誌位於 Ubuntu 的 `/tmp/kx-check-speed.qBa461/`。
+
+## #1862 lifecycle 撤掛載第一批
+
+基底 `9e36fc7a5`。從 daemon 測試的 `#[path]` 改用 `am_lifecycle` 的 `child_done` 與 `daemon_notice`。既有 daemon 整合測試留原處。其餘 19 處掛載仍在。
+
+同機、同一個 `lifecycle/screen.rs` 改一行，依舊走 Cargo shim 與負載／記憶體閘。牆鐘含 shim 同步與名額等待；lib test 秒數取自 Cargo timings。撤前與撤後都先暖編，暖編不列入比較。
+
+| 樣本 | 熱池 | 牆鐘秒 | daemon lib test 秒 | 判讀 |
+| --- | --- | ---: | ---: | --- |
+| 撤前 1 | shared | 82.37 | 71.32 | 只同步一檔 |
+| 撤前 2 | shared | 84.17 | 73.69 | 只同步一檔 |
+| 撤後 1 | shared-2 | 885.95 | 642.66 | 排隊 159 秒、換池並同步兩檔，排除 |
+| 撤後 2 | shared-2 | 110.39 | 92.07 | 只同步一檔，但與撤前不同池 |
+
+撤前 lib test 中位數 72.51 秒。撤後單檔只有一筆，且共用熱池成員不同，無法判定編譯速度變化。兩處撤掛載仍會因上游 am-lifecycle 更新而重編 daemon lib test。撤後暖編耗時 782.40 秒，含改 crate 根模組後的重建，不視為單檔增量樣本。
+
+daemon 的 lib、bin、`api_doc_parity` 執行檔各自比對 `--list` 與 `--list --ignored`，前後逐位元組相同。lib 6,208 條（4 ignored）、bin 0 條、parity 1 條。其他三個套件的來源與 feature 均未改，本批未另外重跑其清單。掛載檢查通過，`api_doc_parity` 1/1。日誌與清單在 Ubuntu 的 `/tmp/kx1862-unmount.T7dRqX/`。
+
+`ask_answers` 與 `default_session` 即使測試已分家，仍透過 `events::ports` 使用生命周期介面。該處簽名也引用 `fence`、`turn_controller` 等尚有兩份的型別。待 L2 hookrecv 與 codex_live 合流後，統一介面與測試 gate，再撤含這些依賴的掛載。大型撤掛載之後需要固定熱池成員重測，並區分減少 lib test 編譯成本和避免依賴重編。
+
+`CHECK_MAX_LOAD=40 scripts/check.sh changed` 在量測基底 exit 0，daemon 全套 6,204 passed、4 ignored，parity 1/1。更新基底時上游合入 L2-3c 與 Grok 修正，未碰這批兩個檔案。前後量測與測試清單仍以表列基底為準。
