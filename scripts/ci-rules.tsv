@@ -17,7 +17,7 @@
 # 列的順序有意義：特例要先於一般規則（例如 scripts/*.md 先於 *.md，daemon/* 先於 docs）。
 .claude/skills/*|ops|-|@default
 crates/am-lifecycle/src/lifecycle/fixtures/*|web,daemon|@rust|@default
-crates/am-base/src/db.rs|daemon,ops|@rust|__all__
+crates/am-base/src/db.rs|daemon,ops|@rust|scripts/ops/daemon-swap_test.sh,scripts/ops/project-transfer_test.sh
 crates/am-supervisor/src/supervisor/store.rs|daemon,ops|@rust|__all__
 crates/am-supervisor/src/supervisor/roles.rs|daemon,ops|@rust|__all__
 crates/am-supervisor/src/mission/store.rs|daemon,ops|@rust|__all__
@@ -73,6 +73,7 @@ scripts/ops/release-triage-kick.sh|ops|-|scripts/ops/release-triage-kick_test.sh
 scripts/ops/ubuntu-ci.sh|ops|-|scripts/ops/ubuntu-ci_test.sh
 scripts/ops/browser_gc_linux.py|ops|-|scripts/ops/browser-gc-linux_test.sh
 scripts/ops/claude_binary_diff.py|ops|-|scripts/ops/claude_binary_diff_test.sh
+scripts/ops/project-transfer|ops|-|scripts/ops/project-transfer_test.sh
 scripts/ops/host-state-transfer.py|ops|-|scripts/ops/cutover-to-host_test.sh
 scripts/ops/host-state-transfer_test.py|ops|-|scripts/ops/cutover-to-host_test.sh
 scripts/ops/browser_gc_linux_test.py|ops|-|scripts/ops/browser-gc-linux_test.sh

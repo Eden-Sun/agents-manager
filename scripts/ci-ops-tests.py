@@ -55,12 +55,17 @@ def select(paths: list[str]) -> list[str]:
         in_ops = path.startswith(("scripts/", "bin/", "ops/", ".github/", ".claude/")) or path == "AGENTS.md"
         if rule == "__all__":
             return full(path, "分派器／護欄，改了要全跑" if in_ops else "跨 crate 輸入")
+        if rule != "@default":
+            suites = rule.split(",")
+            if not Path(path).is_file() or any(not Path(suite).is_file() for suite in suites):
+                return full(path, f"對應的測試 {rule} 不存在")
+            selected.update(suites)
+            saw_ops = True
+            continue
         if not in_ops:
             continue
         saw_ops = True
-        if rule != "@default":
-            suite = rule
-        elif path.endswith("_test.sh") and Path(path).parent in {Path("scripts"), Path("scripts/ops")}:
+        if path.endswith("_test.sh") and Path(path).parent in {Path("scripts"), Path("scripts/ops")}:
             suite = path
         elif path == "scripts/agm_test.py":
             suite = path

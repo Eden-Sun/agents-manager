@@ -26,11 +26,18 @@ for path in scripts/check.sh scripts/ops/destructive-canary.sh scripts/ops/insta
     check __all__ "$path"
 done
 check __all__ scripts/ops/outbox-gc.sh scripts/ops/unknown.sh
-check __all__ scripts/ops/outbox-gc.sh crates/am-base/src/db.rs
+check "$(printf '%s\nscripts/ops/project-transfer_test.sh\n' "$guards" | sort)" scripts/ops/project-transfer scripts/ops/project-transfer_test.py
+check "$(printf '%s\nscripts/ops/daemon-swap_test.sh\nscripts/ops/project-transfer_test.sh\n' "$guards" | sort)" crates/am-base/src/db.rs
+check "$(printf '%s\nscripts/ops/daemon-swap_test.sh\nscripts/ops/outbox-gc_test.sh\nscripts/ops/project-transfer_test.sh\n' "$guards" | sort)" scripts/ops/outbox-gc.sh crates/am-base/src/db.rs
+check __all__ crates/am-base/src/db.rs scripts/ci-daemon-filters.sh
 tmp=$(mktemp -d)
 trap '/bin/rm -rf "$tmp"' EXIT
 deleted_entry=$(cd "$tmp" && printf 'scripts/ops/outbox-gc.sh\n' | python3 -B "$selector")
 grep -qx __all__ <<<"$deleted_entry"
+mkdir -p "$tmp/crates/am-base/src" "$tmp/scripts/ops"
+touch "$tmp/crates/am-base/src/db.rs" "$tmp/scripts/ops/daemon-swap_test.sh"
+missing_suite=$(cd "$tmp" && printf 'crates/am-base/src/db.rs\n' | python3 -B "$selector")
+grep -qx __all__ <<<"$missing_suite"
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/bin"
 cp scripts/check.sh scripts/ci-ops-tests.py scripts/ci-rules.tsv "$fx/scripts/"

@@ -12,7 +12,12 @@ while IFS='|' read -r pat parts daemon ops extra; do
     [[ "$parts" == - || "$parts" == FULL || "$parts" =~ ^(web|daemon|ops|ob)(,(web|daemon|ops|ob))*$ ]] || fail "parts 值不合法：$pat → $parts"
     case "$ops" in
         @default | __all__) ;;
-        *) [ -f "$ops" ] || fail "ops 指定的測試檔不存在：$pat → $ops" ;;
+        *)
+            IFS=, read -r -a suites <<<"$ops"
+            for suite in "${suites[@]}"; do
+                [ -f "$suite" ] || fail "ops 指定的測試檔不存在：$pat → $suite"
+            done
+            ;;
     esac
     last="$pat|$parts"
 done <"$rules"
