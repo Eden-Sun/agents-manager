@@ -468,7 +468,7 @@ mod arc_port_32_codexsendport {
     impl<T: crate::lifecycle::send_now::ports::CodexSendPort + ?Sized> crate::lifecycle::send_now::ports::CodexSendPort for std::sync::Arc<T> {
         async fn observe_codex_screen(&self, run: &db::Run, screen: &str) { <T as crate::lifecycle::send_now::ports::CodexSendPort>::observe_codex_screen(self.as_ref(), run, screen).await }
         async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool { <T as crate::lifecycle::send_now::ports::CodexSendPort>::close_codex_picker(self.as_ref(), client, pane_id).await }
-        fn codex_running_version(&self, run_id: &str) -> Option<String> { <T as crate::lifecycle::send_now::ports::CodexSendPort>::codex_running_version(self.as_ref(), run_id) }
+        fn codex_running_version(&self, run_id: &str, stored: Option<&str>) -> Option<String> { <T as crate::lifecycle::send_now::ports::CodexSendPort>::codex_running_version(self.as_ref(), run_id, stored) }
         fn codex_history_mark<'a>(&'a self, bot: &'a db::Bot, run: &'a db::Run) -> impl std::future::Future<Output = Option<Mark>> + Send + 'a { <T as crate::lifecycle::send_now::ports::CodexSendPort>::codex_history_mark(self.as_ref(), bot, run) }
         fn codex_prompt_landed<'a>(
             &'a self,

@@ -1004,6 +1004,12 @@ use std::time::Duration;
         remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, read, Duration::from_millis(1)).await;
         assert_eq!(reads.get(), 2, "第一次讀還沒畫出來，第二次讀到就停");
         assert_eq!(crate::codex_update::running_version_of(&run).as_deref(), Some("0.164.0"));
+        let stored: Option<String> = sqlx::query_scalar("SELECT cli_version FROM runs WHERE id = ?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(stored.as_deref(), Some("0.164.0"), "開機畫面的版本也寫進 DB，daemon 重啟後靠它");
+        sqlx::query("UPDATE runs SET cli_version = '0.100.0' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
+        remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, || async { Some(BOOT_164.to_string()) }, Duration::from_millis(1)).await;
+        let stored: Option<String> = sqlx::query_scalar("SELECT cli_version FROM runs WHERE id = ?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(stored.as_deref(), Some("0.164.0"), "畫面讀到的覆寫 DB 裡的舊值");
     }
 
     #[tokio::test]

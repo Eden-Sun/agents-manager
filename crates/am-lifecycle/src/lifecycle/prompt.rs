@@ -1159,7 +1159,7 @@ async fn prompt_gate_body(
     }
     let codex_on = want_send_now && bot.kind == "codex" && app.cfg().get().await.codex.instant_interrupt;
     let gate = want_send_now.then(|| {
-        let codex_running = app.codex_running_version(&run.id);
+        let codex_running = app.codex_running_version(&run.id, run.cli_version.as_deref());
         send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on, run.codex_instant_interrupt == Some(1))
     });
     let (refused, send_now_mode) = match gate {

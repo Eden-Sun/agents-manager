@@ -307,7 +307,7 @@ async fn apply_live_setting_inner(
 
     if bot.kind == "codex" {
         let was_fast = run.runtime_fast.map(|v| v != 0);
-        let running = crate::codex_update::running_version_of(&run.id);
+        let running = crate::codex_update::running_version_or(&run.id, run.cli_version.as_deref());
         let default_effort = crate::codex_live::model_default_effort(app, &bot, run.runtime_model.as_deref()).await;
         mark_pane_typed(app, &run.id).await?;
         let applied = if during_turn {
@@ -493,7 +493,7 @@ async fn interrupt_and_apply(
     interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let was_fast = run.runtime_fast.map(|v| v != 0);
-    let running = crate::codex_update::running_version_of(&run.id);
+    let running = crate::codex_update::running_version_or(&run.id, run.cli_version.as_deref());
     let default_effort = crate::codex_live::model_default_effort(app, bot, run.runtime_model.as_deref()).await;
     let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields, running.as_deref(), default_effort.as_deref()).await;
     let resumed = crate::codex_live::send_resume(&client, &pane_id).await;
@@ -1092,6 +1092,7 @@ mod login_slash_tests {
             launch_rev: None,
             live_rev: None,
             codex_instant_interrupt: None,
+            cli_version: None,
         }
     }
     /// codex 沒有 `/login`（只有 `/logout`），回「不支援」好過送不存在的指令。

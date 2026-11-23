@@ -171,7 +171,7 @@ pub trait CodexSendPort {
     async fn observe_codex_screen(&self, run: &db::Run, screen: &str);
     /// `codex_live::close_picker`：關掉 pane 裡的選單（只送 Escape 類的鍵，回有沒有關成）。
     async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool;
-    fn codex_running_version(&self, run_id: &str) -> Option<String>;
+    fn codex_running_version(&self, run_id: &str, stored: Option<&str>) -> Option<String>;
     fn codex_history_mark<'a>(&'a self, bot: &'a db::Bot, run: &'a db::Run) -> impl std::future::Future<Output = Option<Mark>> + Send + 'a;
     fn codex_prompt_landed<'a>(
         &'a self,
@@ -244,7 +244,7 @@ mod tests {
         "events::unwatch_pane_on_session(",
         "codex_model_migration::observe_screen(",
         "codex_live::close_picker(",
-        "codex_update::running_version_of(",
+        "codex_update::running_version_or(",
         "codex_history::mark(",
         "codex_history::prompt_landed(",
         "dangerous_rm::notify_once(",
@@ -296,7 +296,7 @@ mod tests {
             "events::unwatch_pane_on_session(",
             "observe_screen(",
             "close_picker(",
-            "running_version_of(",
+            "running_version_or(",
             "codex_history::mark(",
             "prompt_landed(",
             "notify_once(",

@@ -713,6 +713,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // codex session 血統 token 含父歷史標記（issue #1943 子票 D2，2026-11-21）：`lineage_sessions.tokens_include_parent`。
     (103, "e3ed0454395c06d0"),
     (104, "636d5dd624cfe7ab"),
+    // 啟動時 `codex --version` 的版本記在 runs（issue #748，2026-11-23）：`runs.cli_version`。
+    (105, "f681d6a1e504e1db"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -914,6 +916,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("runs", "runtime_role_policy", "ALTER TABLE runs ADD COLUMN runtime_role_policy TEXT"),
         ("runs", "daemon_url_injected", "ALTER TABLE runs ADD COLUMN daemon_url_injected INTEGER NOT NULL DEFAULT 0"),
         ("runs", "policy_rev", "ALTER TABLE runs ADD COLUMN policy_rev TEXT"),
+        ("runs", "cli_version", "ALTER TABLE runs ADD COLUMN cli_version TEXT"),
         ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
         ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
         ("schedules", "retry_count", "ALTER TABLE schedules ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5)"),
@@ -1683,6 +1686,10 @@ pub struct Run {
     /// `[codex] instant_interrupt` 開著時，不是 1 的 run 不放行 codex steer（`send_now_codex_restart_needed`）。
     #[sqlx(default)]
     pub codex_instant_interrupt: Option<i64>,
+    /// issue #748：啟動時在執行主機上 `codex --version` 探到的版本（開機畫面讀到的會覆寫）；NULL＝沒探到、升版前的舊列。
+    /// 插隊閘門在記憶體沒有（daemon 重啟後）時退回這一欄（`codex_update::running_version_or`）。
+    #[sqlx(default)]
+    pub cli_version: Option<String>,
 }
 
 impl Run {

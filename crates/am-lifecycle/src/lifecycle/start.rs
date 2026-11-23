@@ -1359,6 +1359,29 @@ pub(crate) fn claude_fresh_session_id(args: &[String]) -> Option<String> {
     Some(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
 }
 
+/// issue #748：啟動 codex 時在執行的那台主機跑一次 `codex --version`（登入 shell 解析同 [`ensure_kind_installed`]，限時 5 秒）。
+/// 版本寫進 `runs.cli_version` 並記進記憶體：`--resume` 起的 run 畫面沒有 banner、daemon 重啟後記憶體是空的，兩者都靠這一筆。
+/// 探不到就略過、不擋啟動（閘門照舊回版本未知）；開機畫面讀到的版本之後會覆寫它。
+async fn record_codex_cli_version(app: &impl StartContext, host: &str, run_id: &str) {
+    let script = crate::codex_live::version_probe_command();
+    let out = if host == LOCAL_HOST {
+        crate::hosts::sh_local_stdout(&script, Duration::from_secs(5), "codex --version").await.ok()
+    } else {
+        match app.hosts().get(host).await {
+            Some(conn) => conn.ssh_exec_path_timeout(&script, Duration::from_secs(5)).await.ok(),
+            None => None,
+        }
+    };
+    let Some(version) = out.as_deref().and_then(am_base::changelog::cli_version_string) else {
+        tracing::debug!(run = run_id, host, "codex --version gave no version; leaving it unknown");
+        return;
+    };
+    crate::codex_update::remember_cli_version(run_id, &version);
+    if let Err(e) = sqlx::query("UPDATE runs SET cli_version = ? WHERE id = ?").bind(&version).bind(run_id).execute(app.db()).await {
+        tracing::warn!(run = run_id, error = %e, "could not record the codex cli version");
+    }
+}
+
 pub(crate) fn codex_instant_interrupt_args(flag_on: bool, restricted: bool) -> Vec<String> {
     if flag_on && !restricted {
         vec!["-c".into(), "features.instant_interrupt=true".into()]
@@ -1571,6 +1594,7 @@ async fn start_inner_body(
             tracing::warn!(bot = %bot.name, error = %e, "could not record whether codex was launched with instant_interrupt");
         }
         args.extend(ii);
+        record_codex_cli_version(app, &host, run_id).await;
     }
 
     let mut opts = opts;

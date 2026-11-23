@@ -282,9 +282,20 @@ pub fn retain_runs(active: &[String]) {
     running_versions().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
-/// 這一個 run 看過的 codex 版本（`remember_running` 記的）；還沒看過＝`None`。issue #748 的版本閘門讀它。
+/// 這一個 run 看過的 codex 版本（`remember_running` 記的）；還沒看過＝`None`。
 pub fn running_version_of(run_id: &str) -> Option<String> {
     running_versions().lock().unwrap().get(run_id).cloned()
+}
+
+/// issue #748 的版本閘門讀它：記憶體（開機畫面、啟動時的 `--version`）優先，沒有就退回 DB 記的 `runs.cli_version`
+/// （daemon 重啟後記憶體是空的；`--resume` 起的 run 畫面沒有 banner，也只剩這一筆）。
+pub fn running_version_or(run_id: &str, stored: Option<&str>) -> Option<String> {
+    running_version_of(run_id).or_else(|| stored.and_then(version_string))
+}
+
+/// 啟動時 `codex --version` 探到的版本（`runs.cli_version` 同步寫）。開機畫面讀到的版本之後會覆寫它。
+pub fn remember_cli_version(run_id: &str, version: &str) {
+    running_versions().lock().unwrap().insert(run_id.to_string(), version.to_string());
 }
 
 #[cfg(test)]
@@ -305,6 +316,17 @@ mod tests {
         retain_runs(&["retain-kept".to_string()]);
         assert_eq!(running_version_of("retain-gone"), None, "結束的 run 不留帳");
         assert_eq!(running_version_of("retain-kept").as_deref(), Some("0.155.1"));
+    }
+
+    #[test]
+    fn the_stored_version_fills_in_only_when_memory_has_none() {
+        remember_cli_version("stored-only", "0.160.0");
+        assert_eq!(running_version_or("stored-only", None).as_deref(), Some("0.160.0"));
+        assert_eq!(running_version_or("db-only", Some("0.161.0")).as_deref(), Some("0.161.0"), "重啟後記憶體空，靠 DB");
+        assert_eq!(running_version_or("db-only", Some("nonsense")), None, "讀不懂就維持未知");
+        remember_running("both", "│ >_ OpenAI Codex (v0.162.0) │", None);
+        assert_eq!(running_version_or("both", Some("0.100.0")).as_deref(), Some("0.162.0"), "記憶體（開機畫面）優先");
+        assert_eq!(running_version_or("none", None), None);
     }
 
     /// 啟動時的互動選單（codex 0.15x）。

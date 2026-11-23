@@ -1120,9 +1120,10 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `• Model changed to <id> <effort> [fast] for this session only`，被拒印 `■ Model '…' is unavailable`／`■ Reasoning level '…' is unavailable for …`／`■ Speed '…' is unavailable for …`／
   `■ Unexpected argument '…'`（輸入框不留字、設定不變）。`--speed` 收 `standard`／`flex`／`priority`（`fast` 也收；daemon 用 `priority`，跟 `-c service_tier="priority"` 對齊），
   `standard` 清掉 fast。模型 id 要小寫 id（`GPT-6.1-Sol` 會被拒）；`--reasoning=default` 會被拒。
-  - **版本閘**：只看 `codex_update::running_version_of(run.id)`（跑著的那個 process，不是磁碟上的、不跑 `--version`）。`None`、低於 0.164.0、讀不懂（含 `-alpha` 後綴）一律走下面的選單路徑——
+  - **版本閘**：`codex_update::running_version_or(run.id, runs.cli_version)`——記憶體（開機畫面 banner、或啟動時的 `--version`）優先，沒有就退回 DB 的 `runs.cli_version`（#748：`--resume` 起的 run 畫面沒有 banner，daemon 重啟後記憶體也是空的）。`None`、低於 0.164.0、讀不懂（含 `-alpha` 後綴）一律走下面的選單路徑——
     舊版會把 `/model x --reasoning=y` 當 prompt 送給模型。`oneshot_supported`。
-    版本除了巡邏，也在 run 啟動當下從開機畫面（`>_ OpenAI Codex (vX)`）記一次（#1924，`codex_live::spawn_boot_version_read`，本機與遠端 host 都走；背景讀、最多三次、間隔 1 秒，只對 codex，寫入前確認仍是當前 run），不然頭幾分鐘的 `/model` 會退回選單。
+    版本除了巡邏，也在 run 啟動當下從開機畫面（`>_ OpenAI Codex (vX)`）記一次（#1924，`codex_live::spawn_boot_version_read`，本機與遠端 host 都走；背景讀、最多三次、間隔 1 秒，只對 codex，寫入前確認仍是當前 run），不然頭幾分鐘的 `/model` 會退回選單。開機畫面讀到的版本會覆寫 DB。
+    #748：啟動 codex 時另在執行主機跑一次 `codex --version`（登入 shell 解析同 `kind_probe`，限時 5 秒，`start::record_codex_cli_version`），寫進 `runs.cli_version` 與記憶體；探不到就略過、不擋啟動。
   - **指令**（`oneshot_model_command`）：`fields` 含 model 或 effort 才帶模型與強度（沒設模型＝不帶，維持現在的）；速度**一律明確帶**（fast＝`--speed=priority`，否則 `--speed=standard`），
     因為換模型時 codex 會保留原本的速度。**沒設強度（空或 `default`）＝選單的 `(default)` 那一列＝這個模型的預設強度，也要明確帶**：0.164.0 實測
     `/model gpt-6.1-sol --reasoning=high` → 狀態列 `GPT-6.1-Sol high`；接著 `/model gpt-6.1-sol --speed=standard` → `• Model changed to gpt-6.1-sol low standard for this session only`、狀態列 `GPT-6.1-Sol low`
@@ -1889,7 +1890,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    - **claude 啟動參數**：全新啟動（argv 沒有 `--resume`／`--continue`／`--fork-session`／`--session-id`）時 daemon 產 UUIDv7 帶 `--session-id`，同時先寫進 `runs.native_session_id`；SessionStart 回報的 id 不同時記 WARN 並以 hook 為準。`[claude] exclude_dynamic_system_prompt`（預設開，2026-11-23 核准；明寫 `false` 才關）才加 `--exclude-dynamic-system-prompt-sections`。
    - **codex steer**（issue #748，**預設關的 canary**）：`[codex] instant_interrupt = true` ＋ 這個 run 啟動時帶了
      `-c features.instant_interrupt=true`（`runs.codex_instant_interrupt = 1`）＋ 跑著的 codex ≥ `0.159.0`
-     （`codex_update::running_version_of`，巡邏從畫面版本行讀到的；沒讀到＝不賭）才放行（`send_now::gate` → `Mode::CodexSteer`）。
+     （`codex_update::running_version_or`，記憶體或 `runs.cli_version`；都沒有＝不賭）才放行（`send_now::gate` → `Mode::CodexSteer`）。
      旗標關＝跟以前一樣 `send_now_unsupported_kind`（不看 run 記了什麼）；版本不夠／不明＝`send_now_codex_too_old`／`send_now_codex_version_unknown`；
      旗標開但 run 不是帶參數起的（0、NULL＝旗標打開前就起的、adopt 來的、升版前的舊列）＝`send_now_codex_restart_needed`，訊息請使用者重啟這顆 bot。
      **啟動參數**：旗標開著時 daemon 啟動 codex 一律加 `-c features.instant_interrupt=true`（受限的分享 bot 除外），同一個判斷決定

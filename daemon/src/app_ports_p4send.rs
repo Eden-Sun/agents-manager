@@ -131,8 +131,8 @@ impl CodexSendPort for App {
     async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool {
         crate::codex_live::close_picker(client, pane_id).await
     }
-    fn codex_running_version(&self, run_id: &str) -> Option<String> {
-        crate::codex_update::running_version_of(run_id)
+    fn codex_running_version(&self, run_id: &str, stored: Option<&str>) -> Option<String> {
+        crate::codex_update::running_version_or(run_id, stored)
     }
     async fn codex_history_mark(&self, bot: &db::Bot, run: &db::Run) -> Option<Mark> {
         crate::codex_history::mark(&self.shared(), bot, run).await

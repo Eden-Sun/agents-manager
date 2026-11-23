@@ -404,6 +404,11 @@ pub async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str
         || run.runtime_fast != Some(i64::from(seen.fast))
 }
 
+/// issue #748：啟動時跑 `codex --version` 的 shell 指令（同 `kind_probe` 的登入 shell 解析，找到的路徑放進 `$p`）。
+pub fn version_probe_command() -> String {
+    format!("{}; \"$p\" --version", crate::tools::login_abs_sh("codex"))
+}
+
 /// 開機畫面重試次數（第一次讀之後，最多再讀這麼多次）。
 const BOOT_VERSION_RETRIES: u32 = 2;
 
@@ -461,7 +466,11 @@ async fn remember_boot_version<F, Fut>(
         let current = matches!(db::active_run(pool, bot_id).await, Ok(Some(r)) if r.id == run_id)
             && fence.is_none_or(|f| f.is_current_now());
         if current {
-            crate::codex_update::remember_running(run_id, &screen, None);
+            if let Some(version) = crate::codex_update::remember_running(run_id, &screen, None) {
+                if let Err(e) = sqlx::query("UPDATE runs SET cli_version = ? WHERE id = ?").bind(&version).bind(run_id).execute(pool).await {
+                    tracing::warn!(run = run_id, error = %e, "could not record the codex version from the boot screen");
+                }
+            }
         }
         return;
     }

@@ -828,7 +828,7 @@ daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則�
 | `send_now_cli_too_old` | 這個 run 跑的 claude 比 2.1.275 舊，重啟套用新版後才能插隊 |
 | `send_now_version_unknown` | statusLine 還沒回報版本，不賭那顆鍵 |
 | `send_now_codex_too_old` | 旗標開著，但這個 run 跑的 codex 比 0.159.0 舊 |
-| `send_now_codex_version_unknown` | 旗標開著，但還沒讀到這個 run 的 codex 版本，不賭 |
+| `send_now_codex_version_unknown` | 旗標開著，但這個 run 的 codex 版本還沒知道（啟動時 `codex --version` 與開機畫面都沒讀到，DB `runs.cli_version` 也沒有），不賭 |
 | `send_now_codex_restart_needed` | 旗標開著，但這個 run 啟動時沒帶 `-c features.instant_interrupt=true`（`runs.codex_instant_interrupt` 不是 1：旗標打開前就起的、adopt 來的、升版前的舊 run），不知道 codex 那一側開了沒有，不賭。**解法：重啟這顆 bot**（`send_now_message` 也這樣講），重啟後就會帶上參數。旗標關著時不會出現這個代碼 |
 
 `send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。

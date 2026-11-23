@@ -3,7 +3,7 @@ use serde_json::Value;
 
 pub(crate) fn annotate(value: &mut Value, kind: &str, run: Option<&crate::db::Run>, codex_on: bool) {
     let (Some(object), Some(run)) = (value.as_object_mut(), run) else { return };
-    let codex_running = crate::codex_update::running_version_of(&run.id);
+    let codex_running = crate::codex_update::running_version_or(&run.id, run.cli_version.as_deref());
     let supported = crate::lifecycle::send_now::gate(kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on, run.codex_instant_interrupt == Some(1)).is_ok();
     object.insert("send_now_supported".into(), Value::Bool(supported));
 }
