@@ -1,5 +1,5 @@
 import { deletePushSubscription, getVapidKey, reportPresence, savePushSubscription } from '../api/push'
-import { PHONE_QUERY } from '../hooks/useMediaQuery'
+import { DRAWER_QUERY, PHONE_QUERY } from '../hooks/useMediaQuery'
 
 export type PushSupport = { ok: true } | { ok: false; reason: 'insecure' | 'unsupported' | 'ios-home-screen' }
 
@@ -99,10 +99,10 @@ export function installPushClickBridge(): () => void {
 
 export function isMobilePresence(win: { matchMedia?: (query: string) => { matches: boolean } } = typeof window !== 'undefined' ? window : {}): boolean {
   if (typeof win?.matchMedia !== 'function') return false
-  return win.matchMedia(PHONE_QUERY).matches || (win.matchMedia('(pointer: coarse)').matches && win.matchMedia('(max-width: 768px)').matches)
+  return win.matchMedia(PHONE_QUERY).matches || (win.matchMedia('(pointer: coarse)').matches && win.matchMedia(DRAWER_QUERY).matches)
 }
 
-export function installPresenceReporter(getBotId: () => string | null): () => void {
+export function installPresenceReporter(getBotId: () => string | null, retryDelayMs = 2_000): () => void {
   if (typeof document === 'undefined') return () => {}
   const id = (() => {
     try {
@@ -113,10 +113,20 @@ export function installPresenceReporter(getBotId: () => string | null): () => vo
     }
   })()
   let lastInput = Date.now()
+  let stopped = false
+  let retryTimer: number | null = null
+  const clearRetry = () => {
+    if (retryTimer !== null) {
+      window.clearTimeout(retryTimer)
+      retryTimer = null
+    }
+  }
   const touch = () => {
     lastInput = Date.now()
   }
-  const send = (forceVisible?: boolean) => {
+  const send = (forceVisible?: boolean, allowRetry = true) => {
+    if (stopped) return
+    clearRetry()
     const visible = forceVisible !== undefined ? forceVisible : document.visibilityState === 'visible'
     void reportPresence({
       client_id: id,
@@ -124,19 +134,35 @@ export function installPresenceReporter(getBotId: () => string | null): () => vo
       visible,
       idle_secs: Math.round((Date.now() - lastInput) / 1000),
       mobile: isMobilePresence(),
-    }).catch(() => {})
+    }).catch(() => {
+      if (stopped || !allowRetry || !visible || document.visibilityState !== 'visible') return
+      clearRetry()
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null
+        send(undefined, false)
+      }, retryDelayMs)
+    })
   }
   const evs = ['pointerdown', 'keydown', 'touchstart', 'wheel'] as const
   evs.forEach((e) => window.addEventListener(e, touch, { passive: true }))
   const onVisibilityChange = () => send()
-  const onPageHide = () => send(false)
+  const onForegroundWake = () => {
+    if (document.visibilityState === 'visible') send(true)
+  }
+  const onPageHide = () => send(false, false)
   document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('pageshow', onForegroundWake)
+  window.addEventListener('focus', onForegroundWake)
   window.addEventListener('pagehide', onPageHide)
   const timer = window.setInterval(onVisibilityChange, 20_000)
   send()
   return () => {
+    stopped = true
+    clearRetry()
     evs.forEach((e) => window.removeEventListener(e, touch))
     document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.removeEventListener('pageshow', onForegroundWake)
+    window.removeEventListener('focus', onForegroundWake)
     window.removeEventListener('pagehide', onPageHide)
     window.clearInterval(timer)
   }

@@ -235,7 +235,11 @@ async fn send_http(client: &reqwest::Client, sk: &SigningKey, configured_subject
 }
 
 /// 對所有訂閱發同一則通知；404／410 的訂閱順手刪掉。回 `(sent, removed, failed)`。
+/// 任一手機版前景可見時抑制所有非 `close: true` 推播（`test_push` 走 `broadcast_detail` 不受此限）。
 pub async fn broadcast(dir: &Path, subject: Option<&str>, payload: &Value) -> (usize, usize, usize) {
+    if payload.get("close").and_then(Value::as_bool) != Some(true) && phone_in_foreground() {
+        return (0, 0, 0);
+    }
     let r = broadcast_detail(dir, subject, payload).await;
     (r.0, r.1, r.2)
 }
@@ -571,11 +575,11 @@ async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind:
         return;
     }
     tokio::time::sleep(Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed))).await;
-    if is_read(app, &bot.id, &read).await {
+    if is_read(app, &bot.id, &read).await || phone_in_foreground() {
         return;
     }
     let payload = main_payload(&bot.id, &bot.name, kind, &line.await);
-    if is_read(app, &bot.id, &read).await {
+    if is_read(app, &bot.id, &read).await || phone_in_foreground() {
         return;
     }
     let seq = SENT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2767,6 +2771,34 @@ pub(crate) mod tests {
         assert!(!user_is_watching("b2"));
         assert!(user_is_present());
         clear_presence();
+    }
+
+    #[tokio::test]
+    async fn broadcast_suppresses_non_close_payloads_while_phone_is_in_foreground() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let dir = crate::testing::scratch_dir("am-webpush-phone-fg");
+        save_subs(&dir, &[fresh_sub("https://push.example/fg").0]).unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let sent_c = sent.clone();
+        set_test_sender(Some(Arc::new(move |_sub, body| {
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            sent_c.lock().unwrap().push(v);
+            Box::pin(async { SendOutcome::Sent })
+        })));
+
+        record_presence("m-fg", Presence { bot_id: None, visible: true, idle_secs: 120, mobile: true, received: std::time::Instant::now() });
+        assert_eq!(broadcast(&dir, None, &json!({"title": "排程完成", "body": "ok", "tag": "sched:1"})).await, (0, 0, 0));
+        assert!(sent.lock().unwrap().is_empty(), "手機前景時應抑制所有非 close 推播");
+
+        assert_eq!(broadcast(&dir, None, &json!({"tag": "bot:b1:done", "close": true})).await, (1, 0, 0));
+        assert_eq!(sent.lock().unwrap().len(), 1, "靜默關閉舊通知不受前景抑制");
+
+        clear_presence();
+        assert_eq!(broadcast(&dir, None, &json!({"title": "排程完成", "body": "ok", "tag": "sched:2"})).await, (1, 0, 0));
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        set_test_sender(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
