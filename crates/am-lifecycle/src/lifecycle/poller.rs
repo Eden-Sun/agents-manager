@@ -297,6 +297,7 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
 /// gets the same live bubble / progress as a web prompt. `delivery='ok'` so the §4.3 fallback
 /// (which ignores other values) can still close it if the Stop hook never comes.
 pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
+    let edge_at = std::time::Instant::now();
     let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return };
     if crate::config::is_api_kind(&bot.kind) {
         return;
@@ -309,6 +310,35 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     }
     if !matches!(db::in_flight_turn(app.db(), &run.id).await, Ok(None)) {
         return;
+    }
+    let mut prefetched_echo = None;
+    let mut prefetched_by_cli = None;
+    match super::slash::live_apply_window_match(&run.id, edge_at) {
+        super::slash::LiveApplyMatch::InProgressOrOverlapped => {
+            tracing::info!(run = %run.id, "suppressing external turn overlapping live setting apply");
+            return;
+        }
+        super::slash::LiveApplyMatch::RecentTail { sent_line } => {
+            let by_the_cli = match db::bot(app.db(), &run.bot_id).await {
+                Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
+                _ => false,
+            };
+            let echo = if by_the_cli { None } else { pane_prompt_echo(app, &run).await };
+            let suppress = if let (Some(line), Some(echo_text)) = (&sent_line, echo.as_deref()) {
+                echo_text.trim() == line.trim()
+            } else if echo.is_none() && run.agent_status != "working" {
+                true
+            } else {
+                sent_line.is_none() && echo.is_none()
+            };
+            if suppress {
+                tracing::info!(run = %run.id, ?sent_line, "suppressing external turn in recent tail of live apply");
+                return;
+            }
+            prefetched_echo = Some(echo);
+            prefetched_by_cli = Some(by_the_cli);
+        }
+        super::slash::LiveApplyMatch::None => {}
     }
     let conv = match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conv) => conv,
@@ -333,11 +363,17 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
         return;
     }
     tracing::info!(run = %run.id, turn = %tid, "external turn opened from pane activity");
-    let by_the_cli = match db::bot(app.db(), &run.bot_id).await {
-        Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
-        _ => false,
+    let by_the_cli = match prefetched_by_cli {
+        Some(b) => b,
+        None => match db::bot(app.db(), &run.bot_id).await {
+            Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
+            _ => false,
+        },
     };
-    let echo = if by_the_cli { None } else { pane_prompt_echo(app, &run).await };
+    let echo = match prefetched_echo {
+        Some(e) => e,
+        None => if by_the_cli { None } else { pane_prompt_echo(app, &run).await },
+    };
     if by_the_cli {
         tracing::info!(turn = %tid, "external turn started by the CLI itself (task notification); no user message");
     }

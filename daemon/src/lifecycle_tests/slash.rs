@@ -644,4 +644,115 @@ mod send_text_tests {
         assert!(send_text_recorded(&env.app, &bot.id, "沒打進去", true, None, true).await.is_err());
         assert!(user_rows(&env.app, &bot.id).await.is_empty(), "沒打進去就不能有泡泡");
     }
+
+    #[tokio::test]
+    async fn live_apply_suppresses_overlapping_external_turn() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "live-ext-overlap").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let pane = format!("pane-{}", bot.id);
+        env.herdr.set_screen(&pane, "❯ /effort xhigh\n──────\n❯\n");
+
+        let guard = LiveApplyGuard::enter(&run_id, Some("/effort xhigh".to_string()));
+        let lock = env.app.bot_lock(&bot.id).await;
+        let held = lock.lock().await;
+
+        let app_clone = env.app.clone();
+        let run_clone = run.clone();
+        let ext_task = tokio::spawn(async move {
+            crate::lifecycle::begin_external_turn(&app_clone, &run_clone).await;
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        drop(guard);
+        drop(held);
+
+        ext_task.await.unwrap();
+
+        let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE run_id = ?")
+            .bind(&run_id)
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert!(turns.is_empty());
+
+        let messages: Vec<String> = sqlx::query_scalar("SELECT id FROM messages")
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_apply_tail_window_echo_matching() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "live-ext-tail").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let pane = format!("pane-{}", bot.id);
+
+        {
+            let _guard = LiveApplyGuard::enter(&run_id, Some("/effort xhigh".to_string()));
+        }
+        env.herdr.set_screen(&pane, "❯ /effort xhigh\n──────\n❯\n");
+
+        crate::lifecycle::begin_external_turn(&env.app, &run).await;
+
+        let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE run_id = ?")
+            .bind(&run_id)
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert!(turns.is_empty());
+
+        let bot2 = tt::claude_bot(&env.app, &env.project_id, "live-ext-tail-2").await;
+        let run_id2 = tt::fake_run(&env.app, &bot2.id).await;
+        let run2 = crate::db::run(&env.app.db, &run_id2).await.unwrap().unwrap();
+        let pane2 = format!("pane-{}", bot2.id);
+        {
+            let _guard = LiveApplyGuard::enter(&run_id2, Some("/effort xhigh".to_string()));
+        }
+        env.herdr.set_screen(&pane2, "❯ hello\n──────\n❯\n");
+
+        crate::lifecycle::begin_external_turn(&env.app, &run2).await;
+
+        let turns2: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE run_id = ?")
+            .bind(&run_id2)
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns2.len(), 1);
+
+        let content: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ?")
+            .bind(&turns2[0])
+            .fetch_optional(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(content.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn live_apply_tail_window_codex_idle_suppresses_without_echo() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "live-ext-codex-idle").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let pane = format!("pane-{}", bot.id);
+        env.herdr.set_screen(&pane, "");
+
+        {
+            let _guard = LiveApplyGuard::enter(&run_id, None);
+        }
+
+        crate::lifecycle::begin_external_turn(&env.app, &run).await;
+
+        let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE run_id = ?")
+            .bind(&run_id)
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert!(turns.is_empty());
+    }
 }

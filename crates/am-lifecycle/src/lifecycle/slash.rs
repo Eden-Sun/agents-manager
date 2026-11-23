@@ -3,6 +3,99 @@
 #[cfg(all(test, feature = "daemon-test-harness"))]
 use crate::state::App;
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Debug, Clone)]
+struct LiveApplyWindow {
+    started_at: std::time::Instant,
+    finished_at: Option<std::time::Instant>,
+    sent_line: Option<String>,
+}
+
+fn live_apply_windows() -> &'static Mutex<HashMap<String, LiveApplyWindow>> {
+    static WINDOWS: OnceLock<Mutex<HashMap<String, LiveApplyWindow>>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+pub struct LiveApplyGuard {
+    run_id: String,
+    started_at: std::time::Instant,
+}
+
+impl LiveApplyGuard {
+    pub fn enter(run_id: &str, sent_line: Option<String>) -> Self {
+        let now = std::time::Instant::now();
+        if let Ok(mut map) = live_apply_windows().lock() {
+            map.retain(|_, win| {
+                win.finished_at.map_or(true, |fin| fin.elapsed() < Duration::from_secs(60))
+            });
+            map.insert(
+                run_id.to_string(),
+                LiveApplyWindow {
+                    started_at: now,
+                    finished_at: None,
+                    sent_line,
+                },
+            );
+        }
+        Self {
+            run_id: run_id.to_string(),
+            started_at: now,
+        }
+    }
+}
+
+impl Drop for LiveApplyGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = live_apply_windows().lock() {
+            if let Some(win) = map.get_mut(&self.run_id) {
+                if win.started_at == self.started_at {
+                    win.finished_at = Some(std::time::Instant::now());
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveApplyMatch {
+    None,
+    InProgressOrOverlapped,
+    RecentTail { sent_line: Option<String> },
+}
+
+pub fn live_apply_window_match(run_id: &str, edge_at: std::time::Instant) -> LiveApplyMatch {
+    let map = match live_apply_windows().lock() {
+        Ok(m) => m,
+        Err(_) => return LiveApplyMatch::None,
+    };
+    let Some(window) = map.get(run_id) else {
+        return LiveApplyMatch::None;
+    };
+    let not_ancient_before_start = edge_at >= window.started_at
+        || window.started_at.saturating_duration_since(edge_at) <= Duration::from_secs(2);
+    match window.finished_at {
+        None => {
+            if not_ancient_before_start {
+                LiveApplyMatch::InProgressOrOverlapped
+            } else {
+                LiveApplyMatch::None
+            }
+        }
+        Some(finished) => {
+            if not_ancient_before_start && edge_at <= finished {
+                LiveApplyMatch::InProgressOrOverlapped
+            } else if edge_at > finished && edge_at.saturating_duration_since(finished) <= Duration::from_secs(2) {
+                LiveApplyMatch::RecentTail {
+                    sent_line: window.sent_line.clone(),
+                }
+            } else {
+                LiveApplyMatch::None
+            }
+        }
+    }
+}
 
 pub async fn send_keys(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, keys: Vec<String>, expect_run_id: Option<String>) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
@@ -309,6 +402,7 @@ async fn apply_live_setting_inner(
         let was_fast = run.runtime_fast.map(|v| v != 0);
         let running = crate::codex_update::running_version_or(&run.id, run.cli_version.as_deref());
         let default_effort = crate::codex_live::model_default_effort(app, &bot, run.runtime_model.as_deref()).await;
+        let _live_guard = (!during_turn).then(|| LiveApplyGuard::enter(&run.id, None));
         mark_pane_typed(app, &run.id).await?;
         let applied = if during_turn {
             crate::codex_live::apply_fast_during_turn(&client, &pane_id, &bot, was_fast).await
@@ -356,6 +450,7 @@ async fn apply_live_setting_inner(
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
         return Err(format!("no_slash_command_for_{field}"));
     };
+    let _live_guard = LiveApplyGuard::enter(&run.id, Some(line.clone()));
     mark_pane_typed(app, &run.id).await?;
     if let Err(e) = send_slash_line(&client, &pane_id, &line).await {
         return Err(format!("slash_send_failed: {e:?}"));
@@ -1055,8 +1150,9 @@ mod live_slash_tests {
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod login_slash_tests {
-    use super::{live_gate, login_slash_command, slash_gate, SlashBlocked};
+    use super::{live_gate, login_slash_command, slash_gate, LiveApplyGuard, LiveApplyMatch, live_apply_window_match, SlashBlocked};
     use crate::db;
+    use std::time::Duration;
     fn run(state: &str, agent_status: &str, pane_id: Option<&str>) -> db::Run {
         db::Run { daemon_url_injected: 0, runtime_role_policy: None,
             id: "r1".into(),
@@ -1148,6 +1244,49 @@ mod login_slash_tests {
         assert_eq!(SlashBlocked::TurnInFlight.reason(), "turn_in_flight");
         assert_eq!(SlashBlocked::NoPane.reason(), "no_pane");
     }
+
+    #[test]
+    fn live_apply_window_matching_lifecycle() {
+        let run_id = "test-run-window-lifecycle";
+        assert_eq!(live_apply_window_match(run_id, std::time::Instant::now()), LiveApplyMatch::None);
+
+        let guard = LiveApplyGuard::enter(run_id, Some("/effort xhigh".to_string()));
+        let t_during = std::time::Instant::now();
+        assert_eq!(live_apply_window_match(run_id, t_during), LiveApplyMatch::InProgressOrOverlapped);
+
+        drop(guard);
+
+        let t_after_drop = std::time::Instant::now();
+        assert_eq!(live_apply_window_match(run_id, t_during), LiveApplyMatch::InProgressOrOverlapped);
+        assert_eq!(
+            live_apply_window_match(run_id, t_after_drop),
+            LiveApplyMatch::RecentTail {
+                sent_line: Some("/effort xhigh".to_string()),
+            }
+        );
+
+        let t_future_expired = t_after_drop + Duration::from_secs(3);
+        assert_eq!(live_apply_window_match(run_id, t_future_expired), LiveApplyMatch::None);
+    }
+
+    #[test]
+    fn live_apply_guard_early_drop_sets_finished_at() {
+        let run_id = "test-run-early-drop";
+        {
+            let _guard = LiveApplyGuard::enter(run_id, None);
+            assert_eq!(
+                live_apply_window_match(run_id, std::time::Instant::now()),
+                LiveApplyMatch::InProgressOrOverlapped
+            );
+        }
+        let t_tail = std::time::Instant::now();
+        assert_eq!(
+            live_apply_window_match(run_id, t_tail),
+            LiveApplyMatch::RecentTail { sent_line: None }
+        );
+        let t_expired = t_tail + Duration::from_secs(3);
+        assert_eq!(live_apply_window_match(run_id, t_expired), LiveApplyMatch::None);
+    }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -1156,4 +1295,5 @@ pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
     use super::*;
     pub async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> { super::send_slash_line(client, pane_id, line).await }
+    pub use super::{LiveApplyGuard, LiveApplyMatch, live_apply_window_match};
 }
