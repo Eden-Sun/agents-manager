@@ -39,7 +39,12 @@ export function ModelTag({
   const fast = runningFast(bot, run)
   const detail = [chipExtra, fast ? 'fast' : null, reported?.thinking ? 'thinking' : null].filter(Boolean).join(' · ')
 
-  const shown = shortModel(bot.kind, runningModel ?? reported?.model_name ?? null)
+  const rawShown = shortModel(bot.kind, runningModel ?? reported?.model_name ?? null)
+  const reportedShown = shortModel(bot.kind, reported?.model_name ?? null)
+  const shown =
+    rawShown && reportedShown && !rawShown.includes('-') && reportedShown.startsWith(`${rawShown}-`)
+      ? reportedShown
+      : rawShown
   if (!shown && !chipExtra) return fallback
 
   const modelDesc = runningModel ?? (shown ? t('CLI 預設，實際載入 {shown}', { shown }) : t('（CLI 預設）'))

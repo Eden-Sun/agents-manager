@@ -121,7 +121,7 @@ test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短�
     const botRow = row(id)
     const model = botRow.querySelector<HTMLElement>('.model-tag')!
     const warning = botRow.querySelector<HTMLElement>('.bot-quota-chip.crit')!
-    assert.equal(model.textContent, 'opus', `${id} 的模型仍完整顯示`)
+    assert.equal(model.textContent, 'opu-5', `${id} 的模型仍完整顯示`)
     assert.match(model.title, /claude-opus-5/, `${id} 保留模型 tooltip`)
     assert.equal(warning.textContent?.trim(), '⚠ 2%', `${id} 用精簡警告`)
     assert.match(warning.title, /5h 額度剩 2%，快用完了/, `${id} 的 tooltip 保留完整說明`)

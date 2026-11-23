@@ -112,7 +112,7 @@ test('收合列也顯示 kind 圖示、身份、模型與強度（取第一顆�
   const identity = row.querySelector('.identity-badge')
   assert.ok(identity && /cc1/.test(identity.textContent ?? ''), '身份 cc1')
   const model = row.querySelector('.model-tag')
-  assert.ok(model && /haiku/.test(model.textContent ?? ''), '模型 haiku')
+  assert.ok(model && /hai-5\.5/.test(model.textContent ?? ''), '模型 hai-5.5')
   assert.ok(model && /Medium/.test(model.textContent ?? ''), '強度 Medium')
   assert.equal(row.querySelector('.bot-cluster-count')!.getAttribute('title'), '共 3 顆：1 執行中 · 2 閒置')
 })
