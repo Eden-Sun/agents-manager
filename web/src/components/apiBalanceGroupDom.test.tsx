@@ -5,7 +5,7 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
 import { quotaKey } from '../api/types'
 import { resetClaudeApiBalanceForTest } from '../hooks/useClaudeApiBalance'
-import { resetOpenAiApiBalanceForTest } from '../hooks/useOpenAiApiBalance'
+import { reloadOpenAiApiBalance, resetOpenAiApiBalanceForTest } from '../hooks/useOpenAiApiBalance'
 import { QuotaStrip } from './QuotaStrip'
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
@@ -196,4 +196,43 @@ it('點擊各自開對應的校正視窗', async () => {
     await click(claudeChip()!)
     assert.ok(document.querySelector('[data-k="quota-balance-dialog"]'), 'Claude 視窗')
   })
+})
+
+it('餘額群組在初次量測後才出現：額度條重新量測並收合，不被群組蓋住', async () => {
+  resetStoreForTest()
+  seedClaudeGauge('local')
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+  const savedRect = Object.getOwnPropertyDescriptor(proto, 'getBoundingClientRect')
+  const savedWidth = Object.getOwnPropertyDescriptor(proto, 'clientWidth')
+  Object.defineProperty(proto, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const w = this.dataset?.k === 'quota-api-group' ? 500 : this.classList?.contains('quota-hp') ? 300 : 0
+      return rect(w)
+    },
+  })
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => 400 })
+  const openai: { current: unknown } = { current: { enabled: false, configured: false } }
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/openai-api/balance') return openai.current
+    return orig(method as never, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<QuotaStrip />)
+    await until(() => document.querySelector('.quota-open') !== null, '額度條畫出來')
+    await settle()
+    assert.equal(document.querySelector('.quota-open.collapsed'), null, '沒有群組時寬度足夠，不收合')
+    openai.current = openaiAnchored
+    await reloadOpenAiApiBalance()
+    await until(() => document.querySelector('.quota-open.collapsed') !== null, '群組出現後額度條收合')
+    assert.ok(group() !== null, '群組在 DOM')
+  } finally {
+    rawTransport.request = orig
+    for (const [n, d] of [['getBoundingClientRect', savedRect], ['clientWidth', savedWidth]] as const) {
+      if (d) Object.defineProperty(proto, n, d)
+      else delete proto[n]
+    }
+  }
 })

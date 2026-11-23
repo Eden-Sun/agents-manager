@@ -1044,13 +1044,15 @@ export function QuotaStrip({
     remeasure()
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(remeasure)
     for (const el of [head, ...head.children, ...row.children]) ro?.observe(el)
+    const apiGroup = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
+    if (apiGroup) ro?.observe(apiGroup)
     const fonts = document.fonts
     fonts?.addEventListener('loadingdone', remeasure)
     return () => {
       ro?.disconnect()
       fonts?.removeEventListener('loadingdone', remeasure)
     }
-  }, [drawn, phone, fit, fitKey, ordered])
+  }, [drawn, phone, fit, fitKey, ordered, claudeBalanceVisible, openaiBalanceVisible])
 
   const popEntries = ordered
 

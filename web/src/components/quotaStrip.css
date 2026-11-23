@@ -860,6 +860,7 @@
   .main-head .quota-open {
     flex: 1 1 auto;
     min-width: 0;
+    overflow: hidden;
   }
 
   .main-head .quota-hp {
