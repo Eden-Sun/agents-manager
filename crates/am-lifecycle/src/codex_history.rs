@@ -129,11 +129,11 @@ impl HistoryHook {
 
 impl Default for HistoryHook {
     fn default() -> Self {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(feature = "test-hooks")]
         {
             Self(RwLock::new(None))
         }
-        #[cfg(not(all(test, feature = "daemon-test-harness")))]
+        #[cfg(not(feature = "test-hooks"))]
         {
             Self(RwLock::new(Some(Arc::new(AppServerSource))))
         }
@@ -1070,4 +1070,33 @@ done
 /// codex 歷史讀取的接線點。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait CodexHistoryState: Send + Sync {
     fn codex_history(&self) -> &crate::codex_history::HistoryHook;
+}
+
+mod arc_port_20_historysource {
+    use crate::codex_history::*;
+    use futures::future::BoxFuture;
+    impl<T: crate::codex_history::HistorySource + ?Sized> crate::codex_history::HistorySource for std::sync::Arc<T> {
+        fn supports(&self, host: &str) -> bool { <T as crate::codex_history::HistorySource>::supports(self.as_ref(), host) }
+        fn open<'a>(&'a self, binding: &'a Binding, program: &'a str) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>> { <T as crate::codex_history::HistorySource>::open(self.as_ref(), binding, program) }
+    }
+}
+
+mod arc_port_21_codexhistoryhost {
+    use crate::codex_history::*;
+    use crate::db;
+    use std::{path::PathBuf, sync::Arc};
+    impl<T: crate::codex_history::CodexHistoryHost + ?Sized> crate::codex_history::CodexHistoryHost for std::sync::Arc<T> {
+        fn enabled(&self) -> impl std::future::Future<Output = bool> + Send + '_ { <T as crate::codex_history::CodexHistoryHost>::enabled(self.as_ref()) }
+        fn source(&self) -> Option<Arc<dyn HistorySource>> { <T as crate::codex_history::CodexHistoryHost>::source(self.as_ref()) }
+        fn bot_host<'a>(&'a self, bot_id: &'a str) -> impl std::future::Future<Output = Option<String>> + Send + 'a { <T as crate::codex_history::CodexHistoryHost>::bot_host(self.as_ref(), bot_id) }
+        fn codex_home<'a>(&'a self, bot: &'a db::Bot) -> impl std::future::Future<Output = Option<PathBuf>> + Send + 'a { <T as crate::codex_history::CodexHistoryHost>::codex_home(self.as_ref(), bot) }
+        fn codex_program(&self) -> impl std::future::Future<Output = String> + Send + '_ { <T as crate::codex_history::CodexHistoryHost>::codex_program(self.as_ref()) }
+    }
+}
+
+mod arc_port_22_codexhistorystate {
+    use crate::codex_history::*;
+    impl<T: crate::codex_history::CodexHistoryState + ?Sized> crate::codex_history::CodexHistoryState for std::sync::Arc<T> {
+        fn codex_history(&self) -> &crate::codex_history::HistoryHook { <T as crate::codex_history::CodexHistoryState>::codex_history(self.as_ref()) }
+    }
 }

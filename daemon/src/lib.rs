@@ -22,7 +22,7 @@ pub mod runners;
 pub mod codex_reset;
 pub mod schedules;
 pub use am_base::config;
-pub use am_lifecycle::{ask_answers, child_done, daemon_notice};
+pub use am_lifecycle::{ask_answers, child_done, codex_history, daemon_notice, handoff};
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/arc_ports.rs"]
 mod am_lifecycle_arc_ports;
@@ -34,14 +34,12 @@ pub use am_lifecycle::{
     background_jobs,
     blocked_reason,
     child_alerts,
-    codex_history,
     compaction,
     codex_live,
     codex_model_migration,
     default_session,
     dangerous_rm,
     events,
-    handoff,
     hookrecv,
     judge,
     lifecycle,
@@ -64,9 +62,6 @@ pub mod child_alerts;
 #[path = "../../crates/am-lifecycle/src/compaction.rs"]
 pub mod compaction;
 #[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/codex_history.rs"]
-pub mod codex_history;
-#[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/codex_live.rs"]
 pub mod codex_live;
 #[cfg(test)]
@@ -81,9 +76,6 @@ pub mod dangerous_rm;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/events.rs"]
 pub mod events;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/handoff.rs"]
-pub mod handoff;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/hookrecv.rs"]
 pub mod hookrecv;

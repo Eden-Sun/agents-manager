@@ -70,3 +70,20 @@ daemon 三個測試執行檔的 `--list` 與 `--list --ignored` 前後逐位元�
 續驗 `04b078be0` 時，daemon 的 ingress ports 分層守門測試拒絕直接呼叫 lifecycle helper。候選改由既有 `Emit` port 發出相同 payload，守門測試維持原樣。上表撤後時間只適用於修正前候選。
 
 修正候選 `1af212160` 在 herdr shell pane 取得 `changed` exit 0。am-lifecycle 720/720、scratch guard 8/8、daemon 6,153 passed、4 ignored、API parity 1/1。原先失敗的 ingress ports 守門測試通過。其後只更新本文並 rebase 到純前端變更，沿用這輪 Rust 結果。
+
+## #1862 handoff／codex_history 撤掛載
+
+基底 `d8c99894d`。daemon 測試與正式建置都使用 `am_lifecycle` 的 `handoff` 和 `codex_history`，剩下 16 處 am-lifecycle 路徑掛載。原候選的撤後暖編遇到三個 E0117。daemon 仍掛載 `arc_ports.rs`，而 `HistorySource`、`CodexHistoryHost`、`CodexHistoryState` 改為來自 am-lifecycle，導致 daemon 嘗試為外部 trait 和外部型別 `Arc<T>` 定義 impl。三段實作原樣移到 trait 所在的 `codex_history.rs`，daemon 測試仍透過 `test-hooks` 避免啟用真實 history source。
+
+在同一 Ubuntu shim 熱池成員 `shared` 上，兩邊各暖編一次，再分別改 `crates/am-lifecycle/src/lifecycle/screen.rs` 一行，執行 `cargo test -p agents-managerd --no-run --timings`。負載和記憶體閘在計時外，編譯名額為共用。舊基底的樣本未納入。
+
+| 樣本 | 牆鐘秒 | daemon lib test 秒 |
+| --- | ---: | ---: |
+| 撤前 1 | 88.02 | 77.09 |
+| 撤前 2 | 76.88 | 65.57 |
+| 撤後 1 | 86.30 | 73.57 |
+| 撤後 2 | 83.18 | 71.70 |
+
+牆鐘中位數由 82.45 秒到 84.74 秒，daemon lib test 仍重編。本批未量到加速。兩次取樣和共用熱池的結果僅適用於這個中間步驟。
+
+daemon 的 lib、bin、`api_doc_parity` 三個測試執行檔，前後的 `--list` 和 `--list --ignored` 皆逐位元組相同。lib 6,157 條，含 4 條 ignored，bin 0 條，parity 1 條。掛載守門通過。`CHECK_MAX_LOAD=40 scripts/check.sh changed` exit 0，daemon 6,153 passed、4 ignored，lifecycle 720/720、scratch guard 8/8、API parity 1/1。日誌在 `/tmp/kx1862-orphan.brDxUq/`，原 E0117 日誌在 `/tmp/kx1862-base3.HbBiFY/after-warm.log`。
