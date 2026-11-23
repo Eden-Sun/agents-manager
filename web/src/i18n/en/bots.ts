@@ -3,6 +3,7 @@ import type { Dict } from '../../lib/i18n/types'
 export default {
   '建議': 'Suggested',
   '{name} 群集': '{name} cluster',
+  '已停派（{clusters} 群集 · {bots} 顆）': 'Paused ({clusters} clusters · {bots} bots)',
   '{n} 執行中': '{n} running',
   '{n} 閒置': '{n} idle',
   '{n} 等待回應': '{n} waiting',

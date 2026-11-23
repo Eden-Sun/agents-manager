@@ -84,8 +84,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { ExpertClusterRow } from './ExpertClusterRow'
-import { groupClusterItems } from '../lib/expertClusters'
+import { ExpertExecutorSection } from './ExpertExecutorSection'
 import { ExpertBadge, UnsetRoleBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
@@ -1568,19 +1567,16 @@ export function Sidebar() {
               ) : (
                 <div className="bot-list" role="list" aria-label={t('{name} 的 Bot', { name: p.label })}>
                 {p.mode === 'expert' ? (
-                  groupExpertSections(list, p.deputy?.bot_id).map((sec) => (
-                    <Fragment key={sec.role}>
-                      <ExpertSectionHeader title={sec.title} abbr={sec.abbr} />
-                      {(sec.role === 'executor' ? groupClusterItems(sec.items) : sec.items.map((item) => ({ kind: 'single' as const, item }))).map((entry) => {
-                        if (entry.kind === 'single') return renderMember(entry.item)
-                        return (
-                          <ExpertClusterRow key={`cluster:${entry.name}`} projectId={p.id} name={entry.name} members={entry.members}>
-                            {entry.members.map(renderMember)}
-                          </ExpertClusterRow>
-                        )
-                      })}
-                    </Fragment>
-                  ))
+                  groupExpertSections(list, p.deputy?.bot_id).map((sec) =>
+                    sec.role === 'executor' ? (
+                      <ExpertExecutorSection key={sec.role} projectId={p.id} title={sec.title} abbr={sec.abbr} items={sec.items} query={query} renderMember={renderMember} />
+                    ) : (
+                      <Fragment key={sec.role}>
+                        <ExpertSectionHeader title={sec.title} abbr={sec.abbr} />
+                        {sec.items.map((item) => renderMember(item))}
+                      </Fragment>
+                    ),
+                  )
                 ) : (
                   list.map(renderMember)
                 )}

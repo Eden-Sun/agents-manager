@@ -4,7 +4,7 @@ import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type 
 import { useStore } from '../store/store'
 import type { Bot, Project } from '../api/types'
 import { Sidebar } from './Sidebar'
-import { groupClusterItems } from '../lib/expertClusters'
+import { groupClusterItems, sortClusterEntries } from '../lib/expertClusters'
 
 afterEach(unmountAll)
 before(setupDom)
@@ -271,4 +271,85 @@ test('patch 進行中晶片 disabled', async () => {
   await mount(<Sidebar />)
   await settle()
   assert.equal(menuBtn().disabled, true)
+})
+
+test('sortClusterEntries：有活躍成員的群集排前面，全停止的排後面，單顆維持最後', () => {
+  const items = [bot('a1', { cluster: 'quiet' }), bot('a2', { cluster: 'quiet' }), bot('b1', { cluster: 'live' }), bot('b2', { cluster: 'live' }), bot('s', {})]
+  const lampsById = { a1: 'offline', a2: 'stopping', b1: 'offline', b2: 'working', s: 'idle' } as const
+  const sorted = sortClusterEntries(groupClusterItems(items), lampsById)
+  assert.deepEqual(sorted.map((e) => (e.kind === 'cluster' ? e.name : e.item.id)), ['live', 'quiet', 's'])
+  const allStopped = sortClusterEntries(groupClusterItems([bot('x1', { cluster: 'x' }), bot('x2', { cluster: 'x' }), bot('y1', { cluster: 'y' }), bot('y2', { cluster: 'y' })]), {})
+  assert.deepEqual(allStopped.map((e) => (e.kind === 'cluster' ? e.name : e.item.id)), ['x', 'y'])
+})
+
+test('側欄：活躍群集排在全停止群集前面（即使設定順序相反）', async () => {
+  seed()
+  useStore.setState({
+    bots: [
+      bot('m', { role: 'manager', cluster: null }),
+      bot('q1', { cluster: 'quiet' }),
+      bot('q2', { cluster: 'quiet' }),
+      bot('l1', { cluster: 'live' }),
+      bot('l2', { cluster: 'live' }),
+    ],
+    runs: { l1: run('working') },
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const order = [...document.querySelectorAll<HTMLElement>('.bot-list > [role="listitem"][data-cluster]')].map((e) => e.dataset.cluster)
+  assert.deepEqual(order, ['live', 'quiet'])
+})
+
+test('全停派群集與正常群集並存：全停派收進「已停派」折疊列，點擊展開', async () => {
+  seed()
+  useStore.setState({
+    bots: [
+      bot('m', { role: 'manager', cluster: null }),
+      bot('h1', { cluster: 'haiku', manager_use: false }),
+      bot('h2', { cluster: 'haiku', manager_use: false }),
+      bot('s1', { cluster: 'sonnet', model: 'sonnet' }),
+      bot('s2', { cluster: 'sonnet', model: 'sonnet' }),
+    ],
+    runs: { s1: run('idle') },
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const fold = document.querySelector<HTMLButtonElement>('.bot-cluster-paused-fold')!
+  assert.ok(fold, '有折疊列')
+  assert.match(fold.textContent ?? '', /已停派（1 群集 · 2 顆）/)
+  assert.equal(fold.getAttribute('aria-expanded'), 'false')
+  assert.equal(document.querySelector('.bot-list > [data-cluster="haiku"]'), null)
+  assert.ok(document.querySelector('.bot-list > [data-cluster="sonnet"]'))
+  await click(fold)
+  await settle()
+  assert.equal(fold.getAttribute('aria-expanded'), 'true')
+  assert.ok(document.querySelector('[data-cluster="haiku"]'))
+  assert.equal(window.localStorage.getItem('agm.expertPaused.p1'), '1')
+})
+
+test('只有全停派群集時不折疊，直接顯示', async () => {
+  seed([false, false, false])
+  await mount(<Sidebar />)
+  await settle()
+  assert.equal(document.querySelector('.bot-cluster-paused-fold'), null)
+  assert.ok(clusterRow())
+})
+
+test('執行者區標頭可收合，顯示總燈號，狀態記在 localStorage', async () => {
+  seed()
+  await mount(<Sidebar />)
+  await settle()
+  const head = document.querySelector<HTMLButtonElement>('.expert-section-toggle')!
+  assert.ok(head)
+  assert.equal(head.getAttribute('aria-expanded'), 'true')
+  assert.equal(head.getAttribute('title'), '1 執行中 · 2 閒置 · 1 停止')
+  assert.ok(clusterRow())
+  await click(head)
+  await settle()
+  assert.equal(head.getAttribute('aria-expanded'), 'false')
+  assert.equal(clusterRow(), null)
+  assert.equal(window.localStorage.getItem('agm.expertSection.p1.executor'), '0')
+  await click(head)
+  await settle()
+  assert.ok(clusterRow())
 })

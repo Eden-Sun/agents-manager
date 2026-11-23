@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { composerState, useStore } from '../store/store'
 import { chipCache } from '../lib/cacheClock'
 import { useCacheTick } from '../hooks/useCacheTick'
@@ -12,10 +12,12 @@ export function ModelTag({
   botId,
   short = false,
   cache: withCache = false,
+  fallback = null,
 }: {
   botId: string
   short?: boolean
   cache?: boolean
+  fallback?: ReactNode
 }) {
   const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
@@ -38,7 +40,7 @@ export function ModelTag({
   const detail = [chipExtra, fast ? 'fast' : null, reported?.thinking ? 'thinking' : null].filter(Boolean).join(' · ')
 
   const shown = shortModel(bot.kind, runningModel ?? reported?.model_name ?? null)
-  if (!shown && !chipExtra) return null
+  if (!shown && !chipExtra) return fallback
 
   const modelDesc = runningModel ?? (shown ? t('CLI 預設，實際載入 {shown}', { shown }) : t('（CLI 預設）'))
   const title = `${t('模型：{model}', { model: modelDesc })}${detail ? ` · ${detail}` : ''}`

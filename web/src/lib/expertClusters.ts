@@ -81,3 +81,26 @@ export function clusterStatCounts(lamps: readonly Lamp[]): { stat: ClusterStat; 
     return n > 0 ? [{ stat, n }] : []
   })
 }
+
+const ACTIVE_LAMPS: ReadonlySet<Lamp> = new Set<Lamp>(['working', 'blocked', 'starting', 'idle'])
+
+type ClusterMember = { id: string; manager_use?: boolean }
+
+export function clusterIsActive(members: readonly ClusterMember[], lampsById: Readonly<Record<string, Lamp>>): boolean {
+  return members.some((m) => ACTIVE_LAMPS.has(lampsById[m.id] ?? 'offline'))
+}
+
+export function clusterIsPaused(members: readonly ClusterMember[]): boolean {
+  return members.length > 0 && members.every((m) => m.manager_use === false)
+}
+
+export function sortClusterEntries<T extends ClusterMember & { cluster?: string | null }>(
+  entries: readonly ExpertClusterItem<T>[],
+  lampsById: Readonly<Record<string, Lamp>>,
+): ExpertClusterItem<T>[] {
+  const clusters = entries.filter((e): e is Extract<ExpertClusterItem<T>, { kind: 'cluster' }> => e.kind === 'cluster')
+  const singles = entries.filter((e) => e.kind === 'single')
+  const active = clusters.filter((e) => clusterIsActive(e.members, lampsById))
+  const idle = clusters.filter((e) => !clusterIsActive(e.members, lampsById))
+  return [...active, ...idle, ...singles]
+}

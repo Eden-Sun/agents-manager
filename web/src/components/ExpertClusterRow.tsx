@@ -145,6 +145,7 @@ export function ExpertClusterRow({
         <button
           type="button"
           className="bot-cluster-main"
+          title={t('{name} 群集', { name })}
           aria-expanded={open}
           aria-controls={listId}
           onClick={toggleOpen}
@@ -158,23 +159,6 @@ export function ExpertClusterRow({
             </span>
           ) : null}
           <span className="bot-main">
-            <span className="bot-cluster-head">
-              <span className="bot-cluster-name">{t('{name} 群集', { name })}</span>
-              {}
-              <span
-                className="bot-cluster-count"
-                role="img"
-                aria-label={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
-                title={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
-              >
-                {clusterStatCounts(lamps).map(({ stat, n }) => (
-                  <span key={stat} className="bot-cluster-stat-item">
-                    <span className={`lamp lamp-${stat === 'stopped' ? 'offline' : stat} bot-cluster-dot`} aria-hidden="true" />
-                    {n}
-                  </span>
-                ))}
-              </span>
-            </span>
             <span className="bot-sub">
               {first && showIdentity ? (
                 <IdentityBadge
@@ -184,8 +168,21 @@ export function ExpertClusterRow({
                   unknown={identityUnknown}
                 />
               ) : null}
-              {first ? <ModelTag botId={first.id} /> : null}
+              {first ? <ModelTag botId={first.id} fallback={<span className="bot-cluster-name">{name}</span>} /> : <span className="bot-cluster-name">{name}</span>}
             </span>
+          </span>
+          <span
+            className="bot-cluster-count"
+            role="img"
+            aria-label={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
+            title={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
+          >
+            {clusterStatCounts(lamps).map(({ stat, n }) => (
+              <span key={stat} className="bot-cluster-stat-item">
+                <span className={`lamp lamp-${stat === 'stopped' ? 'offline' : stat} bot-cluster-dot`} aria-hidden="true" />
+                {n}
+              </span>
+            ))}
           </span>
         </button>
         <ClusterManagerUseChip members={members} on={on} busy={busyPatch} />

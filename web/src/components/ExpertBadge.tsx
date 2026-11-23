@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { Bot } from '../api/types'
+import type { Bot, Lamp } from '../api/types'
+import { clusterStatCounts, clusterStatText } from '../lib/expertClusters'
 import { roleShortLabel, roleTitle } from '../lib/expertSections'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -55,12 +56,44 @@ export function ExpertDisabledMark() {
   )
 }
 
-export function ExpertSectionHeader({ title, abbr }: { title: string; abbr?: string }) {
+export function ExpertSectionHeader({
+  title,
+  abbr,
+  collapsible = false,
+  open = true,
+  onToggle,
+  lamps,
+}: {
+  title: string
+  abbr?: string
+  collapsible?: boolean
+  open?: boolean
+  onToggle?: () => void
+  lamps?: readonly Lamp[]
+}) {
+  if (!collapsible) {
+    return (
+      <div className="expert-section-head" role="presentation" aria-hidden="true">
+        <span className="expert-section-title">{title}</span>
+        {abbr && abbr !== title ? <span className="expert-section-abbr">{abbr}</span> : null}
+      </div>
+    )
+  }
+  const counts = clusterStatCounts(lamps ?? [])
   return (
-    <div className="expert-section-head" role="presentation" aria-hidden="true">
+    <button type="button" className="expert-section-head expert-section-toggle" aria-expanded={open} onClick={onToggle} title={clusterStatText(lamps ?? [])}>
+      <span className="expert-section-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
       <span className="expert-section-title">{title}</span>
       {abbr && abbr !== title ? <span className="expert-section-abbr">{abbr}</span> : null}
-    </div>
+      <span className="expert-section-stat">
+        {counts.map(({ stat, n }) => (
+          <span key={stat} className="bot-cluster-stat-item">
+            <span className={`lamp lamp-${stat === 'stopped' ? 'offline' : stat} bot-cluster-dot`} aria-hidden="true" />
+            {n}
+          </span>
+        ))}
+      </span>
+    </button>
   )
 }
 
