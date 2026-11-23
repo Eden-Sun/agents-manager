@@ -626,7 +626,9 @@ async fn plan_agy_context_compact(
     }
     let last_turn: Option<String> = sqlx::query_scalar(&format!(
         "SELECT id FROM turns WHERE run_id = ? AND status IN ('completed','completed_fallback')
-           AND (client_request_id IS NULL OR NOT {}) ORDER BY created_at DESC, rowid DESC LIMIT 1",
+           AND (client_request_id IS NULL OR NOT {})
+           AND COALESCE(prompt_text, '') <> '' AND prompt_text NOT LIKE '/compact%'
+           ORDER BY created_at DESC, rowid DESC LIMIT 1",
         cache_clock::keep_warm_crid_sql("client_request_id")
     ))
     .bind(&run.id)

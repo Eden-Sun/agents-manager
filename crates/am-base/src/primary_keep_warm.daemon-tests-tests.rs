@@ -1096,6 +1096,67 @@
     }
 
     #[tokio::test]
+    async fn agy_compact_turns_never_become_the_anchor_and_do_not_retrigger() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let bot = tt::claude_bot(&env.app, &env.project_id, "agy-ctx-loop").await;
+        sqlx::query("UPDATE bots SET kind = 'agy', is_primary = 0 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let sj = serde_json::json!({
+            "_agm_statusline": true,
+            "context_window": { "total_input_tokens": 400_000, "context_window_size": 1_048_576, "used_percentage": 38.1 }
+        })
+        .to_string();
+        sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(sj).bind(&run_id).execute(&env.app.db).await.unwrap();
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        let user_turn = |id: &'static str, min_ago: i64| {
+            let (db, conv, run) = (env.app.db.clone(), conv.clone(), run_id.clone());
+            async move {
+                sqlx::query(
+                    "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, prompt_text, created_at, completed_at)
+                     VALUES (?, ?, ?, 'web', 'completed', 'ok', NULL, 'hi', ?, ?)",
+                )
+                .bind(id)
+                .bind(&conv)
+                .bind(&run)
+                .bind(at(min_ago, now))
+                .bind(at(min_ago, now))
+                .execute(&db)
+                .await
+                .unwrap();
+            }
+        };
+
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "第一次超過門檻就壓");
+        user_turn("agy-u1", 3).await;
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 2, "新的使用者回合之後壓一次");
+
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, prompt_text, created_at, completed_at)
+             VALUES ('agy-c1', ?, ?, 'external', 'completed', 'ok', NULL, '', ?, ?)",
+        )
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(at(2, now))
+        .bind(at(2, now))
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            sweep(&env, &turns, &notes, now).await;
+        }
+        assert_eq!(turns.compacts.lock().unwrap().len(), 2, "daemon 自己送的 /compact 回合不能當新錨點，讀數沒變就不重送");
+
+        user_turn("agy-u2", 1).await;
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 3, "之後真的有新的使用者回合才再壓");
+        drop_window(&run_id);
+    }
+
     async fn agy_context_defaults_to_400k_and_resends_only_after_a_new_turn() {
         let env = tt::env().await;
         let now = chrono::Utc::now();
@@ -1128,8 +1189,8 @@
 
         let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, completed_at)
-             VALUES ('agy-t1', ?, ?, 'web', 'completed', 'ok', NULL, ?, ?)",
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, prompt_text, created_at, completed_at)
+             VALUES ('agy-t1', ?, ?, 'web', 'completed', 'ok', NULL, 'hi', ?, ?)",
         )
         .bind(&conv)
         .bind(&run_id)
