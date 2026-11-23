@@ -34,5 +34,5 @@ test('收合量表隨格子增長，最窄仍保留 24px', () => {
 test('收合的圖示欄跟內容等寬：左內距只剩格子自己的 7px（不再有 3.2em 的空欄）', () => {
   const body = ruleBody('.main-head .quota-open.collapsed .quota-head')
   assert.match(body, /width:\s*auto;/)
-  assert.match(body, /padding-right:\s*8px;/, '右邊留 8px 給窗口名，不貼著 cc0')
+  assert.match(body, /padding-right:\s*2px;/, '右邊留 2px 加上 bar 左距 3px，緊湊不貼著身份名')
 })
