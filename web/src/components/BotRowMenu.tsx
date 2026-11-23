@@ -41,6 +41,17 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   return (
     <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
       <HeadMoreMenu label={t('{name} 的操作', { name: bot.name })}>
+        {bot.share_profile ? (
+          <div className="head-menu-header" aria-hidden="true">
+            {bot.share_profile === 'trusted'
+              ? bot.share_enabled
+                ? t('🔓 信任分享（分享中）')
+                : t('🔓 信任分享（未分享）')
+              : bot.share_enabled
+                ? t('🔗 分享用（受限）（分享中）')
+                : t('🔗 分享用（受限）（未分享）')}
+          </div>
+        ) : null}
         <button
           type="button"
           className="head-menu-item"

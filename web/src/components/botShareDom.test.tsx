@@ -7,8 +7,11 @@ import { ApiError } from '../api/types'
 import { resetStoreForTest, useStore } from '../store/store'
 import { BotShareSection } from './BotShareSection'
 import { ShareLinkButton, ShareMark } from './ShareLinkButton'
+import { BotSwitcher, BotSwitcherMenu } from './BotSwitcher'
+import { BotRowMenu } from './BotRowMenu'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
+import { setLangOverride } from '../lib/i18n'
 import { virtualMockTime } from '../testing/sharedMock'
 
 virtualMockTime()
@@ -19,9 +22,11 @@ afterEach(async () => {
 })
 before(async () => {
   await setupDom()
+  setLangOverride('zh-TW')
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
 })
 after(async () => {
+  setLangOverride(null)
   resetStoreForTest()
   await teardownDom()
 })
@@ -952,5 +957,119 @@ test('分享面板：別處關閉後，本頁晚到的成功 POST 不會重新�
   } finally {
     rawTransport.request = orig
   }
+})
+
+test('BotSwitcher 與 BotSwitcherMenu 顯示分享標示（trusted 🔓、restricted 🔗，一般 bot 不標示）', async () => {
+  const testBots = [
+    { id: 'b-re', name: 'bot-restricted', kind: 'claude', project_id: 'p1', share_profile: 'restricted', share_enabled: true },
+    { id: 'b-tr', name: 'bot-trusted', kind: 'claude', project_id: 'p1', share_profile: 'trusted', share_enabled: false },
+    { id: 'b-pl', name: 'bot-plain', kind: 'claude', project_id: 'p1', share_profile: null, share_enabled: false },
+  ]
+  const testProjects = [{ id: 'p1', label: 'proj', bots: testBots }]
+  await act(async () => {
+    useStore.setState({
+      bots: testBots as never,
+      projects: testProjects as never,
+      projectOrder: ['p1'],
+      botOrder: { p1: ['b-re', 'b-tr', 'b-pl'] },
+    })
+  })
+
+  await mount(<BotSwitcher botId="b-re" name="bot-restricted" />)
+  await settle()
+  const btnRestricted = document.querySelector<HTMLButtonElement>('.bot-switcher-btn')!
+  const markInBtn = btnRestricted.querySelector('.share-mark')
+  assert.ok(markInBtn, 'restricted bot 頂端按鈕有 share-mark')
+  assert.equal(markInBtn.textContent, '🔗')
+
+  await unmountAll()
+
+  await mount(<BotSwitcher botId="b-pl" name="bot-plain" />)
+  await settle()
+  const btnPlain = document.querySelector<HTMLButtonElement>('.bot-switcher-btn')!
+  assert.equal(btnPlain.querySelector('.share-mark'), null, '一般 bot 頂端按鈕沒有 share-mark')
+
+  await unmountAll()
+
+  await mount(
+    <BotSwitcherMenu
+      groups={[{ project: { id: 'p1', label: 'proj' } as never, bots: testBots as never }]}
+      onPick={() => {}}
+    />,
+  )
+  await settle()
+  const items = [...document.querySelectorAll<HTMLButtonElement>('.bot-switcher-item')]
+  assert.equal(items.length, 3)
+  const itemRestricted = items.find((el) => el.textContent?.includes('bot-restricted'))!
+  const itemTrusted = items.find((el) => el.textContent?.includes('bot-trusted'))!
+  const itemPlain = items.find((el) => el.textContent?.includes('bot-plain'))!
+
+  assert.ok(itemRestricted.querySelector('.share-mark'), 'restricted item 有 share-mark')
+  assert.equal(itemRestricted.querySelector('.share-mark')?.textContent, '🔗')
+  assert.ok(itemTrusted.querySelector('.share-mark'), 'trusted item 有 share-mark')
+  assert.equal(itemTrusted.querySelector('.share-mark')?.textContent, '🔓')
+  assert.equal(itemPlain.querySelector('.share-mark'), null, 'plain item 沒有 share-mark')
+})
+
+test('BotRowMenu 標示分享功能身份與狀態（trusted、restricted 與一般 bot）', async () => {
+  const testBots = [
+    { id: 'b-re-on', name: 're-on', kind: 'claude', project_id: 'p1', share_profile: 'restricted', share_enabled: true },
+    { id: 'b-re-off', name: 're-off', kind: 'claude', project_id: 'p1', share_profile: 'restricted', share_enabled: false },
+    { id: 'b-tr-on', name: 'tr-on', kind: 'claude', project_id: 'p1', share_profile: 'trusted', share_enabled: true },
+    { id: 'b-tr-off', name: 'tr-off', kind: 'claude', project_id: 'p1', share_profile: 'trusted', share_enabled: false },
+    { id: 'b-plain', name: 'plain', kind: 'claude', project_id: 'p1', share_profile: null, share_enabled: false },
+  ]
+  await act(async () => {
+    useStore.setState({
+      bots: testBots as never,
+      projects: [{ id: 'p1', label: 'proj', bots: testBots }] as never,
+    })
+  })
+
+  await mount(<BotRowMenu botId="b-tr-on" />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  const headerTrOn = document.querySelector('.head-menu-header')
+  assert.ok(headerTrOn, 'trusted 分享中有 header')
+  assert.match(headerTrOn.textContent ?? '', /🔓.*信任分享（分享中）/)
+
+  await unmountAll()
+
+  await mount(<BotRowMenu botId="b-tr-off" />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  const headerTrOff = document.querySelector('.head-menu-header')
+  assert.ok(headerTrOff, 'trusted 未分享有 header')
+  assert.match(headerTrOff.textContent ?? '', /🔓.*信任分享（未分享）/)
+
+  await unmountAll()
+
+  await mount(<BotRowMenu botId="b-re-on" />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  const headerReOn = document.querySelector('.head-menu-header')
+  assert.ok(headerReOn, 'restricted 分享中有 header')
+  assert.match(headerReOn.textContent ?? '', /🔗.*分享用（受限）（分享中）/)
+
+  await unmountAll()
+
+  await mount(<BotRowMenu botId="b-re-off" />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  const headerReOff = document.querySelector('.head-menu-header')
+  assert.ok(headerReOff, 'restricted 未分享有 header')
+  assert.match(headerReOff.textContent ?? '', /🔗.*分享用（受限）（未分享）/)
+
+  await unmountAll()
+
+  await mount(<BotRowMenu botId="b-plain" />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  assert.equal(document.querySelector('.head-menu-header'), null, '一般 bot 沒有分享狀態 header')
 })
 

@@ -19,13 +19,25 @@ pub struct Overlay {
 }
 
 /// 純函式：給 bot 與它角色的 policy，算出生效結果與要不要補啟動參數。
-pub fn resolve(bot: &db::Bot, role_policy: &BTreeMap<String, serde_json::Value>) -> (Effective, bool) {
+pub fn resolve(
+    bot: &db::Bot,
+    role_policy: &BTreeMap<String, serde_json::Value>,
+    is_share_bot: bool,
+) -> (Effective, bool) {
     let ov: Option<RuntimeSettings> = bot.runtime_override_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
     let role: Option<RuntimeSettings> = bot.role.as_deref().and_then(|r| role_policy.get(r)).and_then(|v| serde_json::from_value(v.clone()).ok());
-    let eff = effective(ov.as_ref(), role.as_ref());
+    let mut eff = effective(ov.as_ref(), role.as_ref());
     let from_override = ov.as_ref().and_then(|o| o.context_tokens).is_some();
     let from_role = role.as_ref().and_then(|r| r.context_tokens).is_some();
-    (eff, from_override || from_role)
+    let apply = if from_override || from_role {
+        true
+    } else if is_share_bot {
+        eff.context_tokens = Some(400_000);
+        true
+    } else {
+        false
+    };
+    (eff, apply)
 }
 
 /// 生效結果的指紋（同一組生效值＝同一個指紋）。
@@ -58,7 +70,8 @@ pub fn build_overlay(bot: &db::Bot, eff: &Effective, apply: bool) -> Overlay {
 /// 啟動時用：讀 bot 覆寫與它角色的 policy，算出要補的參數。
 pub async fn overlay_for(app: &impl Db, bot: &db::Bot) -> anyhow::Result<Overlay> {
     let policy = load(app, bot).await?;
-    let (eff, apply) = resolve(bot, &policy);
+    let is_share = db::is_share_bot(app.db(), &bot.id).await?;
+    let (eff, apply) = resolve(bot, &policy, is_share);
     Ok(build_overlay(bot, &eff, apply))
 }
 
@@ -69,8 +82,12 @@ async fn load(app: &impl Db, bot: &db::Bot) -> anyhow::Result<BTreeMap<String, s
 }
 
 /// 同步版本（`/api/state` 逐顆算用，不碰 DB／config）。
-pub fn policy_rev_now(bot: &db::Bot, role_policy: &BTreeMap<String, serde_json::Value>) -> String {
-    policy_rev_of(&resolve(bot, role_policy).0)
+pub fn policy_rev_now(
+    bot: &db::Bot,
+    role_policy: &BTreeMap<String, serde_json::Value>,
+    is_share_bot: bool,
+) -> String {
+    policy_rev_of(&resolve(bot, role_policy, is_share_bot).0)
 }
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
@@ -119,12 +136,16 @@ mod tests {
     fn bot_override_then_role_policy_then_default() {
         let pol = policy("executor", r#"{"context_tokens": 200000}"#);
         let b = bot("claude", Some("opus"), None, None);
-        assert_eq!(resolve(&b, &pol), (Effective::default(), false));
+        assert_eq!(resolve(&b, &pol, false), (Effective::default(), false));
+        assert_eq!(resolve(&b, &pol, true), (Effective { context_tokens: Some(400_000), ..Default::default() }, true));
         let b = bot("claude", Some("opus"), Some("executor"), None);
-        let (eff, apply) = resolve(&b, &pol);
+        let (eff, apply) = resolve(&b, &pol, false);
         assert_eq!((eff.context_tokens, apply), (Some(200_000), true));
+        let (eff_share, apply_share) = resolve(&b, &pol, true);
+        assert_eq!((eff_share.context_tokens, apply_share), (Some(200_000), true));
         let b = bot("claude", Some("opus"), Some("executor"), Some(r#"{"context_tokens": 512000}"#));
-        assert_eq!(resolve(&b, &pol), (Effective { context_tokens: Some(512_000), ..Default::default() }, true));
+        assert_eq!(resolve(&b, &pol, false), (Effective { context_tokens: Some(512_000), ..Default::default() }, true));
+        assert_eq!(resolve(&b, &pol, true), (Effective { context_tokens: Some(512_000), ..Default::default() }, true));
     }
 
     #[test]

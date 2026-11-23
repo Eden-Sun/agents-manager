@@ -474,4 +474,8 @@ export default {
     'Delete all {n} bots in the {name} cluster? Their terminal panes will be stopped and closed and entries removed from config.toml; chat history is kept.',
   '專案中的 claude-api bot：': 'Claude-api bots in project: ',
   '目前專案尚未建立 claude-api bot；可在側欄「新增 Bot」選擇「claude-api」建立。': 'No claude-api bot in this project yet. You can create one from “Add Bot” in the sidebar.',
+  '🔓 信任分享（分享中）': '🔓 Trusted share (sharing)',
+  '🔓 信任分享（未分享）': '🔓 Trusted share (not shared)',
+  '🔗 分享用（受限）（分享中）': '🔗 Restricted share (sharing)',
+  '🔗 分享用（受限）（未分享）': '🔗 Restricted share (not shared)',
 } satisfies Dict

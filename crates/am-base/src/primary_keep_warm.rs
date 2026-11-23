@@ -744,7 +744,8 @@ pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> any
         (Some(p), Some(role)) => p.role_policy().get(role).and_then(|v| serde_json::from_value(v.clone()).ok()),
         _ => None,
     };
-    Ok(crate::runtime_policy::effective_for_kind(&bot.kind, ov.as_ref(), role.as_ref()))
+    let is_share = db::is_share_bot(db.pool(), &bot.id).await.unwrap_or(false);
+    Ok(crate::runtime_policy::effective_for_bot(&bot.kind, is_share, ov.as_ref(), role.as_ref()))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]

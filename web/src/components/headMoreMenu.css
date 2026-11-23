@@ -47,6 +47,16 @@
   bottom: calc(100% + 6px);
 }
 
+.head-menu-header {
+  padding: 6px 10px 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 2px;
+  user-select: none;
+}
+
 @media (width <= 640px) {
 
   .main-head button.icon-btn,

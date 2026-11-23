@@ -60,11 +60,21 @@ pub fn effective(bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSe
     }
 }
 
+/// 這顆 bot（依 kind 與是否為分享 bot）的生效結果：bot 覆寫 > 角色 policy > kind/分享預設（只補 `context_tokens`）。
+pub fn effective_for_bot(
+    kind: &str,
+    is_share_bot: bool,
+    bot_override: Option<&RuntimeSettings>,
+    role: Option<&RuntimeSettings>,
+) -> Effective {
+    let mut eff = effective(bot_override, role);
+    eff.context_tokens = eff.context_tokens.or(am_config::runtime_params::default_context_tokens_for(kind, is_share_bot));
+    eff
+}
+
 /// 這顆 bot（依 kind）的生效結果：bot 覆寫 > 角色 policy > kind 預設（只補 `context_tokens`）。
 pub fn effective_for_kind(kind: &str, bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSettings>) -> Effective {
-    let mut eff = effective(bot_override, role);
-    eff.context_tokens = eff.context_tokens.or(am_config::runtime_params::default_context_tokens(kind));
-    eff
+    effective_for_bot(kind, false, bot_override, role)
 }
 
 /// 保溫／熱壓真正用的門檻（秒與百分比），缺的用現有常數。
@@ -158,6 +168,12 @@ mod tests {
         assert_eq!(effective_for_kind("agy", Some(&ov), Some(&role)).context_tokens, Some(500_000), "bot 覆寫最優先");
         assert_eq!(effective_for_kind("claude", None, None).context_tokens, None);
         assert_eq!(effective_for_kind("codex", None, None).context_tokens, None);
+
+        assert_eq!(effective_for_bot("claude", true, None, None).context_tokens, Some(400_000));
+        assert_eq!(effective_for_bot("claude", true, None, Some(&role)).context_tokens, Some(300_000));
+        assert_eq!(effective_for_bot("claude", true, Some(&ov), Some(&role)).context_tokens, Some(500_000));
+        assert_eq!(effective_for_bot("claude", false, None, None).context_tokens, None);
+        assert_eq!(effective_for_bot("codex", true, None, None).context_tokens, Some(400_000));
     }
 
     #[test]

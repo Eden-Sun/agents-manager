@@ -1531,7 +1531,20 @@ async fn start_inner_body(
     if let Some(ws) = &restricted {
         let prompt = app.install_restricted_prompt(bot, &host, ws, &env).await.map_err(up)?;
         args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
-        args.extend(model_args(&launch_model_bot(app, bot, &project.host).await));
+        let overlay = super::runtime_overlay::overlay_for(app, bot).await.map_err(up)?;
+        let mut model_bot = launch_model_bot(app, bot, &project.host).await;
+        if overlay.model.is_some() {
+            model_bot.model = overlay.model.clone();
+        }
+        args.extend(model_args(&model_bot));
+        if let Err(e) = sqlx::query("UPDATE runs SET policy_rev = ? WHERE id = ?")
+            .bind(super::runtime_overlay::policy_rev_of(&overlay.eff))
+            .bind(run_id)
+            .execute(app.db())
+            .await
+        {
+            tracing::warn!(bot = %bot.name, error = %e, "could not record the runtime policy revision for this run");
+        }
     } else {
         args.extend(persona_args_cli_docs(bot, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
         let overlay = super::runtime_overlay::overlay_for(app, bot).await.map_err(up)?;

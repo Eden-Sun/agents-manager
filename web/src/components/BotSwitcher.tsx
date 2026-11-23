@@ -9,6 +9,7 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
 import { ExpertDeputyTag, ExpertRoleTag } from './ExpertBadge'
+import { ShareMark } from './ShareLinkButton'
 import { groupExpertSections } from '../lib/expertSections'
 import './botSwitcher.css'
 import { t, useT } from '../lib/i18n'
@@ -83,6 +84,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
       >
         {isExpertProject && currentBot ? <ExpertRoleTag role={currentBot.role} rolePending={currentBot.role_pending} /> : null}
         <strong>{name}</strong>
+        {currentBot ? <ShareMark botId={currentBot.id} /> : null}
         <span className="bot-switcher-chev" aria-hidden="true">
           ▾
         </span>
@@ -158,6 +160,7 @@ export function BotSwitcherMenu({
                         {g.project.deputy?.bot_id === b.id ? <ExpertDeputyTag afterSec={g.project.deputy.after_sec} /> : null}
                         {b.role_pending ? <ExpertRoleTag role={b.role} rolePending /> : null}
                         <span className="bot-switcher-name">{b.name}</span>
+                        <ShareMark botId={b.id} />
                       </button>
                     ))}
                   </div>
@@ -175,6 +178,7 @@ export function BotSwitcherMenu({
                     <RowLamp botId={b.id} />
                     <KindTag kind={b.kind} />
                     <span className="bot-switcher-name">{b.name}</span>
+                    <ShareMark botId={b.id} />
                   </button>
                 ))}
           </div>

@@ -5746,6 +5746,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **跟受限一樣適用**的（凡是判斷「是不是分享 bot」的地方都用 `store::is_share_bot`，兩種都算）：分享連結與入口、只呈現 end user 與 bot 的對話、`〔分享使用者〕` 前綴、
   AGM 不能刪／停（`guards_from_bot_principal`）、不收進閒置睡眠（`share_bot`）、child 退役擋下、outbox 走分享保留政策（`.am-share-keep`，14 天／500 MiB）、停了先試著接回原對話（`resume_native`）、hook 一律注入。
   上傳一樣放 `<資料夾>/inbox/`（資料夾是專案目錄時就是專案底下的 `inbox/`）。
+- **分享功能 bot 的 context 長度預設 400K**：未設 bot 覆寫且未設角色 policy 時，分享用 bot（受限或信任分享，`store::is_share_bot`）預設 `context_tokens = Some(400_000)`（優先序：bot 覆寫 > 角色 policy > 預設 400K）。啟動時 `setup.rs` 注入 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000`，`start.rs` 套用 `[1m]` 模型變體並記錄 `runs.policy_rev`；受限分享（restricted）同樣套用 `[1m]` 模型變體與記錄 policy_rev。前端 context 分母亦比照預設顯示 400K。
+- **Bot menu 標示分享功能**：BotSwitcher 切換選單（一般與專家模式項目，以及頂端按鈕本身）與 BotRowMenu 操作選單頂部標籤皆清楚標示分享 bot 身分與狀態（受限 🔗、信任分享 🔓；分享中 / 未分享）。
 - `shared_bots.profile` 原本 CHECK 只收 `'restricted'`：開機時換名、照新定義建表、搬資料、刪舊表（schema v41）。
 - **允許 iframe 嵌入**（`bot_shares.allow_embed`，預設 0；使用者 2026-10-10）：只有信任分享的分享設定裡有這個勾選，受限分享帶了 400 `share_embed_trusted_only`。
   勾了之後，這條 token 底下 200 的回應不送 `X-Frame-Options`、CSP 的 `frame-ancestors` 改成 `*`（其餘指令一字不改），別的網站可以用 `<iframe>` 嵌進去；

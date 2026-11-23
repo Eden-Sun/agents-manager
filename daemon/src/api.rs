@@ -1501,8 +1501,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         let cluster_names = if p.mode == "expert" { crate::expert_cluster::names_by_bot(&crate::expert_cluster::clusters_of(&bots, &runs, &p.id)) } else { Default::default() };
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
+            let is_share = share_profiles.contains_key(&b.id);
             let policy_drift = policy_revs.get(&b.id).is_some_and(|recorded| {
-                crate::lifecycle::runtime_overlay::policy_rev_now(b, &role_policy) != *recorded
+                crate::lifecycle::runtime_overlay::policy_rev_now(b, &role_policy, is_share) != *recorded
             });
             let queued_turn = queued_turns.remove(&b.id);
             let shim_stale = if p.host == LOCAL_HOST {

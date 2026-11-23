@@ -2,7 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { BotSwitcherMenu } from './BotSwitcher.tsx'
+import { setLangOverride } from '../lib/i18n'
 import type { Bot, Project } from '../api/types'
+
+setLangOverride('zh-TW')
 
 const project = { id: 'p1', label: 'proj' } as Project
 const bots = [{ id: 'b1', name: 'one', kind: 'claude', project_id: 'p1' }, { id: 'b2', name: 'two', kind: 'codex', project_id: 'p1' }] as Bot[]
