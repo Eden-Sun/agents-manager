@@ -32,22 +32,32 @@ pub fn pick_conversation(
 
 /// 這台主機上的 agy 事實從哪裡讀（issue #1788）：本機直接讀 `/proc` 與檔案；遠端＝那台的 ssh（`lsof`、`date`、`tail`）。
 enum Site {
-    Local { home: PathBuf },
+    Local { home: PathBuf, recorded: Option<PathBuf> },
     Remote { conn: std::sync::Arc<crate::hosts::HostConn>, home: PathBuf },
 }
 
 impl Site {
-    /// 拿不到家目錄、遠端沒連線＝`None`（照舊看畫面）。
-    async fn of(app: &impl crate::hosts::HostsAccess, host: &str) -> Option<Site> {
+    /// 拿不到家目錄、遠端沒連線＝`None`（照舊看畫面）。agy 非預設身份的 HOME 是身份目錄，紀錄檔在那底下（身份 env 的 `HOME`）。
+    async fn of(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>, recorded: Option<&str>) -> Option<Site> {
+        let identity_home = match identity.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(name) => app.identity_for_host(host, name).await.filter(|i| i.kind == "agy").and_then(|i| crate::tools::agy_identity_home(&i.env).map(str::to_owned)),
+            None => None,
+        };
+        let effective = |base: PathBuf| match &identity_home {
+            Some(h) => PathBuf::from(crate::config::expand_home(h, &base.to_string_lossy())),
+            None => base,
+        };
         if host == LOCAL_HOST {
-            return crate::home::dir().map(|home| Site::Local { home });
+            let home = effective(crate::home::dir()?);
+            let recorded = recorded.map(PathBuf::from).filter(|p| p.is_absolute() && p.is_file());
+            return Some(Site::Local { home, recorded });
         }
         let conn = app.hosts().get(host).await?;
         if !conn.is_connected() {
             return None;
         }
         match conn.home().await {
-            Ok(home) => Some(Site::Remote { conn, home: home.into() }),
+            Ok(home) => Some(Site::Remote { conn, home: effective(home.into()) }),
             Err(e) => {
                 tracing::debug!(host, error = ?e, "agy transcript: remote home unknown");
                 None
@@ -56,8 +66,13 @@ impl Site {
     }
 
     fn path_of(&self, id: &str) -> PathBuf {
+        if let Site::Local { recorded: Some(p), .. } = self {
+            if p.components().any(|c| c.as_os_str() == id) && p.file_name().is_some_and(|n| n == "transcript_full.jsonl") {
+                return p.clone();
+            }
+        }
         let home = match self {
-            Site::Local { home } | Site::Remote { home, .. } => home,
+            Site::Local { home, .. } | Site::Remote { home, .. } => home,
         };
         crate::agy_support::transcript_path(home, id)
     }
@@ -134,8 +149,12 @@ impl Site {
 }
 
 /// `Some((對話 id, 紀錄檔尾巴))`；找不到對話、讀不到檔＝`None`（照舊看畫面）。遠端的 `/proc`、對話檔都在那台，經 ssh 讀。
-pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
-    let Some(site) = Site::of(app, host).await else { return Ok(None) };
+pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
+    let identity = match run.runtime_identity.clone() {
+        Some(i) => Some(i),
+        None => db::bot(app.db(), &run.bot_id).await?.and_then(|b| b.identity),
+    };
+    let Some(site) = Site::of(app, host, identity.as_deref(), run.transcript_path.as_deref()).await else { return Ok(None) };
     let known = run.native_session_id.clone().filter(|s| valid_session_id(s));
     let mut open: Vec<String> = Vec::new();
     if let Some(pane) = run.pane_id.as_deref() {

@@ -151,3 +151,61 @@ fn the_transcript_verdict_needs_a_matching_prompt_and_a_fresh_last_record() {
 
     assert_eq!(agy_native_from_transcript("", &sent, now), AgyNative::Unknown);
 }
+
+#[tokio::test]
+async fn a_non_default_agy_identity_reads_its_transcript_under_the_identity_home() {
+    let f = fixture().await;
+    let app = f.env.app.clone();
+    let leaf = format!(".agy-ag2-{}", db::ulid());
+    app.cfg
+        .update(|cfg| {
+            cfg.identities = vec![crate::config::IdentityCfg {
+                name: "ag2".into(),
+                kind: "agy".into(),
+                host: None,
+                env: [("HOME".to_string(), format!("$HOME/{leaf}"))].into(),
+                args: vec![],
+            }];
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bots SET identity='ag2' WHERE id=?").bind(&f.bot_id).execute(&app.db).await.unwrap();
+    let a = a_turn(&app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    let now = chrono::Utc::now();
+    let text = [user(0, now, "派工"), tool_step(1, now), answer(2, now, "ag2 的答案")].join("\n");
+    let sid = format!("c-{}", db::ulid());
+    let id_home = crate::home::dir().unwrap().join(&leaf);
+    let file = crate::agy_support::transcript_path(&id_home, &sid);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+    sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = NULL WHERE id = ?").bind(&sid).bind(&f.run_id).execute(&app.db).await.unwrap();
+    let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+
+    let (got, _) = crate::lifecycle::agy_session::load(&app, &run, "local").await.unwrap().expect("transcript under the identity HOME");
+    assert_eq!(got, sid);
+    hook_at(&f, now - chrono::Duration::seconds(600)).await;
+    assert!(try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
+    let (content, source, incomplete): (String, String, i64) =
+        sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(&a).fetch_one(&app.db).await.unwrap();
+    assert_eq!((content.as_str(), source.as_str(), incomplete), ("ag2 的答案", "transcript", 0));
+    std::fs::remove_dir_all(id_home).unwrap();
+}
+
+#[tokio::test]
+async fn a_recorded_transcript_path_for_the_same_session_is_used_as_is() {
+    let f = fixture().await;
+    let app = f.env.app.clone();
+    let now = chrono::Utc::now();
+    let sid = format!("c-{}", db::ulid());
+    let dir = crate::home::dir().unwrap().join(format!(".agy-rec-{}", db::ulid())).join("brain").join(&sid).join(".system_generated").join("logs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("transcript_full.jsonl");
+    std::fs::write(&file, [user(0, now, "x"), answer(1, now, "recorded")].join("\n")).unwrap();
+    sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ?").bind(&sid).bind(file.to_str().unwrap()).bind(&f.run_id).execute(&app.db).await.unwrap();
+    let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+    let (got, text) = crate::lifecycle::agy_session::load(&app, &run, "local").await.unwrap().expect("recorded path");
+    assert_eq!(got, sid);
+    assert!(text.contains("recorded"));
+    std::fs::remove_dir_all(file.ancestors().nth(5).unwrap()).unwrap();
+}

@@ -203,7 +203,7 @@ pub async fn pids_in_pane(app: &impl crate::hosts::HostsAccess, host: &str, pane
 
 /// 載入 agy session。
 pub async fn agy_session_load(
-    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::hosts::HostsAccess),
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess),
     run: &db::Run,
     host: &str,
 ) -> Result<Option<(String, String)>> {
