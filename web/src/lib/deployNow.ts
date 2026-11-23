@@ -54,7 +54,7 @@ export function deployNowNotice(result: { short?: string; log_path?: string } | 
   if (result) {
     return {
       level: 'info',
-      text: t('已送出部署 {short}。左上角會顯示「部署中」，換好後自動消失；等太久會跳出等待提示。', { short: result.short ?? '' }),
+      text: t('已送出部署 {short}，見左上角「部署中」', { short: result.short ?? '' }),
     }
   }
   if (error instanceof ApiError) {

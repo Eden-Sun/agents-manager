@@ -3283,28 +3283,109 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
+.chat-dock {
+  flex: none;
+  width: 100%;
+}
+
 @media (width <= 640px) {
   .notices {
-    top: 0;
-    right: 8px;
-    bottom: 0;
-    left: 8px;
+    top: auto;
+    right: 12px;
+    bottom: calc(var(--composer-bottom-offset, 76px) + env(safe-area-inset-bottom));
+    left: 12px;
     z-index: 1100;
     max-width: none;
-    justify-content: center;
+    align-items: center;
     pointer-events: none;
   }
 
   .notices > .notice {
     pointer-events: auto;
-    animation: notice-fade-in 0.18s ease-out;
+    animation: notice-slide-up 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    background: rgba(15, 23, 42, 0.88);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    color: #f8fafc;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-left: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    cursor: pointer;
+  }
+
+  .notices > .notice button {
+    color: rgba(248, 250, 252, 0.75);
+  }
+
+  .notices > .notice button:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.15);
+  }
+
+  [data-theme="dark"] .notices > .notice {
+    background: rgba(30, 41, 59, 0.92);
+    border-color: rgba(255, 255, 255, 0.16);
+    color: #f8fafc;
+  }
+
+  .notices > .notice.error,
+  .notices > .notice.warn,
+  .notices > .notice:has(.notice-action) {
+    border-radius: 14px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--accent);
+    color: var(--text);
+    cursor: default;
+    box-shadow: var(--shadow);
+  }
+
+  .notices > .notice.error {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+    border-left-color: var(--danger);
+    color: var(--danger);
+  }
+
+  .notices > .notice.warn {
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--border-strong));
+    border-left-color: var(--warn);
+    color: var(--warn);
+  }
+
+  .notices > .notice.error button,
+  .notices > .notice.warn button,
+  .notices > .notice:has(.notice-action) button {
+    color: var(--text-dim);
+  }
+
+  .notices > .notice.error button:hover,
+  .notices > .notice.warn button:hover,
+  .notices > .notice:has(.notice-action) button:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+
+  .notices > .notice.notice-top-center {
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 12px);
+    bottom: auto;
+    left: 0;
+    right: 0;
+    width: min(560px, calc(100vw - 32px));
+    margin-inline: auto;
+    border-radius: var(--radius);
   }
 }
 
-@keyframes notice-fade-in {
+@keyframes notice-slide-up {
   from {
     opacity: 0;
-    transform: scale(0.96);
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 

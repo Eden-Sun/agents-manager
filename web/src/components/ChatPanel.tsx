@@ -1310,6 +1310,24 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const startBot = useStore((s) => s.startBot)
   const busy = useStore((s) => s.busy)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = dockRef.current
+    if (!el) return
+    const apply = () => {
+      const h = Math.round(el.getBoundingClientRect().height)
+      if (h > 0) {
+        document.documentElement.style.setProperty('--composer-bottom-offset', `${h}px`)
+      }
+    }
+    apply()
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(apply)
+    ro?.observe(el)
+    return () => {
+      ro?.disconnect()
+      document.documentElement.style.removeProperty('--composer-bottom-offset')
+    }
+  }, [botId])
   const mobileContextAnchor = useRef<HTMLButtonElement>(null)
   const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
   const [costOverviewOpen, setCostOverviewOpen] = useState(false)
@@ -1742,9 +1760,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null}
           <BackgroundJobsBar botId={botId} />
           {}
-          <PhoneOutboxTray />
-          {noAttach ? <div className="composer-cost" role="status" data-k="openai-no-attach">{t('OpenAI API bot 不支援附件')}</div> : null}
-          <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
+          <div className="chat-dock" ref={dockRef}>
+            <PhoneOutboxTray />
+            {noAttach ? <div className="composer-cost" role="status" data-k="openai-no-attach">{t('OpenAI API bot 不支援附件')}</div> : null}
+            <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
+          </div>
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}

@@ -1864,3 +1864,16 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **展開後成員精簡**：群集內成員隱藏重複的 kind 圖示、身份與模型晶片，成員列壓到約 34px，只保留名稱、燈號、未讀、停派與額度晶片。
 
 - **額度列與餘額群組不重疊（2026-11-23）**：桌機頂列的額度列量測要扣掉餘額群組寬度，群組晚出現或變寬時要重新量測（依賴含餘額可見性、觀察群組尺寸）；量不準時寧可收合，桌機的額度列也裁在自己的範圍內，不蓋到群組。
+
+## 手機版通知改為輸入列上方輕量膠囊（方案 A，2026-11-23，使用者）
+
+- **背景**：手機版（`width <= 640px`）原先將 `.notices` 垂直置中（`top: 0; bottom: 0; justify-content: center`），所有通知（含輕量 info）皆以白底厚邊卡片浮於畫面中央，打斷對話閱讀。核定採用「方案 A：輸入列上方輕量膠囊」。
+- **做法**：
+  - **位置與排版**：`.notices` 取消垂直置中，改為固定在底部輸入列上方（`bottom: calc(var(--composer-bottom-offset, 76px) + env(safe-area-inset-bottom))`，`align-items: center`，`z-index: 1100` 維持在 sheet 與確認框之上，`pointer-events: none` 穿透）。
+  - **輸入列高度追蹤**：在 `ChatPanel` 底部以 `chat-dock` 容器容納暫存列（`PhoneOutboxTray`）與輸入框（`Composer`），由 `ResizeObserver` 動態寫入 `--composer-bottom-offset`，避開輸入列展開、草稿列、圖片暫存 bar 與安全邊界，未進入對話時以 76px fallback。
+  - **輕量 info 膠囊視覺**：非 error、非 warn 採用柔和霧面深色膠囊（`rgba(15, 23, 42, 0.88)`，深色主題 `rgba(30, 41, 59, 0.92)`，搭配 `backdrop-filter: blur(10px)`、淺字 `#f8fafc`、極細邊框與 20px 圓角、去除厚重 border-left，淡入微滑動效）。
+  - **互動與關閉**：一般輕量 info 通知（無 action）支援點擊本體直接 dismiss；右側保留 ✕ 關閉按鈕並防止冒泡；error、warn 與帶 action 按鈕的通知維持清楚警示底色／邊框（圓角 14px，點擊本體不關閉）；`notice-top-center`（如部署逾時警示）保持頂部置中。
+  - **文案精簡**：立即部署提示精簡為「已送出部署 {short}，見左上角「部署中」」，同步更新中英文字典。
+- **測試**：
+  - `noticesDom.test.tsx`：驗證一般 info 點擊本體關閉、帶 action 與 error 通知點擊本體不關閉、關閉按鈕 stopPropagation。
+  - `deployNow.test.ts`：驗證精簡後的部署通知文案斷言。

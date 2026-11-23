@@ -119,8 +119,7 @@ const dict: Dict = {
   '{owner}正握著 {resource} 窗口（重建或換版進行中）': '{owner} is holding {resource} window (rebuild or restart in progress)',
   '有人': 'Someone',
   '有部署在跑': 'Deploy in progress',
-  '已送出部署 {short}。左上角會顯示「部署中」，換好後自動消失；等太久會跳出等待提示。':
-    'Deploy of {short} sent. The top-left shows "Deploying" and clears once swapped; a waiting notice appears if it takes too long.',
+  '已送出部署 {short}，見左上角「部署中」': 'Deploy of {short} sent; see "Deploying" at top left',
   '沒有再開一趟：{msg}': 'Not started again: {msg}',
   '不用部署：{msg}': 'No deploy needed: {msg}',
   '部署已拒絕：{msg}': 'Deploy rejected: {msg}',

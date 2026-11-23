@@ -131,26 +131,42 @@ export function Notices() {
           </div>
         )
       })}
-      {notices.map((n) => (
-        <div key={n.id} className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}`} role={n.kind === 'error' ? 'alert' : undefined}>
-          <span style={{ flex: 1 }}>{n.text}</span>
-          {n.action ? (
+      {notices.map((n) => {
+        const lightInfo = n.kind === 'info' && !n.action
+        return (
+          <div
+            key={n.id}
+            className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}`}
+            role={n.kind === 'error' ? 'alert' : undefined}
+            onClick={lightInfo ? () => dismiss(n.id) : undefined}
+          >
+            <span style={{ flex: 1 }}>{n.text}</span>
+            {n.action ? (
+              <button
+                type="button"
+                className="notice-action"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void n.action?.run()
+                  dismiss(n.id)
+                }}
+              >
+                {n.action.label}
+              </button>
+            ) : null}
             <button
               type="button"
-              className="notice-action"
-              onClick={() => {
-                void n.action?.run()
+              onClick={(e) => {
+                e.stopPropagation()
                 dismiss(n.id)
               }}
+              aria-label={t('關閉')}
             >
-              {n.action.label}
+              ✕
             </button>
-          ) : null}
-          <button type="button" onClick={() => dismiss(n.id)} aria-label={t('關閉')}>
-            ✕
-          </button>
-        </div>
-      ))}
+          </div>
+        )
+      })}
     </div>
   )
 }

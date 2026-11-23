@@ -37,6 +37,7 @@ test('送出的結果分得清楚：開始了／已經在跑／不用部署／�
   const ok = deployNowNotice({ short: 'bbbbbbbb', log_path: '/x/log' }, null)
   assert.equal(ok.level, 'info')
   assert.match(ok.text, /bbbbbbbb/)
+  assert.match(ok.text, /見左上角「部署中」/)
   assert.ok(!ok.text.includes('/x/log'), ok.text)
   const busy = deployNowNotice(null, new ApiError(409, { error: 'conflict', reason: 'deploy_in_progress', message: '已經有部署在跑' }, 'x'))
   assert.deepEqual([busy.level, /沒有再開一趟/.test(busy.text), /已經有部署在跑/.test(busy.text)], ['error', true, true])

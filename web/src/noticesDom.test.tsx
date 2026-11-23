@@ -58,3 +58,44 @@ test('#1920 重設測試 store 會清除通知的自動消失 timer', () => {
   resetStoreForTest()
   assert.equal(pendingDomTimers().length, 0, '重設 store 不應把通知 timer 留給下一個測試檔')
 })
+
+test('一般 info 通知點擊本體可關閉；error 與帶 action 通知點擊本體不關閉', async () => {
+  let actionRan = false
+  await mount(<Notices />)
+  await act(async () => {
+    useStore.getState().notify('info', '輕量訊息')
+    useStore.getState().notify('error', '錯誤訊息')
+    useStore.getState().notify('info', '動作訊息', { label: '重試', run: () => { actionRan = true } })
+  })
+
+  assert.equal(document.querySelectorAll('.notice').length, 3)
+
+  const infoEl = [...document.querySelectorAll<HTMLElement>('.notice')].find((el) => el.textContent?.includes('輕量訊息'))!
+  assert.ok(infoEl)
+  await act(async () => {
+    infoEl.click()
+  })
+  assert.equal([...document.querySelectorAll<HTMLElement>('.notice')].some((el) => el.textContent?.includes('輕量訊息')), false)
+
+  const errEl = [...document.querySelectorAll<HTMLElement>('.notice')].find((el) => el.textContent?.includes('錯誤訊息'))!
+  assert.ok(errEl)
+  await act(async () => {
+    errEl.click()
+  })
+  assert.equal([...document.querySelectorAll<HTMLElement>('.notice')].some((el) => el.textContent?.includes('錯誤訊息')), true)
+
+  const actionNoticeEl = [...document.querySelectorAll<HTMLElement>('.notice')].find((el) => el.textContent?.includes('動作訊息'))!
+  assert.ok(actionNoticeEl)
+  await act(async () => {
+    actionNoticeEl.click()
+  })
+  assert.equal(actionRan, false)
+  assert.equal([...document.querySelectorAll<HTMLElement>('.notice')].some((el) => el.textContent?.includes('動作訊息')), true)
+
+  const closeBtn = errEl.querySelector<HTMLButtonElement>('button[aria-label="關閉"]')!
+  assert.ok(closeBtn)
+  await act(async () => {
+    closeBtn.click()
+  })
+  assert.equal([...document.querySelectorAll<HTMLElement>('.notice')].some((el) => el.textContent?.includes('錯誤訊息')), false)
+})
