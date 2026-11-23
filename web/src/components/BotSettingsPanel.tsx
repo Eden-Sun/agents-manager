@@ -284,6 +284,16 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     }).catch(() => { if (active) setDeleteScheduleError(true) })
     return () => { active = false }
   }, [deleteOpen, bot?.project_id, botId])
+  const onDeleteClick = () => {
+    if (bot?.role !== 'executor' || !bot.project_id) {
+      setDeleteOpen(true)
+      return
+    }
+    void listSchedules(bot.project_id).then((rows) => {
+      if (rows.some((s) => s.bot_id === botId)) setDeleteOpen(true)
+      else void removeBot(botId)
+    }).catch(() => setDeleteOpen(true))
+  }
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
   const [loginSent, setLoginSent] = useState(false)
@@ -751,7 +761,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
         {}
         <div className="bs-danger bare">
-          <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
+          <button type="button" className="btn danger" onClick={onDeleteClick}>
             {t('刪除 Bot')}
           </button>
         </div>

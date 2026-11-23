@@ -112,7 +112,15 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             {paused ? t('恢復派工') : t('停派')}
           </button>
         ) : null}
-        <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>
+        <button
+          type="button"
+          className="head-menu-item danger"
+          role="menuitem"
+          onClick={() => {
+            if (bot.role === 'executor') void removeBot(botId)
+            else setDeleteOpen(true)
+          }}
+        >
           {t('刪除…')}
         </button>
       </HeadMoreMenu>
