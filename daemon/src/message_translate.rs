@@ -1658,6 +1658,14 @@ mod cost_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_heavy_english_counts_as_english_and_letterless_tables_do_not() {
+        let english = "Here is the summary of the run, all checks passed on the branch.\n\n| 項目 | 數量 | 比例 |\n|---:|---|---|\n| 1 | | 18 | **55.6%** |\n| 2 | | 9 | **44.4%** |\n\nThe remaining items are listed below for review.\n| 3 | | 7 | 12.0% |\n---";
+        assert!(is_mostly_english(english));
+        assert!(!is_mostly_english("這次的結果如下，所有檢查都已通過。\n| 項目 | 數量 |\n|---|---|\n| 1 | 18 |\n| 2 | 9 |"));
+        assert!(!is_mostly_english("|---:|---|\n| 1 | | 18 |\n| 2 | | 9 |\n---"));
+    }
     use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, MessagesRequest, Usage};
     use std::future::Future;
     use std::pin::Pin;

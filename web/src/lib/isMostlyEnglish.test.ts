@@ -30,3 +30,31 @@ test('繁中回覆夾英文指令／路徑：否', () => {
   assert.equal(isMostlyEnglish('已經修好了，請執行 `cd /home/ubuntu/project/am-wt-eng` 並確認狀態。'), false)
 })
 
+test('英文說明加多張數字表格（分隔列、數字列不算）：是', () => {
+  const text = [
+    'Here is the summary of the run, all checks passed on the branch.',
+    '',
+    '| 項目 | 數量 | 比例 |',
+    '|---:|---|---|',
+    '| 1 | | 18 | **55.6%** |',
+    '| 2 | | 9 | **44.4%** |',
+    '',
+    'The remaining items are listed below for review.',
+    '| 3 | | 7 | 12.0% |',
+    '---',
+  ].join('\n')
+  assert.equal(isMostlyEnglish(text), true)
+})
+test('中文說明加數字表格：否', () => {
+  const text = [
+    '這次的結果如下，所有檢查都已通過。',
+    '| 項目 | 數量 |',
+    '|---|---|',
+    '| 1 | 18 |',
+    '| 2 | 9 |',
+  ].join('\n')
+  assert.equal(isMostlyEnglish(text), false)
+})
+test('純表格、無字母：否', () => {
+  assert.equal(isMostlyEnglish('|---:|---|\n| 1 | | 18 |\n| 2 | | 9 |\n---'), false)
+})

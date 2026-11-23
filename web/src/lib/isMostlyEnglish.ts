@@ -12,10 +12,11 @@ export function isMostlyEnglish(text: string): boolean {
   for (const line of lines) {
     const trimmedLine = line.trim();
     if (trimmedLine === '') continue;
-    nonEmptyLineCount++;
 
     const latin = (trimmedLine.match(/[A-Za-z]/g) ?? []).length;
     const cjk = (trimmedLine.match(/[぀-ヿ㐀-鿿가-힯]/g) ?? []).length;
+    if (latin === 0 && cjk === 0) continue;
+    nonEmptyLineCount++;
 
     if (latin > 10 * cjk) {
       englishDominantLineCount++;
