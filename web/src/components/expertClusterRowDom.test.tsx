@@ -113,7 +113,7 @@ test('收合列也顯示 kind 圖示、身份、模型與強度（取第一顆�
   assert.ok(identity && /cc1/.test(identity.textContent ?? ''), '身份 cc1')
   const model = row.querySelector('.model-tag')
   assert.ok(model && /hai-5\.5/.test(model.textContent ?? ''), '模型 hai-5.5')
-  assert.ok(model && /Medium/.test(model.textContent ?? ''), '強度 Medium')
+  assert.equal(model?.querySelector('.model-tag-extra')?.textContent, 'M', '強度縮寫 M')
   assert.equal(row.querySelector('.bot-cluster-count')!.getAttribute('title'), '共 3 顆：1 執行中 · 2 閒置')
 })
 
@@ -381,4 +381,53 @@ test('執行者區標頭可收合，顯示總燈號，狀態記在 localStorage'
   await click(head)
   await settle()
   assert.ok(clusterRow())
+})
+
+test('群集卡片包裹結構、kind 色條標記與單顆 bot 在卡外', async () => {
+  seed()
+  await mount(<Sidebar />)
+  await settle()
+  const card = document.querySelector<HTMLElement>('.bot-cluster-card')!
+  assert.ok(card)
+  assert.equal(card.getAttribute('data-cluster'), 'haiku')
+  assert.equal(card.getAttribute('data-kind'), 'claude')
+  assert.ok(card.classList.contains('kind-claude'))
+  assert.ok(card.querySelector('.bot-cluster-row'))
+  const soloRow = document.querySelector<HTMLElement>('.bot-row[data-bot-id="solo"]')!
+  assert.ok(soloRow)
+  assert.equal(card.contains(soloRow), false)
+  const listItems = [...document.querySelectorAll<HTMLElement>('.bot-list > [role="listitem"]')]
+  const cardIndex = listItems.indexOf(card)
+  const soloIndex = listItems.indexOf(soloRow)
+  assert.ok(cardIndex >= 0 && soloIndex > cardIndex)
+})
+
+test('計數三種狀態：有執行中、只有閒置、全停', async () => {
+  seed()
+  await mount(<Sidebar />)
+  await settle()
+  let count = document.querySelector<HTMLElement>('.bot-cluster-count')!
+  assert.deepEqual(
+    [...count.querySelectorAll('.bot-cluster-stat-item')].map(
+      (e) => `${e.querySelector('.lamp')!.className.match(/lamp-(\w+)/)![1]}:${e.textContent}`,
+    ),
+    ['working:1', 'idle:2'],
+  )
+
+  useStore.setState({
+    runs: { h1: run('idle'), h2: run('idle'), h3: run('idle') },
+  } as never)
+  await settle()
+  count = document.querySelector<HTMLElement>('.bot-cluster-count')!
+  const idleItems = [...count.querySelectorAll('.bot-cluster-stat-item')]
+  assert.equal(idleItems.length, 1)
+  assert.ok(idleItems[0].querySelector('.lamp-idle'))
+  assert.equal(idleItems[0].textContent, '3/3')
+
+  useStore.setState({ runs: {} } as never)
+  await settle()
+  count = document.querySelector<HTMLElement>('.bot-cluster-count')!
+  const stopped = count.querySelector('.bot-cluster-count-stopped')
+  assert.ok(stopped)
+  assert.equal(stopped.textContent, '0/3')
 })

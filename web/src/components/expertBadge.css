@@ -69,6 +69,62 @@
   padding: 2px 6px 2px 4px;
 }
 
+.bot-cluster-card {
+  --cluster-kind-color: var(--border);
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cluster-kind-color);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+
+.bot-cluster-card.kind-claude {
+  --cluster-kind-color: var(--kind-claude);
+}
+
+.bot-cluster-card.kind-codex {
+  --cluster-kind-color: var(--kind-codex);
+}
+
+.bot-cluster-card.kind-grok {
+  --cluster-kind-color: var(--kind-grok);
+}
+
+.bot-cluster-card.kind-agy {
+  --cluster-kind-color: var(--kind-agy);
+}
+
+.bot-cluster-card.manager-disabled {
+  opacity: 0.6;
+}
+
+.bot-cluster-card .bot-row.bot-cluster-row {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  min-height: 38px;
+  padding: 2px 6px;
+}
+
+.bot-cluster-card .bot-row.bot-cluster-row:hover {
+  background: var(--bg-hover);
+}
+
+.bot-cluster-card .bot-cluster-members {
+  border-top: 1px solid var(--border);
+}
+
+.bot-cluster-members .bot-row.expert-member {
+  border-left: 0;
+}
+
+.bot-cluster-card + .bot-row:not(.bot-cluster-card),
+.bot-cluster-paused-fold + .bot-row:not(.bot-cluster-card) {
+  margin-top: 8px;
+}
+
 .bot-row.bot-cluster-row .bot-cluster-main {
   min-height: 0;
   padding-top: 0;
@@ -479,33 +535,70 @@
 
 .bot-row.bot-cluster-row .bot-cluster-main {
   gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.bot-row.bot-cluster-row .bot-ident {
+  flex-shrink: 0;
 }
 
 .bot-row.bot-cluster-row .bot-main {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .bot-row.bot-cluster-row .bot-sub {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bot-row.bot-cluster-row .bot-sub .identity-badge {
+  flex-shrink: 0;
 }
 
 .bot-row.bot-cluster-row .bot-sub .model-tag {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
 }
 
 .bot-row.bot-cluster-row .bot-sub .bot-cluster-name {
   font-size: 12px;
   font-weight: 600;
   line-height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bot-row.bot-cluster-row .bot-cluster-count {
   gap: 4px;
+  font-size: 11.5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.bot-row.bot-cluster-row .bot-cluster-chip-wrap {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.bot-cluster-count-stopped {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
   font-size: 11.5px;
 }
 

@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { useDismiss } from '../lib/useDismiss'
 import { useShallow } from 'zustand/react/shallow'
-import { LOCAL_HOST, type Bot } from '../api/types'
+import { LOCAL_HOST, type Bot, type Lamp } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { t, useT } from '../lib/i18n'
 import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
@@ -28,6 +28,43 @@ function writeOpen(key: string, open: boolean) {
     window.localStorage.setItem(key, open ? '1' : '0')
   } catch {
   }
+}
+
+function renderClusterStat(lamps: readonly Lamp[], total: number) {
+  const counts = clusterStatCounts(lamps)
+  const workingCount = counts.find((c) => c.stat === 'working')?.n ?? 0
+  const idleCount = counts.find((c) => c.stat === 'idle')?.n ?? 0
+  const availableCount = counts
+    .filter((c) => c.stat === 'working' || c.stat === 'idle' || c.stat === 'blocked' || c.stat === 'starting')
+    .reduce((sum, c) => sum + c.n, 0)
+
+  if (availableCount === 0) {
+    return <span className="bot-cluster-count-stopped">{`0/${total}`}</span>
+  }
+
+  if (workingCount > 0) {
+    return (
+      <>
+        <span className="bot-cluster-stat-item">
+          <span className="lamp lamp-working bot-cluster-dot" aria-hidden="true" />
+          {workingCount}
+        </span>
+        {idleCount > 0 ? (
+          <span className="bot-cluster-stat-item">
+            <span className="lamp lamp-idle bot-cluster-dot" aria-hidden="true" />
+            {idleCount}
+          </span>
+        ) : null}
+      </>
+    )
+  }
+
+  return (
+    <span className="bot-cluster-stat-item">
+      <span className="lamp lamp-idle bot-cluster-dot" aria-hidden="true" />
+      {`${availableCount}/${total}`}
+    </span>
+  )
 }
 
 function ClusterManagerUseChip({ name, members, on, busy }: { name: string; members: readonly Bot[]; on: number; busy: boolean }) {
@@ -162,8 +199,13 @@ export function ExpertClusterRow({
   const listId = `bot-cluster-${projectId}-${name}`
 
   return (
-    <>
-      <div className={`bot-row bot-cluster-row${on === 0 && members.length > 0 ? ' manager-disabled' : ''}`} role="listitem" data-cluster={name}>
+    <div
+      className={`bot-cluster-card kind-${first?.kind ?? 'unknown'}${on === 0 && members.length > 0 ? ' manager-disabled' : ''}`}
+      role="listitem"
+      data-cluster={name}
+      data-kind={first?.kind ?? 'unknown'}
+    >
+      <div className={`bot-row bot-cluster-row${on === 0 && members.length > 0 ? ' manager-disabled' : ''}`}>
         <button
           type="button"
           className="bot-cluster-main"
@@ -190,7 +232,11 @@ export function ExpertClusterRow({
                   unknown={identityUnknown}
                 />
               ) : null}
-              {first ? <ModelTag botId={first.id} fallback={<span className="bot-cluster-name">{name}</span>} /> : <span className="bot-cluster-name">{name}</span>}
+              {first ? (
+                <ModelTag botId={first.id} short fallback={<span className="bot-cluster-name">{name}</span>} />
+              ) : (
+                <span className="bot-cluster-name">{name}</span>
+              )}
             </span>
           </span>
           <span
@@ -199,12 +245,7 @@ export function ExpertClusterRow({
             aria-label={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
             title={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
           >
-            {clusterStatCounts(lamps).map(({ stat, n }) => (
-              <span key={stat} className="bot-cluster-stat-item">
-                <span className={`lamp lamp-${stat === 'stopped' ? 'offline' : stat} bot-cluster-dot`} aria-hidden="true" />
-                {n}
-              </span>
-            ))}
+            {renderClusterStat(lamps, members.length)}
           </span>
         </button>
         <ClusterManagerUseChip name={name} members={members} on={on} busy={busyPatch} />
@@ -214,6 +255,6 @@ export function ExpertClusterRow({
           {children}
         </div>
       ) : null}
-    </>
+    </div>
   )
 }

@@ -1868,6 +1868,16 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 
 ## 手機版通知改為輸入列上方輕量膠囊（方案 A，2026-11-23，使用者）
 
+- **背景**：手機直立（390px）時通知（blocked / child blocked / completion）橫幅佔滿頂部，常駐擠壓聊天歷史高度；且通知橫幅的「點擊查看」與頂部標題列易誤觸。
+- **決策**：手機版將頂部通知橫幅移至輸入列（Composer）正上方，改為輕量單行膠囊；不佔頂部空間，點擊展開通知詳情，底層對話歷史不受干擾。
+
+## 側欄 Worker 區執行者群集卡片化與 kind 色條（2026-11-23，使用者）
+
+- **群集改為卡片**：收合與展開皆包成一張卡片（中性微底色、1px border、圓角 8px、左側 3px kind 色條、卡片間距 6px）；展開時標題與成員之間以 1px 細分隔線分開，成員維持 32–34px 緊湊列高。
+- **標題列單行不折行**：kind icon、粗體模型簡寫／群集名、帳號 chip、effort 縮寫 M／H／L／XH。名稱具有 `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`，右側計數與操作選單（⋯）`flex-shrink: 0; white-space: nowrap`，260px 桌機與 390px 手機側欄皆不折行或重疊。
+- **精簡計數**：預設顯示「可用／總數」（如 `● 2/4`，可用＝閒置＋執行中）；有執行中時顯示藍點＋執行中數、綠點＋閒置數；全部停止時顯示淡灰 `0/4`；`aria-label` 保留完整計數描述。
+- **單顆 bot 聚集下方**：未分群的單顆 bot 排在所有群集卡（含已停派折疊區）下方，上方留 8px，不包框，維持原本樣式。
+
 - **背景**：手機版（`width <= 640px`）原先將 `.notices` 垂直置中（`top: 0; bottom: 0; justify-content: center`），所有通知（含輕量 info）皆以白底厚邊卡片浮於畫面中央，打斷對話閱讀。核定採用「方案 A：輸入列上方輕量膠囊」。
 - **做法**：
   - **位置與排版**：`.notices` 取消垂直置中，改為固定在底部輸入列上方（`bottom: calc(var(--composer-bottom-offset, 76px) + env(safe-area-inset-bottom))`，`align-items: center`，`z-index: 1100` 維持在 sheet 與確認框之上，`pointer-events: none` 穿透）。

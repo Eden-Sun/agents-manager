@@ -51,14 +51,15 @@ export function ExpertExecutorSection({
 
   const groups = groupClusterItems(items)
   const clusters = groups.filter((e) => e.kind === 'cluster')
+  const singles = groups.filter((e) => e.kind === 'single')
   const hasLive = clusters.some((e) => e.kind === 'cluster' && !clusterIsPaused(e.members))
   const hasPaused = clusters.some((e) => e.kind === 'cluster' && clusterIsPaused(e.members))
   const fold = hasLive && hasPaused
   const isPaused = (e: ExpertClusterItem<Bot>) => e.kind === 'cluster' && clusterIsPaused(e.members)
-  const sorted = sortClusterEntries(groups, lampsById)
-  const main = fold ? sorted.filter((e) => !isPaused(e)) : sorted
-  const paused = fold ? sorted.filter(isPaused) : []
-  const pausedBots = paused.reduce((n, e) => n + (e.kind === 'cluster' ? e.members.length : 0), 0)
+  const sortedClusters = sortClusterEntries(clusters, lampsById)
+  const mainClusters = fold ? sortedClusters.filter((e) => !isPaused(e)) : sortedClusters
+  const pausedClusters = fold ? sortedClusters.filter(isPaused) : []
+  const pausedBots = pausedClusters.reduce((n, e) => n + (e.kind === 'cluster' ? e.members.length : 0), 0)
 
   const expanded = open || Boolean(query)
   const foldOpen = pausedOpen || Boolean(query)
@@ -88,19 +89,20 @@ export function ExpertExecutorSection({
       <ExpertSectionHeader title={title} abbr={abbr} collapsible open={expanded} onToggle={toggleSection} lamps={lamps} />
       {expanded ? (
         <>
-          {main.map(renderEntry)}
-          {paused.length > 0 ? (
+          {mainClusters.map(renderEntry)}
+          {pausedClusters.length > 0 ? (
             <>
               <button type="button" className="bot-cluster-paused-fold" aria-expanded={foldOpen} onClick={togglePaused}>
                 <span className="bot-cluster-caret" aria-hidden="true">{foldOpen ? '▾' : '▸'}</span>
                 <NoDispatchIcon />
                 <span className="bot-cluster-paused-label">
-                  {t('已停派（{clusters} 群集 · {bots} 顆）', { clusters: paused.length, bots: pausedBots })}
+                  {t('已停派（{clusters} 群集 · {bots} 顆）', { clusters: pausedClusters.length, bots: pausedBots })}
                 </span>
               </button>
-              {foldOpen ? paused.map(renderEntry) : null}
+              {foldOpen ? pausedClusters.map(renderEntry) : null}
             </>
           ) : null}
+          {singles.map(renderEntry)}
         </>
       ) : null}
     </>
