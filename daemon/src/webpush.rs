@@ -459,6 +459,7 @@ struct Presence {
     visible: bool,
     /// 回報當下距離上次互動幾秒。
     idle_secs: u64,
+    mobile: bool,
     received: std::time::Instant,
 }
 
@@ -488,6 +489,14 @@ fn user_is_present() -> bool {
     let g = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
     g.as_ref().is_some_and(|m| {
         m.values().any(|p| p.visible && p.received.elapsed() < PRESENCE_STALE && p.idle_secs + p.received.elapsed().as_secs() <= PRESENCE_ACTIVE_SECS)
+    })
+}
+
+/// 任一手機版網頁正處於前景（可見且回報未逾期 90 秒；不要求選中同一顆 bot、不看 idle_secs）。
+fn phone_in_foreground() -> bool {
+    let g = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().is_some_and(|m| {
+        m.values().any(|p| p.mobile && p.visible && p.received.elapsed() < PRESENCE_STALE)
     })
 }
 
@@ -558,7 +567,7 @@ fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Val
 }
 
 async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, read: ReadTarget, line: impl std::future::Future<Output = String>) {
-    if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id)) {
+    if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id) || phone_in_foreground()) {
         return;
     }
     tokio::time::sleep(Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed))).await;
@@ -910,7 +919,7 @@ pub(crate) async fn handle_incident(
     match kind {
         "host_disconnected" => {
             if status == "open" {
-                if user_is_present() {
+                if user_is_present() || phone_in_foreground() {
                     return false;
                 }
                 if !notifier.admit_open(incident_id, resource) {
@@ -955,7 +964,7 @@ pub(crate) async fn handle_incident(
                     return false;
                 }
             }
-            if user_is_watching(resource) {
+            if user_is_watching(resource) || phone_in_foreground() {
                 return false;
             }
             let name = inc.pointer("/detail/name")
@@ -1627,7 +1636,7 @@ pub(crate) fn should_push_system_alert(enabled: bool, has_subs: bool, watching: 
 /// 新事件寫進 inbox 後呼叫（am-base 的 observer）：不阻塞寫入端，去重已由 inbox 的 event_key 保證。
 pub(crate) fn spawn_system_alert(app: &Arc<App>, kind: &str, payload: &Value) {
     let Some(notice) = system_alert_notice(kind, payload) else { return };
-    if !should_push_system_alert(setting_enabled(&app.data_dir, "ops"), !load_subs(&app.data_dir).is_empty(), user_is_present()) {
+    if !should_push_system_alert(setting_enabled(&app.data_dir, "ops"), !load_subs(&app.data_dir).is_empty(), user_is_present() || phone_in_foreground()) {
         return;
     }
     let app = app.clone();
@@ -1782,6 +1791,8 @@ pub(crate) struct PresenceInput {
     visible: bool,
     #[serde(default)]
     idle_secs: u64,
+    #[serde(default)]
+    mobile: bool,
 }
 
 /// 網頁回報「我正看著哪顆 bot」：只存記憶體，供推播抑制用。
@@ -1790,7 +1801,7 @@ pub(crate) async fn post_presence(Extension(p): Extension<RequestPrincipal>, Jso
     if input.client_id.is_empty() || input.client_id.len() > 64 {
         return Err(bad("invalid_client_id"));
     }
-    record_presence(&input.client_id, Presence { bot_id: input.bot_id, visible: input.visible, idle_secs: input.idle_secs, received: std::time::Instant::now() });
+    record_presence(&input.client_id, Presence { bot_id: input.bot_id, visible: input.visible, idle_secs: input.idle_secs, mobile: input.mobile, received: std::time::Instant::now() });
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2074,7 +2085,7 @@ pub(crate) mod tests {
     fn presence_requires_visible_selected_and_recent() {
         let _ = SENDER_TESTS.try_lock();
         clear_presence();
-        let at = |bot: Option<&str>, visible, idle| Presence { bot_id: bot.map(String::from), visible, idle_secs: idle, received: std::time::Instant::now() };
+        let at = |bot: Option<&str>, visible, idle| Presence { bot_id: bot.map(String::from), visible, idle_secs: idle, mobile: false, received: std::time::Instant::now() };
         record_presence("c1", at(Some("b1"), true, 5));
         assert!(user_is_watching("b1"));
         assert!(!user_is_watching("b2"), "選中別顆");
@@ -2200,7 +2211,7 @@ pub(crate) mod tests {
         handle_event(&app, &n2, &turn_ev(&bot_id, "t4", "completed")).await;
         assert!(rx.try_recv().is_err(), "開關關了不推");
         write_private(&settings_path(&app.data_dir), br#"{"main_bots":true}"#).unwrap();
-        record_presence("c", Presence { bot_id: Some(bot_id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
+        record_presence("c", Presence { bot_id: Some(bot_id.clone()), visible: true, idle_secs: 1, mobile: false, received: std::time::Instant::now() });
         handle_event(&app, &n2, &turn_ev(&bot_id, "t5", "completed")).await;
         assert!(rx.try_recv().is_err(), "正在看不推");
         clear_presence();
@@ -2502,7 +2513,7 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err(), "other_bots 關閉時不推");
         write_private(&settings_path(&app.data_dir), br#"{"other_bots":true}"#).unwrap();
 
-        record_presence("c", Presence { bot_id: Some(bot2.id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
+        record_presence("c", Presence { bot_id: Some(bot2.id.clone()), visible: true, idle_secs: 1, mobile: false, received: std::time::Instant::now() });
         let n3 = Arc::new(MainNotifier::default());
         *n3.settle.lock().unwrap() = Some(Duration::ZERO);
         handle_event(&app, &n3, &ev(&bot2.id, "blocked")).await;
@@ -2682,7 +2693,7 @@ pub(crate) mod tests {
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
         assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
-        assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0, mobile: false })).await, Err(LcError::Forbidden(_))));
     }
 
     #[test]
@@ -2715,11 +2726,45 @@ pub(crate) mod tests {
     fn any_page_watching_counts_visible_recent_pages_only() {
         clear_presence();
         assert!(!user_is_present());
-        record_presence("c1", Presence { bot_id: None, visible: false, idle_secs: 0, received: std::time::Instant::now() });
+        record_presence("c1", Presence { bot_id: None, visible: false, idle_secs: 0, mobile: false, received: std::time::Instant::now() });
         assert!(!user_is_present(), "隱藏的分頁不算");
-        record_presence("c2", Presence { bot_id: None, visible: true, idle_secs: 600, received: std::time::Instant::now() });
+        record_presence("c2", Presence { bot_id: None, visible: true, idle_secs: 600, mobile: false, received: std::time::Instant::now() });
         assert!(!user_is_present(), "太久沒互動不算");
-        record_presence("c3", Presence { bot_id: Some("b9".into()), visible: true, idle_secs: 5, received: std::time::Instant::now() });
+        record_presence("c3", Presence { bot_id: Some("b9".into()), visible: true, idle_secs: 5, mobile: false, received: std::time::Instant::now() });
+        assert!(user_is_present());
+        clear_presence();
+    }
+
+    #[test]
+    fn phone_in_foreground_suppression_and_desktop_fallback() {
+        let _ = SENDER_TESTS.try_lock();
+        clear_presence();
+        let parsed: PresenceInput = serde_json::from_str(r#"{"client_id":"c","visible":true,"idle_secs":0}"#).unwrap();
+        assert!(!parsed.mobile);
+
+        record_presence("m1", Presence { bot_id: None, visible: true, idle_secs: 300, mobile: true, received: std::time::Instant::now() });
+        assert!(phone_in_foreground());
+        assert!(!user_is_watching("b1"));
+        assert!(!user_is_present());
+
+        let n = MainNotifier::default();
+        assert!(!n.admit("b1", MainKind::Done, "t1", user_is_watching("b1") || phone_in_foreground()));
+        clear_presence();
+        assert!(!n.admit("b1", MainKind::Done, "t1", false), "被抑制的回合不補送");
+
+        record_presence("m2", Presence { bot_id: None, visible: false, idle_secs: 0, mobile: true, received: std::time::Instant::now() });
+        assert!(!phone_in_foreground());
+        clear_presence();
+
+        let expired = std::time::Instant::now().checked_sub(PRESENCE_STALE + Duration::from_secs(1)).unwrap();
+        record_presence("m3", Presence { bot_id: None, visible: true, idle_secs: 0, mobile: true, received: expired });
+        assert!(!phone_in_foreground());
+        clear_presence();
+
+        record_presence("d1", Presence { bot_id: Some("b1".into()), visible: true, idle_secs: 5, mobile: false, received: std::time::Instant::now() });
+        assert!(!phone_in_foreground());
+        assert!(user_is_watching("b1"));
+        assert!(!user_is_watching("b2"));
         assert!(user_is_present());
         clear_presence();
     }

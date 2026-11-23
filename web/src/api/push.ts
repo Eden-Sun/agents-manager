@@ -46,6 +46,6 @@ export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<Pu
   return (await rawTransport.request('PUT', '/push/settings', s)) as PushSettingsValue
 }
 
-export async function reportPresence(p: { client_id: string; bot_id: string | null; visible: boolean; idle_secs: number }): Promise<void> {
+export async function reportPresence(p: { client_id: string; bot_id: string | null; visible: boolean; idle_secs: number; mobile?: boolean }): Promise<void> {
   await rawTransport.request('POST', '/push/presence', p)
 }

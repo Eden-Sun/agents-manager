@@ -1,4 +1,5 @@
 import { deletePushSubscription, getVapidKey, reportPresence, savePushSubscription } from '../api/push'
+import { PHONE_QUERY } from '../hooks/useMediaQuery'
 
 export type PushSupport = { ok: true } | { ok: false; reason: 'insecure' | 'unsupported' | 'ios-home-screen' }
 
@@ -96,6 +97,11 @@ export function installPushClickBridge(): () => void {
   return () => navigator.serviceWorker.removeEventListener('message', onMessage)
 }
 
+export function isMobilePresence(win: { matchMedia?: (query: string) => { matches: boolean } } = typeof window !== 'undefined' ? window : {}): boolean {
+  if (typeof win?.matchMedia !== 'function') return false
+  return win.matchMedia(PHONE_QUERY).matches || (win.matchMedia('(pointer: coarse)').matches && win.matchMedia('(max-width: 768px)').matches)
+}
+
 export function installPresenceReporter(getBotId: () => string | null): () => void {
   if (typeof document === 'undefined') return () => {}
   const id = (() => {
@@ -110,17 +116,28 @@ export function installPresenceReporter(getBotId: () => string | null): () => vo
   const touch = () => {
     lastInput = Date.now()
   }
-  const send = () => {
-    void reportPresence({ client_id: id, bot_id: getBotId(), visible: document.visibilityState === 'visible', idle_secs: Math.round((Date.now() - lastInput) / 1000) }).catch(() => {})
+  const send = (forceVisible?: boolean) => {
+    const visible = forceVisible !== undefined ? forceVisible : document.visibilityState === 'visible'
+    void reportPresence({
+      client_id: id,
+      bot_id: getBotId(),
+      visible,
+      idle_secs: Math.round((Date.now() - lastInput) / 1000),
+      mobile: isMobilePresence(),
+    }).catch(() => {})
   }
   const evs = ['pointerdown', 'keydown', 'touchstart', 'wheel'] as const
   evs.forEach((e) => window.addEventListener(e, touch, { passive: true }))
-  document.addEventListener('visibilitychange', send)
-  const timer = window.setInterval(send, 20_000)
+  const onVisibilityChange = () => send()
+  const onPageHide = () => send(false)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('pagehide', onPageHide)
+  const timer = window.setInterval(onVisibilityChange, 20_000)
   send()
   return () => {
     evs.forEach((e) => window.removeEventListener(e, touch))
-    document.removeEventListener('visibilitychange', send)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.removeEventListener('pagehide', onPageHide)
     window.clearInterval(timer)
   }
 }
