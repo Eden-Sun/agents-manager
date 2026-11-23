@@ -467,6 +467,11 @@ export default {
   '每回合時間：{secs} 秒（1–3600） · API 呼叫：{calls} 次（1–64）': 'Turn time: {secs} s (1–3600) · API calls: {calls} (1–64)',
   '修改每回合上限': 'Edit turn limits',
   '下一回合起生效；時間到會先請模型收尾寫摘要，不是直接中止。': 'Applies from the next turn; at the time limit the model is asked to wrap up with a summary instead of being cut off.',
+  '全部刪除…': 'Delete all…',
+  '刪除整組群集': 'Delete entire cluster',
+  '全部刪除': 'Delete all',
+  '確定刪除 {name} 群集的全部 {n} 顆 Bot？會停止並關閉它們的終端 pane，設定從 config.toml 移除；對話紀錄會保留。':
+    'Delete all {n} bots in the {name} cluster? Their terminal panes will be stopped and closed and entries removed from config.toml; chat history is kept.',
   '專案中的 claude-api bot：': 'Claude-api bots in project: ',
   '目前專案尚未建立 claude-api bot；可在側欄「新增 Bot」選擇「claude-api」建立。': 'No claude-api bot in this project yet. You can create one from “Add Bot” in the sidebar.',
 } satisfies Dict

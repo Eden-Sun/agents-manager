@@ -7,6 +7,7 @@ import { t, useT } from '../lib/i18n'
 import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
 import { clusterStatCounts, clusterStatText } from '../lib/expertClusters'
 import { botLamp, identitiesOfHost, projectHostName, useStore } from '../store/store'
+import { ConfirmDialog } from './ConfirmDialog'
 import { IdentityBadge } from './IdentitiesPanel'
 import { MoreIcon, NoDispatchIcon } from './Icons'
 import { KindTag } from './KindTag'
@@ -29,9 +30,10 @@ function writeOpen(key: string, open: boolean) {
   }
 }
 
-function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[]; on: number; busy: boolean }) {
+function ClusterManagerUseChip({ name, members, on, busy }: { name: string; members: readonly Bot[]; on: number; busy: boolean }) {
   useT()
   const [open, setOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const wrapRef = useRef<HTMLSpanElement>(null)
   const total = members.length
   const off = total - on
@@ -48,6 +50,12 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
       const fail = rs.filter((r) => r.status === 'rejected' || r.value === null).length
       if (fail > 0) useStore.getState().notify('error', t('{ok} 顆已更新，{fail} 顆沒成功', { ok: targets.length - fail, fail }))
     })
+  }
+
+  const deleteAll = () => {
+    setDeleteOpen(false)
+    const remove = useStore.getState().removeBot
+    void Promise.allSettled(members.map((m) => remove(m.id)))
   }
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()
@@ -87,9 +95,23 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
         <span className="bot-unset-role-menu bot-cluster-chip-menu" role="menu">
           <button type="button" role="menuitem" disabled={allOn} onClick={() => setAll(true)}>{t('全部允許派工')}</button>
           <button type="button" role="menuitem" disabled={on === 0} onClick={() => setAll(false)}>{t('全部停派')}</button>
+          <button type="button" className="bot-cluster-delete" role="menuitem" onClick={() => { setOpen(false); setDeleteOpen(true) }}>{t('全部刪除…')}</button>
           <span className="bot-cluster-chip-note">{t('停派：管理者不能派工、啟動或重啟；Bot 本身不會停。')}</span>
         </span>
       ) : null}
+      <ConfirmDialog
+        open={deleteOpen}
+        title={t('刪除整組群集')}
+        body={t('確定刪除 {name} 群集的全部 {n} 顆 Bot？會停止並關閉它們的終端 pane，設定從 config.toml 移除；對話紀錄會保留。', {
+          name,
+          n: total,
+        })}
+        confirmLabel={t('全部刪除')}
+        danger
+        width={360}
+        onCancel={() => setDeleteOpen(false)}
+        onConfirm={deleteAll}
+      />
     </span>
   )
 }
@@ -117,7 +139,7 @@ export function ExpertClusterRow({
 
   const ids = members.map((m) => m.id)
   const lamps = useStore(useShallow((s) => ids.map((id) => botLamp(s, id))))
-  const busyPatch = useStore(useShallow((s) => ids.some((id) => Boolean(s.busy[`patch:${id}`]))))
+  const busyPatch = useStore(useShallow((s) => ids.some((id) => Boolean(s.busy[`patch:${id}`] || s.busy[`remove:${id}`]))))
 
   const first = members[0]
   const firstId = first?.id ?? ''
@@ -185,7 +207,7 @@ export function ExpertClusterRow({
             ))}
           </span>
         </button>
-        <ClusterManagerUseChip members={members} on={on} busy={busyPatch} />
+        <ClusterManagerUseChip name={name} members={members} on={on} busy={busyPatch} />
       </div>
       {open ? (
         <div id={listId} className="bot-cluster-members" role="list">

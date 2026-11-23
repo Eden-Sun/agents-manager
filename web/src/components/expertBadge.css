@@ -458,6 +458,11 @@
   cursor: default;
 }
 
+.bot-cluster-chip-menu .bot-cluster-delete {
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+}
+
 .bot-cluster-chip-note {
   padding: 5px 10px;
   max-width: 220px;

@@ -180,7 +180,7 @@ test('點整組選單只開選單：不送 PATCH、不展開群集；Esc 關閉'
   await click(menuBtn())
   await settle()
   assert.equal(menuBtn().getAttribute('aria-expanded'), 'true')
-  assert.equal(menuItems().length, 2)
+  assert.equal(menuItems().length, 3)
   assert.equal(patchesOf().length, 0)
   assert.equal(clusterRow()!.querySelector('.bot-cluster-main')!.getAttribute('aria-expanded'), 'false')
   menuBtn().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -271,6 +271,35 @@ test('patch 進行中晶片 disabled', async () => {
   await mount(<Sidebar />)
   await settle()
   assert.equal(menuBtn().disabled, true)
+})
+
+test('群集選單「全部刪除…」：先跳確認框、取消不刪，確認後對每顆成員送 DELETE', async () => {
+  seed([true, true, true])
+  requests = fakeApi((req) => (req.method === 'DELETE' ? {} : undefined))
+  await mount(<Sidebar />)
+  await settle()
+  await click(menuBtn())
+  await settle()
+  await click(menuItems()[2])
+  await settle()
+  const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]')!
+  assert.ok(dialog, '應跳出刪除確認框')
+  assert.match(dialog.textContent ?? '', /haiku.*3/)
+  assert.equal(requests.filter((r) => r.method === 'DELETE').length, 0)
+  const cancel = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === '取消')!
+  await click(cancel)
+  await settle()
+  assert.equal(requests.filter((r) => r.method === 'DELETE').length, 0)
+
+  await click(menuBtn())
+  await settle()
+  await click(menuItems()[2])
+  await settle()
+  const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find((b) => b.textContent === '全部刪除')!
+  await click(confirm)
+  await settle()
+  const deleted = new Set(requests.filter((r) => r.method === 'DELETE').map((r) => r.path.split('/').pop()))
+  assert.deepEqual(deleted, new Set(['h1', 'h2', 'h3']))
 })
 
 test('sortClusterEntries：有活躍成員的群集排前面，全停止的排後面，單顆維持最後', () => {
