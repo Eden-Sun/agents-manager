@@ -83,3 +83,37 @@ it('外框寬度不變，資料晚到與字型載入完成仍重新量內容下�
     else Reflect.deleteProperty(document, 'fonts')
   }
 })
+
+it('收合後仍橫向溢出時標記邊緣漸層，捲動後更新左右漸層', async () => {
+  mockApi(sharedMock)
+  await useStore.getState().refreshState()
+  await useStore.getState().loadQuota()
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+  const savedSw = Object.getOwnPropertyDescriptor(proto, 'scrollWidth')
+  Object.defineProperty(proto, 'scrollWidth', { configurable: true, get: () => 400 })
+  const restore = squeezeLayout()
+  try {
+    await mount(<QuotaStrip />)
+    await until(() => document.querySelector('.quota-open.collapsed') !== null, '放不下時收合')
+    const row = document.querySelector<HTMLElement>('.quota-open.collapsed')!
+    assert.equal(row.getAttribute('data-fade-right'), '1', '一開始右側有漸層')
+    assert.equal(row.getAttribute('data-fade-left'), null, '一開始左側無漸層')
+    await act(() => {
+      row.scrollLeft = 150
+      row.dispatchEvent(new Event('scroll'))
+    })
+    assert.equal(row.getAttribute('data-fade-left'), '1', '捲動中左側有漸層')
+    assert.equal(row.getAttribute('data-fade-right'), '1', '未到底右側仍有漸層')
+    await act(() => {
+      row.scrollLeft = 300
+      row.dispatchEvent(new Event('scroll'))
+    })
+    assert.equal(row.getAttribute('data-fade-left'), '1', '到底左側有漸層')
+    assert.equal(row.getAttribute('data-fade-right'), null, '到底右側漸層消失')
+  } finally {
+    await unmountAll()
+    restore()
+    if (savedSw) Object.defineProperty(proto, 'scrollWidth', savedSw)
+    else delete proto.scrollWidth
+  }
+})

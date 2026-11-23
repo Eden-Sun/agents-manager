@@ -1014,6 +1014,18 @@ export function QuotaStrip({
   const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
   const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START
 
+  const syncFade = (row: HTMLElement | null) => {
+    if (!row || !row.classList.contains('collapsed') || row.scrollWidth <= row.clientWidth + 1) {
+      row?.removeAttribute('data-fade-left')
+      row?.removeAttribute('data-fade-right')
+      return
+    }
+    if (row.scrollLeft > 1) row.setAttribute('data-fade-left', '1')
+    else row.removeAttribute('data-fade-left')
+    if (row.scrollLeft + row.clientWidth < row.scrollWidth - 1) row.setAttribute('data-fade-right', '1')
+    else row.removeAttribute('data-fade-right')
+  }
+
   const drawn = ordered.length > 0
   useLayoutEffect(() => {
     const strip = wrap.current
@@ -1023,7 +1035,10 @@ export function QuotaStrip({
     const remeasure = () => {
       const groupEl = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
       const groupGap = parseFloat(getComputedStyle(strip).columnGap) || 0
-      const avail = Math.max(0, measureQuotaAvail(head, strip) - (groupEl ? groupEl.getBoundingClientRect().width + groupGap : 0))
+      const groupMargin = groupEl
+        ? (parseFloat(getComputedStyle(groupEl).marginLeft) || 0) + (parseFloat(getComputedStyle(groupEl).marginRight) || 0)
+        : 0
+      const avail = Math.max(0, measureQuotaAvail(head, strip) - (groupEl ? groupEl.getBoundingClientRect().width + groupGap + groupMargin : 0))
       const wasCollapsed = row.classList.contains('collapsed')
       row.classList.remove('collapsed')
       let full
@@ -1037,6 +1052,7 @@ export function QuotaStrip({
       const current = next.level === 2 ? measureQuotaRow(row) : full
       row.classList.toggle('collapsed', wasCollapsed)
       row.style.setProperty('--quota-cell-min', `${current.cellMin}px`)
+      syncFade(row)
       if (next.level !== fit.level || next.need[0] !== fit.need[0] || next.need[1] !== fit.need[1]) {
         setFitState({ key: fitKey, s: next })
       }
@@ -1070,7 +1086,17 @@ export function QuotaStrip({
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host, t)}>
       {}
-      <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
+      <div
+        className={`quota-open${collapsed ? ' collapsed' : ''}`}
+        onScroll={(e) => syncFade(e.currentTarget)}
+        onWheel={(e) => {
+          const el = e.currentTarget
+          if (collapsed && el.scrollWidth > el.clientWidth + 1 && e.deltaX === 0 && e.deltaY !== 0) {
+            el.scrollLeft += e.deltaY
+            syncFade(el)
+          }
+        }}
+      >
         {}
         {phone ? null : <UpdateQuotaChip />}
         {}

@@ -11,10 +11,18 @@ function ruleBody(selector: string): string {
   return m[1]
 }
 
-test('收合格均分剩餘寬，量過的內容寬是下限', () => {
+test('收合格按各自內容寬為下限（不再強制跟最寬格等寬）', () => {
   const body = ruleBody('.main-head .quota-open.collapsed .quota-hp')
   assert.match(body, /flex:\s*1 0 0;/)
-  assert.match(body, /min-width:\s*var\(--quota-cell-min, max-content\);/)
+  assert.match(body, /min-width:\s*max-content;/)
+})
+
+test('收合列仍放不下時可水平捲動且帶邊緣漸層提示', () => {
+  const body = ruleBody('.main-head .quota-open.collapsed')
+  assert.match(body, /overflow-x:\s*auto;/)
+  assert.match(body, /scrollbar-width:\s*none;/)
+  const fadeRight = ruleBody(".main-head .quota-open.collapsed[data-fade-right='1']")
+  assert.match(fadeRight, /mask-image:/)
 })
 
 test('收合量表隨格子增長，最窄仍保留 24px', () => {

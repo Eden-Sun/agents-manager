@@ -1685,7 +1685,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **總餘額不分主機**（使用者裁示）：沒有任何額度格的主機（例如 m4p）仍畫出餘額群組；兩家都不可見才整條額度列不畫。
 - **問題（使用者截圖）**：本機列的標題列尾端有「API ≈$16.84」「OpenAI $83.00」，m4p 那列（多一格 ccl、右邊有對話／終端分頁，空間較窄）只剩 API，OpenAI 被裁掉。原因是 `.main-head .quota-open.collapsed { overflow-x: clip }` 在空間不夠時裁掉尾巴，而餘額晶片放在 `.quota-open` 最後，最先被裁的就是它。
 - **做法**：餘額是一個 `ApiBalanceGroup`（`.quota-api-group`），放在 `.quota-open` 外面、同一排、`flex: none`，不收合、不被裁。Claude 在上、OpenAI 在下，只有一家有值就一行。
-- **量表讓位**：fit 量測（`remeasure`）的可用寬度先扣掉群組寬度加 gap，所以收合時裁的是量表，不是餘額。
+- **量表讓位**：fit 量測（`remeasure`）的可用寬度先扣掉群組寬度、gap 與左右 margin，所以收合時讓位的是量表，不是餘額。
+- **桌機收合溢出（2026-11-23 使用者截圖：m4p 6 格額度讓 ag2 數字被裁）**：收合（`.quota-open.collapsed`）時啟用格改以各自內容寬為下限（`min-width: max-content`，不再強制撐成最寬格的 `--quota-cell-min`），未收合仍維持等寬；若仍超過標題列寬度，`.quota-open.collapsed` 改為 `overflow-x: auto`（隱藏捲軸、支援滾輪橫捲，左右邊緣依捲動位置顯示 `mask-image` 漸層提示），`ApiBalanceGroup` 維持釘在右側不被捲走。
 - **點擊**：群組裡兩顆晶片各自開原本的校正視窗。
 - **選單餘額區保留**：額度選單（`.quota-pop`）底部的「API 餘額」區（Claude、OpenAI 各一列，同一校正視窗，手機 setOnly 時仍顯示）保留，與群組並存；群組負責窄寬度不被裁，選單區負責遠端主機與手機看得到。（使用者 2026-11-19 撤回先前「取消」的指示。）
 - **沒有額度格的主機**：選單入口是額度格，沒有格時開不了選單，所以餘額只在群組裡看，這是刻意的。

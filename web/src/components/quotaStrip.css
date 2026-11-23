@@ -969,13 +969,31 @@
   }
 
   .main-head .quota-open.collapsed {
-    overflow-x: clip;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     justify-content: flex-start;
+  }
+
+  .main-head .quota-open.collapsed::-webkit-scrollbar {
+    display: none;
+  }
+
+  .main-head .quota-open.collapsed[data-fade-right='1'] {
+    mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
+  }
+
+  .main-head .quota-open.collapsed[data-fade-left='1'] {
+    mask-image: linear-gradient(to left, #000 calc(100% - 20px), transparent);
+  }
+
+  .main-head .quota-open.collapsed[data-fade-left='1'][data-fade-right='1'] {
+    mask-image: linear-gradient(to right, transparent, #000 16px, #000 calc(100% - 20px), transparent);
   }
 
   .main-head .quota-open.collapsed .quota-hp {
     flex: 1 0 0;
-    min-width: var(--quota-cell-min, max-content);
+    min-width: max-content;
   }
 
   .main-head .quota-open .quota-hp.off {
