@@ -584,16 +584,11 @@ pub async fn dump(app: &impl HostsAccess, host: &str) -> anyhow::Result<String> 
 #[cfg(target_os = "linux")]
 pub fn linux_subtree_dump(shell_pid: i32) -> Option<String> {
     use std::fmt::Write as _;
-    let members = match subtree_via_children(shell_pid) {
-        Some(m) => m,
-        None => {
-            let parent = all_parents();
-            if !parent.contains_key(&shell_pid) {
-                return None;
-            }
-            subtree_from_parents(&parent, shell_pid)
-        }
-    };
+    let parent = all_parents();
+    if !parent.contains_key(&shell_pid) {
+        return None;
+    }
+    let members = subtree_from_parents(&parent, shell_pid);
     let mut tree = String::new();
     let mut env = String::new();
     for &pid in &members {
@@ -616,36 +611,7 @@ pub fn linux_subtree_dump(shell_pid: i32) -> Option<String> {
     Some(out)
 }
 
-/// 沿 `/proc/<pid>/task/<tid>/children` 由上往下收子樹（根在最前）。根的 children 讀不到就回 `None`（核心沒開這個介面）。
-#[cfg(target_os = "linux")]
-fn subtree_via_children(root: i32) -> Option<Vec<i32>> {
-    let children_of = |pid: i32| -> Option<Vec<i32>> {
-        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
-        let mut kids = Vec::new();
-        for t in tasks.flatten() {
-            if let Ok(text) = std::fs::read_to_string(t.path().join("children")) {
-                kids.extend(text.split_whitespace().filter_map(|c| c.parse::<i32>().ok()));
-            }
-        }
-        Some(kids)
-    };
-    children_of(root)?;
-    let mut members = vec![root];
-    let mut at = 0;
-    while at < members.len() {
-        let mut kids = children_of(members[at]).unwrap_or_default();
-        kids.sort_unstable();
-        for k in kids {
-            if !members.contains(&k) {
-                members.push(k);
-            }
-        }
-        at += 1;
-    }
-    Some(members)
-}
-
-/// 退路：掃全機 `/proc/*/stat` 建 `pid → ppid`。
+/// 掃全機 `/proc/*/stat` 建 `pid → ppid`。
 #[cfg(target_os = "linux")]
 fn all_parents() -> HashMap<i32, i32> {
     let mut parent = HashMap::new();
@@ -1420,21 +1386,32 @@ mod subtree_tests {
             .spawn()
             .expect("spawn sleep");
         let kid_pid = kid.id() as i32;
-        let started = std::time::Instant::now();
-        let native = linux_subtree_dump(me).expect("自己的 pid 在 /proc 裡");
-        eprintln!("linux_subtree_dump took {:?}", started.elapsed());
-        let full = {
-            let o = std::process::Command::new("/bin/sh").arg("-c").arg(PS_TREE_ENV).output().unwrap();
-            String::from_utf8_lossy(&o.stdout).into_owned()
-        };
-        let a = pane_facts_for_shell(&native, "pane-x", me).expect("native facts");
-        let b = pane_facts_for_shell(&full, "pane-x", me).expect("ps facts");
-        let _ = kid.kill();
-        let _ = kid.wait();
-        assert_eq!(a.bot_ids, vec!["bot-z".to_string()], "原生版要認得子行程環境裡的 AM_BOT_ID");
-        assert_eq!(a.bot_ids, b.bot_ids, "和 ps 版歸屬一致");
-        assert!(a.pids.contains(&kid_pid) && b.pids.contains(&kid_pid), "子行程兩邊都在樹裡");
-        assert_eq!(a.pids.first(), Some(&me), "根就是 shell 自己");
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..20 {
+                        if let Ok(mut c) = std::process::Command::new("true").spawn() {
+                            let _ = c.wait();
+                        }
+                    }
+                });
+            }
+            let started = std::time::Instant::now();
+            let native = linux_subtree_dump(me).expect("自己的 pid 在 /proc 裡");
+            eprintln!("linux_subtree_dump took {:?}", started.elapsed());
+            let full = {
+                let o = std::process::Command::new("/bin/sh").arg("-c").arg(PS_TREE_ENV).output().unwrap();
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            };
+            let a = pane_facts_for_shell(&native, "pane-x", me).expect("native facts");
+            let b = pane_facts_for_shell(&full, "pane-x", me).expect("ps facts");
+            let _ = kid.kill();
+            let _ = kid.wait();
+            assert_eq!(a.bot_ids, vec!["bot-z".to_string()], "原生版要認得子行程環境裡的 AM_BOT_ID");
+            assert_eq!(a.bot_ids, b.bot_ids, "和 ps 版歸屬一致");
+            assert!(a.pids.contains(&kid_pid) && b.pids.contains(&kid_pid), "子行程兩邊都在樹裡");
+            assert_eq!(a.pids.first(), Some(&me), "根就是 shell 自己");
+        });
         assert!(linux_subtree_dump(i32::MAX).is_none(), "不存在的 pid 回 None");
     }
 }
