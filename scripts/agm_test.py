@@ -2142,6 +2142,30 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.ok("approval", "list", "--id", "ap-1")["approvals"][0]["status"], "approved")
         self.assertEqual([r["path"] for r in FakeDaemon.seen if r["method"] == "GET"][-1], "/api/supervisor/approvals?id=ap-1")
 
+    def test_ops_alert_uses_am_daemon_url_for_remote_bot(self):
+        FakeDaemon.routes["POST /api/supervisor/ops-alerts"] = (200, {"queued": True, "inbox_event_id": "e10"})
+        env = {
+            "AM_BOT_ID": "01MREMOTE",
+            "AM_BOT_TOKEN": "tok-remote",
+            "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}",
+            "AGM_RUNTIME_DIR": str(Path(self.dir.name) / "nonexistent-runtime"),
+        }
+        old = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+        try:
+            code, out, err = self.run_cli("ops-alert", "--source", "m4p-bot", "--reason", "grok_loop", "--detail", "chrome")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["inbox_event_id"], "e10")
+        req = [r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/ops-alerts"][-1]
+        self.assertEqual(req["bot_id"], "01MREMOTE")
+        self.assertEqual(req["bot_token"], "tok-remote")
+
     def test_release_triage_submit_show_dispatched(self):
         FakeDaemon.routes["POST /api/release-triage/verdicts"] = (200, {"status": "judged"})
         FakeDaemon.routes["GET /api/release-triage"] = (200, {"rows": []})

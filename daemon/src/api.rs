@@ -375,7 +375,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/supervisor/cli",
             get(crate::runners::supervisor::cli::get_cli).layer(agm_gate!(app)).merge(post(crate::runners::supervisor::cli::post_cli_refresh).layer(agm_gate!(app))),
         )
-        .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
+        .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::runners::supervisor::responder_api::routes(app.clone()))
         .merge(crate::runners::release_triage::routes())
@@ -4900,6 +4900,9 @@ async fn get_models(
     let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
     if app.hosts.get(&host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
+    }
+    if crate::identity_prefs::kind_disabled(&app.db, &host, &q.kind).await {
+        return Err(LcError::conflict("kind_disabled", json!({"reason": "kind_disabled", "host": host, "kind": q.kind})));
     }
     let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty()).filter(|s| !crate::tools::is_builtin_default_identity(&q.kind, s));
     if let RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } = &principal {

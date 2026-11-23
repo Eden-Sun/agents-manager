@@ -266,7 +266,9 @@ fn ledger() -> &'static Arc<Ledger> {
 /// 請求本身不等刷新結果；Bot 稍後重試即可。
 pub async fn on_cache_miss(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Value {
     let key = cache_key(host, kind, identity);
-    let status = if identity_is_known(app, host, kind, identity).await {
+    let status = if !crate::identity_prefs::kind_disabled(&app.db, host, kind).await
+        && identity_is_known(app, host, kind, identity).await
+    {
         let (app, host_owned, kind_owned, identity_owned) = (app.clone(), host.to_string(), kind.to_string(), identity.map(str::to_string));
         Ledger::schedule(ledger(), key, move || async move {
             crate::runners::models::list(&app, &host_owned, &kind_owned, identity_owned.as_deref(), true).await.map(|_| ())

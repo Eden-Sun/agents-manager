@@ -72,6 +72,9 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
 
 /// `None` = skipped this cycle. `GET /api/quota?refresh=1` bypasses this and always really probes.
 pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
+    if crate::identity_prefs::kind_disabled(&app.db, host, "grok").await {
+        return Ok(None);
+    }
     let key = crate::quota::quota_key(host, "grok");
     let logged_in = app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in);
     if !should_probe_grok(logged_in, cooling_down(&key)) {

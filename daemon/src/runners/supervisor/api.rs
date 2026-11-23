@@ -700,7 +700,11 @@ pub struct OpsAlertIn {
 ///
 /// event_key 帶小時格：每小時最多一則（`push_inbox` 是 INSERT OR IGNORE），五分鐘一輪的腳本
 /// 不會把同一件事灌滿 inbox；換一個 reason 就是另一則。
-pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertIn>) -> Result<Json<Value>, LcError> {
+pub async fn post_ops_alert(
+    State(app): State<Arc<App>>,
+    axum::Extension(principal): axum::Extension<crate::api::RequestPrincipal>,
+    Json(b): Json<OpsAlertIn>,
+) -> Result<Json<Value>, LcError> {
     let slug = |s: &str| -> Option<String> {
         let s = s.trim();
         (!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).then(|| s.to_string())
@@ -710,13 +714,20 @@ pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertI
     let detail: String = b.detail.unwrap_or_default().trim().chars().take(2000).collect();
     let hour = crate::db::now().get(..13).unwrap_or_default().to_string();
     let key = format!("ops_alert:{source}:{reason}:{hour}");
-    let payload = json!({
+    let bot_id = match &principal {
+        crate::api::RequestPrincipal::Bot(id) | crate::api::RequestPrincipal::Child { child_id: id, .. } => Some(id.as_str()),
+        crate::api::RequestPrincipal::User | crate::api::RequestPrincipal::Service(_) => None,
+    };
+    let mut payload = json!({
         "source": source,
         "reason": reason,
         "detail": detail,
         "action": "這支排程腳本已經停住，自己解不開：照 detail 處理（例如確認沒有執行者後移除殘留鎖），處理完 ack",
     });
-    let id = store::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await.map_err(up)?;
+    if let Some(id) = bot_id {
+        payload["bot_id"] = json!(id);
+    }
+    let id = store::push_inbox(&app.db, &key, "ops_alert", None, bot_id, None, &payload).await.map_err(up)?;
     if id.is_some() {
         tracing::warn!(source, reason, detail, "a scheduled ops script reported that it is stuck");
         app.emit("supervisor_changed", json!({"ops_alert": key})).await;

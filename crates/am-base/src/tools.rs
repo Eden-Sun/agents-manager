@@ -159,7 +159,7 @@ printf 'AM_TZ %s\n' "$(date +%z 2>/dev/null)"
 hp=$(am_abs herdr)
 case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 GH="${GROK_HOME:-$HOME/.grok}"
-if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
+if [ -s "$GH/auth.json" ] && grep -Eq '"[^"]+"[[:space:]]*:[[:space:]]*("[^"]+"|\{)' "$GH/auth.json" 2>/dev/null; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
 # agy 的憑證：Linux 是 600 的檔案；macOS 放 login Keychain（service `gemini`、account `antigravity`），沒有那個檔。
 if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] || { command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; }; then printf 'AM_LOGIN agy 1\n'; else printf 'AM_LOGIN agy 0\n'; fi
 "#, alias_sh!());

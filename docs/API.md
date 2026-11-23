@@ -51,7 +51,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `PUT`／`DELETE /quota/reset-credit/snooze` | 只有網頁 | User-only；Bot 與 AGM role 均 403 `user_only` | 重置券提示「不再提醒」（只控制提醒、不兌換） | 維持 UserOnly |
 | C | `POST /quota/probe` | 網頁、AGM 角色 | User 或已登記 AGM 角色；一般 Bot → 403 `user_only` | 即時探測額度 | 維持 UserOrAgm |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
-| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身份的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身份都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報、記錄遠端入口觀測） | 已有 |
+| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身份的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身份都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、記錄遠端入口觀測） | 已有 |
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身份的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者 → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身份的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/kids`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
@@ -446,7 +446,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/supervisor/leases/{resource}/acquire` | User 或 Bot；Bot owner 必須是自己；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/leases/{resource}/release` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/leases/{resource}/renew` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
-| POST | `/api/supervisor/ops-alerts` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
+| POST | `/api/supervisor/ops-alerts` | User 與已驗證 Bot（含遠端主機 Bot，每小時同 source+reason 去重） |
 | POST | `/api/supervisor/persona/adopt-embedded` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/setup` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/start` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |

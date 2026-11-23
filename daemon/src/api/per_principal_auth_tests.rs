@@ -1792,7 +1792,6 @@ async fn plain_bot_gate_body() {
         ("POST", "/api/supervisor/fallback"),
         ("POST", "/api/supervisor/assignments/nope/review"),
         ("PUT", "/api/supervisor/handoff"),
-        ("POST", "/api/supervisor/ops-alerts"),
         ("POST", "/api/supervisor/cli"),
         ("POST", "/api/supervisor/responder/setup"),
         ("POST", "/api/supervisor/responder/start"),
@@ -1816,6 +1815,43 @@ async fn plain_bot_gate_body() {
     assert!(denied(&r), "換人之後舊的巡檢沒有權限了：{r}");
     let r = call("POST", "/api/supervisor/stop", Some((other.id.as_str(), other.hook_token.as_str()))).await;
     assert!(!denied(&r), "{r}");
+}
+
+#[tokio::test]
+async fn a_plain_bot_can_post_ops_alert_and_disabled_kind_rejects_models() {
+    let e = crate::testing::env().await;
+    let plain = distinct_bot(&e, "remote-alert-bot").await;
+    let body = r#"{"source":"m4p-probe","reason":"grok_chrome_tabs","detail":"opened 70 tabs"}"#;
+    let req = format!(
+        "POST /api/supervisor/ops-alerts HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        plain.id,
+        plain.hook_token,
+        body.len(),
+        body
+    );
+    let resp = raw(e.app.clone(), req).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "plain bot must be allowed to post ops-alerts: {resp}");
+    assert!(resp.contains("\"queued\":true"), "{resp}");
+    let stored_bot: Option<String> = sqlx::query_scalar("SELECT bot_id FROM supervisor_inbox WHERE kind='ops_alert' ORDER BY created_at DESC LIMIT 1")
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(stored_bot.as_deref(), Some(plain.id.as_str()));
+
+    let _ = crate::identity_prefs::put_kind_disabled(
+        axum::extract::State(e.app.clone()),
+        axum::extract::Path("grok".into()),
+        axum::Json(crate::identity_prefs::KindDisableIn { host: Some("local".into()), disabled: true }),
+    )
+    .await
+    .unwrap();
+    let models_req = format!(
+        "GET /api/models?kind=grok&host=local HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\n\r\n",
+        plain.id, plain.hook_token
+    );
+    let models_resp = raw(e.app.clone(), models_req).await;
+    assert!(models_resp.starts_with("HTTP/1.1 409"), "disabled kind must return 409: {models_resp}");
+    assert!(models_resp.contains("kind_disabled"), "{models_resp}");
 }
 
 /// 審批只能由使用者收回，或由 AGM 角色處理；一般 bot 的有效 token 不能借 `actor_role(None)` 冒充使用者去 deny／revoke。

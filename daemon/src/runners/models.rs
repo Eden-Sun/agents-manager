@@ -180,6 +180,9 @@ async fn agy_models_via_pane(app: &Arc<App>, host: &str, exe: &str, home: Option
 }
 
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
+    if crate::identity_prefs::kind_disabled(&app.db, host, kind).await {
+        bail!("kind `{kind}` is disabled on host `{host}`");
+    }
     let (source, models) = match kind {
         "codex" => {
             let home = identity_home_dir(app, host, identity, "codex", "CODEX_HOME").await?;
