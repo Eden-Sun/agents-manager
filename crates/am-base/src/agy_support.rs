@@ -495,6 +495,82 @@ pub fn status_json_from_statusline(
     Some(Value::Object(out).to_string())
 }
 
+static PRE_COMPACT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> = std::sync::LazyLock::new(Default::default);
+static APPLIED_COMPACTION: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+pub fn pre_compact_tokens(run_id: &str) -> Option<i64> {
+    PRE_COMPACT.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).copied()
+}
+
+pub fn forget_pre_compact(run_id: &str) {
+    PRE_COMPACT.lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
+}
+
+pub fn compaction_update(run_id: &str, status_json: Option<&str>, screen: &str, size_fallback: u64) -> Option<String> {
+    let (before, after) = parse_compaction_line(screen)?;
+    let key = format!("{before}>{after}");
+    {
+        let mut applied = APPLIED_COMPACTION.lock().unwrap_or_else(|e| e.into_inner());
+        if applied.get(run_id) == Some(&key) {
+            return None;
+        }
+        applied.insert(run_id.to_string(), key);
+    }
+    let updated = compacted_status_json(status_json, after, size_fallback)?;
+    PRE_COMPACT.lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), before);
+    Some(updated)
+}
+
+fn token_count(num: &str, unit: char) -> Option<i64> {
+    let value: f64 = num.parse().ok()?;
+    let scale = match unit {
+        'k' | 'K' => 1_000.0,
+        'M' => 1_000_000.0,
+        _ => return None,
+    };
+    let n = (value * scale).round();
+    (n.is_finite() && n >= 0.0).then_some(n as i64)
+}
+
+fn number_then_unit(text: &str) -> Option<(i64, usize)> {
+    let end = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
+    let num = &text[..end];
+    let unit = text[end..].chars().next()?;
+    let consumed = end + unit.len_utf8();
+    Some((token_count(num, unit)?, consumed))
+}
+
+pub fn parse_compaction_line(screen: &str) -> Option<(i64, i64)> {
+    let line = screen.lines().rev().find(|l| l.contains("→ ~") && l.contains("context "))?;
+    let arrow = line.rfind("→ ~")?;
+    let before_part = &line[..arrow];
+    let ctx = before_part.rfind("context ")? + "context ".len();
+    let (before, _) = number_then_unit(&before_part[ctx..])?;
+    let (after, _) = number_then_unit(&line[arrow + "→ ~".len()..])?;
+    (before > 0 && after >= 0).then_some((before, after))
+}
+
+pub fn compacted_status_json(status_json: Option<&str>, after: i64, size_fallback: u64) -> Option<String> {
+    let mut v: Value = serde_json::from_str(status_json?).ok()?;
+    let obj = v.as_object_mut()?;
+    let cw = obj.get_mut("context_window")?.as_object_mut()?;
+    let size = cw.get("context_window_size").and_then(Value::as_u64).filter(|&n| n > 0).unwrap_or(size_fallback.max(1));
+    cw.insert("total_input_tokens".into(), json!(after));
+    cw.insert("used_percentage".into(), json!(used_percentage(after, size)));
+    Some(v.to_string())
+}
+
+pub fn stale_held_context(rich: &str, prev: Option<&str>, pre_compact: i64) -> Option<String> {
+    let mut incoming: Value = serde_json::from_str(rich).ok()?;
+    let total = incoming.pointer("/context_window/total_input_tokens").and_then(Value::as_i64)?;
+    if total < pre_compact {
+        return None;
+    }
+    let prev_cw = serde_json::from_str::<Value>(prev?).ok()?.get("context_window")?.clone();
+    incoming.as_object_mut()?.insert("context_window".into(), prev_cw);
+    Some(incoming.to_string())
+}
+
 /// `tokens／size×100`，四捨五入到一位小數、上限 100，負數當 0。
 fn used_percentage(tokens: i64, size: u64) -> f64 {
     let raw = tokens.max(0) as f64 / size as f64 * 100.0;

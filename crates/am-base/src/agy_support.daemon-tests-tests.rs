@@ -313,4 +313,53 @@
         assert_eq!(v["quota"]["gemini"]["remaining_fraction"], 0.82);
         assert!(v.get("transcript_path").is_none() && v.get("transcriptPath").is_none());
     }
+
+    #[test]
+    fn the_compaction_line_gives_before_and_after_in_tokens() {
+        assert_eq!(parse_compaction_line("440 steps summarized · context 404.9k → ~23.0k (3.3k summary)"), Some((404_900, 23_000)));
+        assert_eq!(parse_compaction_line("Conversation compacted\n12 steps summarized · context 19.7k → ~22.5k (1k summary)"), Some((19_700, 22_500)));
+        assert_eq!(parse_compaction_line("context 1.2M → ~80k"), Some((1_200_000, 80_000)));
+    }
+
+    #[test]
+    fn a_malformed_or_missing_compaction_line_changes_nothing() {
+        assert_eq!(parse_compaction_line("context 404.9k → 23.0k"), None, "no tilde");
+        assert_eq!(parse_compaction_line("context abc → ~1k"), None);
+        assert_eq!(parse_compaction_line("context 404.9x → ~23k"), None, "unknown unit");
+        assert_eq!(parse_compaction_line("plain screen with no compaction"), None);
+    }
+
+    #[test]
+    fn a_compaction_sets_the_reading_once_and_remembers_the_stale_one() {
+        let run = "run-compact-once";
+        let before = serde_json::json!({
+            "_agm_statusline": true,
+            "context_window": { "total_input_tokens": 403_489, "context_window_size": 1_048_576, "used_percentage": 38.5 },
+            "model": { "id": "gemini-3.8-flash-medium" }
+        })
+        .to_string();
+        let screen = "Conversation compacted\n440 steps summarized · context 404.9k → ~23.0k (3.3k summary)";
+        let next = compaction_update(run, Some(&before), screen, 1_048_576).expect("compaction applies");
+        let v: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(v["context_window"]["total_input_tokens"], 23_000);
+        assert_eq!(v["context_window"]["context_window_size"], 1_048_576);
+        assert_eq!(v["model"]["id"], "gemini-3.8-flash-medium", "other fields kept");
+        assert_eq!(pre_compact_tokens(run), Some(404_900));
+        assert_eq!(compaction_update(run, Some(&next), screen, 1_048_576), None, "the same line is not applied twice");
+        forget_pre_compact(run);
+        assert_eq!(pre_compact_tokens(run), None);
+    }
+
+    #[test]
+    fn a_stale_statusline_reading_is_held_until_the_number_changes() {
+        let run = "run-compact-hold";
+        let prev = serde_json::json!({"context_window": {"total_input_tokens": 23_000, "context_window_size": 1_048_576, "used_percentage": 2.2}}).to_string();
+        let stale = serde_json::json!({"_agm_statusline": true, "context_window": {"total_input_tokens": 403_489, "context_window_size": 1_048_576, "used_percentage": 38.5}}).to_string();
+        let held = stale_held_context(&stale, Some(&prev), 404_900).expect("stale reading is held");
+        let v: Value = serde_json::from_str(&held).unwrap();
+        assert_eq!(v["context_window"]["total_input_tokens"], 23_000, "held at the compacted reading");
+        let fresh = serde_json::json!({"_agm_statusline": true, "context_window": {"total_input_tokens": 23_500, "context_window_size": 1_048_576, "used_percentage": 2.2}}).to_string();
+        assert_eq!(stale_held_context(&fresh, Some(&prev), 404_900), None, "a changed reading is written as usual");
+        assert_eq!(pre_compact_tokens(run), None);
+    }
 }

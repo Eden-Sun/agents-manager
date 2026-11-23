@@ -1640,7 +1640,16 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
                 let fallback_model = r.runtime_model.as_deref().or(bot.model.as_deref());
                 let window = app.cfg().get().await.agy.context_window_tokens;
-                if let Some(rich) = crate::agy_support::status_json_from_statusline(&body.payload, r.status_json.as_deref(), fallback_model, window) {
+                if let Some(rich) = crate::agy_support::status_json_from_statusline(&body.payload, r.status_json.as_deref(), fallback_model, window).map(|rich| match crate::agy_support::pre_compact_tokens(&r.id) {
+                    Some(pre) => match crate::agy_support::stale_held_context(&rich, r.status_json.as_deref(), pre) {
+                        Some(held) => held,
+                        None => {
+                            crate::agy_support::forget_pre_compact(&r.id);
+                            rich
+                        }
+                    },
+                    None => rich,
+                }) {
                     if r.status_json.as_deref() != Some(rich.as_str()) {
                         crate::cache_clock::on_statusline(&r.id, r.status_json.as_deref(), Some(&rich), &db::now());
                         sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?")

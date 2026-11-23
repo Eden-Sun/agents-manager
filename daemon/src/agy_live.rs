@@ -94,8 +94,23 @@ fn moved(seen: String, child: bool, cur: Option<&str>) -> Option<String> {
 
 /// 以框底校正 `runs.runtime_model`。回傳 `true` = 有改動。
 pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
-    let Some(seen) = parse_footer(screen) else { return false };
-    record(app, run_id, seen).await
+    let compacted = apply_compaction_from_screen(app, run_id, screen).await;
+    let Some(seen) = parse_footer(screen) else { return compacted };
+    record(app, run_id, seen).await || compacted
+}
+
+async fn apply_compaction_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), run_id: &str, screen: &str) -> bool {
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return false };
+    if bot.kind != "agy" {
+        return false;
+    }
+    let Some(next) = am_base::agy_support::compaction_update(run_id, run.status_json.as_deref(), screen, 1_048_576) else { return false };
+    if sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&next).bind(run_id).execute(app.db()).await.is_err() {
+        return false;
+    }
+    app.emit_bot_status(&bot.id).await;
+    true
 }
 
 /// 以 statusLine 回報的 `model.{id, effort}` 校正 `runs.runtime_model`（有 statusLine 時優先於 30 秒畫面爬字）。
@@ -135,6 +150,7 @@ async fn record(app: &(impl crate::capabilities::BotStatusEmit + crate::capabili
 /// 框底讀不到（窄 pane 截掉）而且 child 還不知道模型時，每個 run 頭 20 輪改找捲動紀錄裡的啟動橫幅（[`parse_banner`]）。
 pub async fn sync_runtime(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: &str) {
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return };
+    apply_compaction_from_screen(app, run_id, hint).await;
     if crate::agy_support::has_statusline(run.status_json.as_deref()) && run.runtime_model.is_some() {
         return;
     }
