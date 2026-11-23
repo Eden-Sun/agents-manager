@@ -136,6 +136,19 @@ pub async fn kind_disabled(pool: &SqlitePool, host: &str, kind: &str) -> bool {
         != 0
 }
 
+pub async fn identity_disabled(pool: &SqlitePool, host: &str, kind: &str, identity: &str) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT disabled FROM identity_prefs WHERE host=? AND kind=? AND identity=?")
+        .bind(host)
+        .bind(kind)
+        .bind(identity)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        != 0
+}
+
 #[derive(Deserialize)]
 pub struct KindDisableIn {
     pub host: Option<String>,

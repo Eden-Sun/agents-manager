@@ -183,6 +183,9 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
     if crate::identity_prefs::kind_disabled(&app.db, host, kind).await {
         bail!("kind `{kind}` is disabled on host `{host}`");
     }
+    if kind == "grok" && identity.is_none() && crate::identity_prefs::identity_disabled(&app.db, host, "grok", crate::identity_prefs::DEFAULT_ACCOUNT).await {
+        bail!("kind `grok` default account is disabled on host `{host}`");
+    }
     let (source, models) = match kind {
         "codex" => {
             let home = identity_home_dir(app, host, identity, "codex", "CODEX_HOME").await?;

@@ -47,7 +47,7 @@
 
     #[test]
     fn a_logged_out_or_recently_failed_host_is_not_probed() {
-        assert!(should_probe_grok(None, false));
+        assert!(!should_probe_grok(None, false));
         assert!(should_probe_grok(Some(true), false));
         assert!(!should_probe_grok(Some(false), false));
         assert!(!should_probe_grok(None, true));
@@ -295,7 +295,7 @@
     #[test]
     fn a_host_marked_logged_out_is_not_probed_until_it_is_seen_logged_in_again() {
         assert!(!should_probe_grok(Some(false), false));
-        assert!(should_probe_grok(None, false));
+        assert!(!should_probe_grok(None, false));
         assert!(should_probe_grok(Some(true), false));
     }
 }

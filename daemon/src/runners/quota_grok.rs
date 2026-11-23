@@ -12,8 +12,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// `Ok(false)` = grok is not installed there (quota stays null).
+async fn grok_disabled(app: &Arc<App>, host: &str) -> bool {
+    crate::identity_prefs::kind_disabled(&app.db, host, "grok").await
+        || crate::identity_prefs::identity_disabled(&app.db, host, "grok", crate::identity_prefs::DEFAULT_ACCOUNT).await
+}
+
+async fn grok_logged_in(app: &Arc<App>, host: &str) -> Option<bool> {
+    app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in)
+}
+
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
-    if crate::identity_prefs::kind_disabled(&app.db, host, "grok").await {
+    if grok_disabled(app, host).await {
         return Ok(false);
     }
     let _guard = crate::quota::probe_lock(host).await;
@@ -29,6 +38,9 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
         bail!("host `{host}` changed before its Grok quota probe");
     }
     if crate::tools::cached_path(app, host, "grok").await.is_none() {
+        return Ok(false);
+    }
+    if grok_logged_in(app, host).await != Some(true) {
         return Ok(false);
     }
     let client = client_for_fence(app, &fence).await?;
@@ -72,11 +84,14 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
 
 /// `None` = skipped this cycle. `GET /api/quota?refresh=1` bypasses this and always really probes.
 pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
-    if crate::identity_prefs::kind_disabled(&app.db, host, "grok").await {
+    if grok_disabled(app, host).await {
         return Ok(None);
     }
     let key = crate::quota::quota_key(host, "grok");
-    let logged_in = app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in);
+    if !app.tools.lock().await.contains_key(host) {
+        crate::tools::detect(app, host).await?;
+    }
+    let logged_in = grok_logged_in(app, host).await;
     if !should_probe_grok(logged_in, cooling_down(&key)) {
         return Ok(None);
     }

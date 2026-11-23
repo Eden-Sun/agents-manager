@@ -366,9 +366,9 @@ pub fn forget_host(host: &str) {
     });
 }
 
-/// §16.4 skip rules: logged out, or our own probe failed recently.
+/// §16.4 skip rules: not confirmed logged in (including not yet detected), or our own probe failed recently.
 pub fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool {
-    logged_in != Some(false) && !cooling
+    logged_in == Some(true) && !cooling
 }
 
 pub fn is_login_screen(screen: &str) -> bool {

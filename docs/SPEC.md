@@ -4172,6 +4172,8 @@ daemon 以識別專案的 User-Agent 讀取 [資料：codex-reset.com](https://c
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：
 pane 寬度來自 attach 的 client，窄終端會把百分比截掉；沒有 client 的 session 用寬預設格線。也避免在使用者的 workspace 閃 pane。
 
+未登入（`logged_in != Some(true)`，含尚未偵測）、grok 整個 kind 停用、或 `@default` 身份停用時不探測：`refresh_grok_if_due` 先補一次 `tools::detect`，`refresh_grok`（含 `GET /api/quota?refresh=1`）在 `workspace.create` 前再讀一次 `logged_in`；grok models 在預設帳號被停用時也不跑。
+
 流程：`workspace.create`（label `am-quota-grok`、cwd 家目錄）→ `agent.start` kind grok、名稱 `amquota<6碼>`（不在 DB，對帳不會當成 bot）→ **等 pane 本身**是 grok 且 idle／working／blocked（`pane.get` 輪詢，60 秒）再等 3 秒 →
 `pane.send_text "/usage"`、0.8 秒後 Enter → 每 0.9 秒 `pane.read visible 120`，最多 25 秒 → `workspace.close`（在 `Drop` 裡）。
 （grok 1.0.41 起 herdr 常在啟動當下就把名字從 pane 上拿掉，`agent.start` 回 `agent_name_not_found`、用名字 `agent.wait` 回 `agent_not_running`，grok 其實開著：名字掉了不算失敗，照等 pane；2026-09-28 使用者：額度好幾天大多讀不到。）
