@@ -15,17 +15,11 @@ export interface CacheState {
 
 const WARN_SECS = 15 * 60
 const LOW_SECS = 5 * 60
-const AGY_TTL_SECS = 720
 
-function thresholds(ttlSecs?: number): { warn: number; low: number } {
-  return ttlSecs === AGY_TTL_SECS ? { warn: 420, low: 120 } : { warn: WARN_SECS, low: LOW_SECS }
-}
-
-export function cacheLevel(remainingSecs: number, ttlSecs?: number): CacheLevel {
-  const { warn, low } = thresholds(ttlSecs)
+export function cacheLevel(remainingSecs: number, _ttlSecs?: number): CacheLevel {
   if (remainingSecs <= 0) return 'cold'
-  if (remainingSecs < low) return 'low'
-  if (remainingSecs <= warn) return 'warn'
+  if (remainingSecs < LOW_SECS) return 'low'
+  if (remainingSecs <= WARN_SECS) return 'warn'
   return 'fresh'
 }
 
@@ -64,11 +58,8 @@ export function cacheState(
   const n = Math.max(1, Math.ceil(remainingSecs / 60))
   const title = level === 'cold'
     ? t('快取已涼（{last}）', { last })
-    : ttlSecs === AGY_TTL_SECS
-      ? t('快取約 {n} 分後到期（Gemini 快取無保證時間，約 5–12 分；{last}）', { n, last })
-      : t('快取約 {n} 分後到期（{last}）', { n, last })
-  const low = thresholds(ttlSecs).low
-  const frac = remainingSecs <= low ? Math.min(1, remainingSecs / low) : remainingSecs / ttlSecs
+    : t('快取約 {n} 分後到期（{last}）', { n, last })
+  const frac = remainingSecs <= LOW_SECS ? Math.min(1, remainingSecs / LOW_SECS) : remainingSecs / ttlSecs
   return { level, remainingSecs, frac, title }
 }
 

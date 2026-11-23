@@ -91,7 +91,6 @@ export default {
   '上次活動 {time}': 'Last activity {time}',
   '快取已涼（{last}）': 'Cache has gone cold ({last})',
   '快取約 {n} 分後到期（{last}）': { one: 'Cache expires in about {n} minute ({last})', other: 'Cache expires in about {n} minutes ({last})' },
-  '快取約 {n} 分後到期（Gemini 快取無保證時間，約 5–12 分；{last}）': { one: 'Cache expires in about {n} minute (Gemini cache has no guaranteed time, about 5–12 min; {last})', other: 'Cache expires in about {n} minutes (Gemini cache has no guaranteed time, about 5–12 min; {last})' },
   '不保溫：cache 到期前會自動壓縮（context 夠大時）': 'Not kept warm: the cache is auto-compacted before it expires (when the context is large enough)',
   '{time} UTC（{tz} 這台瀏覽器不支援，以 UTC 顯示）': '{time} UTC ({tz} is not supported by this browser, showing UTC)',
   '{text}（{tz}）': '{text} ({tz})',

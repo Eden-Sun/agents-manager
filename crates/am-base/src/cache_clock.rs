@@ -9,8 +9,7 @@
 //! 回合進行中（`agent_status == "working"` 或有 in-flight 回合）＝熱，`last_api_at` 給現在。
 //! 主力的保溫回合（[`crate::primary_keep_warm`]，`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`）**不算活動**：回合時間、statusLine 指紋、
 //! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色；熱壓之後視為涼掉，`cache_kept_warm_at` 不含熱壓、也不含熱壓之前的保溫。
-//! TTL 依 kind：claude 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷）；agy 720 秒（Gemini 的 implicit cache 沒有保證時間，
-//! 官方只說「最久 24 小時、多數更早淘汰」；本機 56,246 筆實測：<1 分 96% 命中、6–12 分 36–51%、12–16 分 0–12%、>30 分 0%，取 12 分當冷掉點）；
+//! TTL 依 kind：claude 與 agy 為 3600 秒（1 小時，與 claude 相同）；
 //! agy 的「最後活動」來自 transcript 最後一筆 assistant 的 `created_at`（[`on_agy_transcript`]）。
 //! codex 的 cache 不會因閒置冷掉（使用者 2026-10-24），不帶 TTL（`last_api_at` 照帶、不畫倒數、不保溫）；grok 未知不帶。
 //! agy 不保溫、不熱壓：`primary_keep_warm` 只認 claude（[`crate::primary_keep_warm::eligible`]），不因有 TTL 就被納入。
@@ -26,8 +25,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 /// 這種 kind 的 prompt cache 存活秒數；`None`＝沒有閒置到期（codex）或不知道，網頁不畫倒數、也不保溫。
 pub fn ttl_secs(kind: &str) -> Option<i64> {
     match kind {
-        "claude" => Some(3600),
-        "agy" => Some(720),
+        "claude" | "agy" => Some(3600),
         _ => None,
     }
 }
@@ -261,12 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn ttl_is_an_hour_for_claude_twelve_minutes_for_agy_and_none_for_codex_and_grok() {
+    fn ttl_is_an_hour_for_claude_and_agy_and_none_for_codex_and_grok() {
         assert_eq!(ttl_secs("claude"), Some(3600));
+        assert_eq!(ttl_secs("agy"), Some(3600));
         assert_eq!(ttl_secs("codex"), None, "codex 的 cache 不會因閒置冷掉");
         assert!(never_cools("codex") && !never_cools("claude") && !never_cools("grok"));
         assert_eq!(ttl_secs("grok"), None);
-        assert_eq!(ttl_secs("agy"), Some(720), "agy 12 分冷掉");
     }
 
     #[test]

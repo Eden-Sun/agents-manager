@@ -339,7 +339,7 @@ test('手機：簡單 popup 英文完整、Hot 有剩餘分鐘，不放模型額
     const state = useStore.getState()
     const run = state.runs[id]!
     await act(() => useStore.setState({ selectedBotId: id,
-      runs: { ...state.runs, [id]: { ...run, agent_status: 'idle', prompt_cache: null, cache_kept_warm_at: null, last_api_at: new Date().toISOString(), cache_ttl_secs: 720,
+      runs: { ...state.runs, [id]: { ...run, agent_status: 'idle', prompt_cache: null, cache_kept_warm_at: null, last_api_at: new Date().toISOString(), cache_ttl_secs: 3600,
         status: { ...statusWith(null), context_used_pct: 7, context_used_tokens: 67_000, context_size: 1_000_000, model_name: 'hidden-model', cost_usd: 1.23 } } },
       turns: { ...state.turns, [id]: {} },
     }))
@@ -347,7 +347,7 @@ test('手機：簡單 popup 英文完整、Hot 有剩餘分鐘，不放模型額
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     await click(gitBtn())
     const popup = document.querySelector('.mobile-context-panel')!
-    assert.match(popup.textContent ?? '', /Hot · 12 min left/)
+    assert.match(popup.textContent ?? '', /Hot · 60 min left/)
     assert.doesNotMatch(popup.textContent ?? '', /hidden-model|Cost|Account|remaining|\$1.23|[\u3400-\u9fff]/)
   } finally {
     await act(() => setLangOverride(null))
