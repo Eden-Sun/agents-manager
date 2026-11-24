@@ -8,7 +8,7 @@ export interface HostBaselineView {
   text: string
   level: HostBaselineLevel
   hint: string
-  items: { id: string; severity: 'critical' | 'warn'; message: string; note?: string; fix: 'auto' | 'manual' | null }[]
+  items: { id: string; severity: 'critical' | 'warn'; message: string; note?: string; fix: 'auto' | 'manual' | null; kind: 'write' | 'install' | 'manual' | null; command?: string }[]
 }
 
 const STALE_AFTER_MS = (6 * 60 + 15) * 60 * 1000
@@ -28,9 +28,12 @@ export function hostBaselineView(b: HostBaseline | null, now: number = Date.now(
   const checked = Date.parse(b.checked_at)
   const old = !Number.isNaN(checked) && now - checked > STALE_AFTER_MS
   const fixable = b.fixable === undefined ? null : new Set(b.fixable)
+  const actions = new Map((b.actions ?? []).map((a) => [a.id, a]))
   const sorted = (b.issues === null ? [] : [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))).map((i) => ({
     ...i,
     fix: fixable === null ? null : fixable.has(i.id) ? ('auto' as const) : ('manual' as const),
+    kind: actions.get(i.id)?.kind ?? null,
+    command: actions.get(i.id)?.command,
   }))
   if (b.stale || old) {
     return {

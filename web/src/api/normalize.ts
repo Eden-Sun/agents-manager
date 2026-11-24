@@ -13,6 +13,7 @@ import type {
   HostBaselineBackups,
   HostBaselineRestoreResult,
   BaselineAction,
+  BaselineViewAction,
   BaselineApplyItemResult,
   MemOwner,
   MemProcess,
@@ -183,7 +184,17 @@ export function toHostBaseline(v: unknown): HostBaseline | null {
     : null
   const rawFixable = pick(v, 'fixable')
   const fixable = Array.isArray(rawFixable) && rawFixable.every((x) => typeof x === 'string') ? (rawFixable as string[]) : []
-  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')), fixable }
+  const rawActions = pick(v, 'actions')
+  const actions: BaselineViewAction[] = Array.isArray(rawActions)
+    ? rawActions.flatMap((a) => {
+        if (!isRec(a)) return []
+        const id = str(pick(a, 'id'))
+        const kind = pick(a, 'kind')
+        if (!id || (kind !== 'write' && kind !== 'install' && kind !== 'manual')) return []
+        return [{ id, kind, command: optStr(pick(a, 'command')) ?? undefined, reason: optStr(pick(a, 'reason')) ?? undefined }]
+      })
+    : []
+  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')), fixable, actions }
 }
 
 export function toHost(v: unknown): Host | null {
@@ -1131,6 +1142,7 @@ export function toHostBaselinePlan(v: unknown): HostBaselinePlan | null {
             key: optStr(pick(a, 'key')) ?? undefined,
             value: pick(a, 'value'),
             reason: optStr(pick(a, 'reason')) ?? undefined,
+            command: optStr(pick(a, 'command')) ?? undefined,
           },
         ]
       })

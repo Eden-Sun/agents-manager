@@ -3,7 +3,11 @@
 # daemon 編譯時把這份檔嵌進 binary（`crates/am-base/src/host_baseline/manifest.rs`），探測腳本的清單由它產生；
 # 執行期不讀 repo（遠端主機根本沒有 repo）。改這份檔要重編 daemon 才生效。
 #
-# 目前**只檢查、不修**：每一項只看「在不在」，不比內容。
+# 檢查只看「在不在」，不比內容。補齊（`[host_baseline.sync]` 為 `ask`／`auto`）：
+# - `claude.files` 的 `template = true`：檔不存在才照 `ops/host-baseline/templates/<檔名>` 寫入（存在就不動、不比內容）。
+# - `tools` 的 `install`：缺工具時用這裡寫的官方安裝指令（`darwin`／`linux`）；`linux_sudo = true` 代表 Linux 上要 sudo，
+#   一律只列「需手動」、顯示指令，不嘗試、不存密碼。指令是宣告檔寫死的，不來自主機。
+# - claude／codex／agy 本身不在基準裡（看 `hosts[].tools`），所以不自動安裝。
 # - 路徑一律相對於各自的根目錄（claude 身份目錄、`$CODEX_HOME`、`$GROK_HOME`、`$XDG_CONFIG_HOME/herdr`），
 #   不寫絕對路徑、不寫 `..`、不寫 `$HOME`／`~`。
 # - codex 的 model／model_reasoning_effort／service_tier 一律不列（使用者規定不動），解析時直接拒絕。
@@ -19,31 +23,37 @@ version = 1
 [[tools]]
 name = "herdr"
 severity = "critical"
+install = { darwin = "brew install herdr", linux = "curl -fsSL https://herdr.dev/install.sh | sh" }
 
 [[tools]]
 name = "rtk"
 severity = "warn"
 note = "token 壓縮工具，沒裝照常運作，只是指令輸出不會被壓縮"
+install = { darwin = "brew install rtk", linux = "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh" }
 
 [[tools]]
 name = "zsh"
 severity = "warn"
 note = "部分腳本與登入 shell 設定用 zsh，沒裝時多數功能照常"
+install = { darwin = "brew install zsh", linux = "sudo apt install zsh", linux_sudo = true }
 
 [[tools]]
 name = "bun"
 severity = "warn"
 note = "只有從原始碼建置網頁介面才需要，用現成安裝包不用裝"
+install = { darwin = "brew install oven-sh/bun/bun", linux = "curl -fsSL https://bun.sh/install | bash" }
 
 [[tools]]
 name = "jq"
 severity = "warn"
 note = "讀 JSON 設定的小工具，沒裝時 claude settings.json 的鍵無法檢查"
+install = { darwin = "brew install jq", linux = "sudo apt install jq", linux_sudo = true }
 
 [[tools]]
 name = "gh"
 severity = "warn"
 note = "只有 GitHub 相關功能（PR、issue、CI 狀態）才需要"
+install = { darwin = "brew install gh", linux = "sudo apt install gh", linux_sudo = true }
 
 # 每個 claude 身份的設定目錄（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`、alias cc0–cc6）。
 [[claude.files]]
@@ -53,15 +63,18 @@ severity = "critical"
 [[claude.files]]
 path = "statusline-command.sh"
 severity = "warn"
+template = true
 note = "選用：狀態列顯示額度與 context"
 
 [[claude.files]]
 path = "CLAUDE.md"
 severity = "warn"
+template = true
 
 [[claude.files]]
 path = "RTK.md"
 severity = "warn"
+template = true
 only_if_tool = "rtk"
 note = "rtk 的使用說明檔，只在這台已裝 rtk 時才檢查"
 

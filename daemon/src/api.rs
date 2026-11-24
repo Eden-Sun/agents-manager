@@ -4274,7 +4274,7 @@ pub(crate) async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(
     let (Ok(m), Ok(v)) = (crate::host_baseline::manifest::shipped(), crate::host_baseline::manifest::shipped_values()) else {
         return Err(LcError::Unavailable(json!({"error": "unavailable", "reason": "baseline_manifest_invalid", "host": name})));
     };
-    let plan = crate::host_baseline::plan::build(m, v, issues);
+    let plan = crate::host_baseline::plan::build_on(m, v, issues, report.os.as_deref());
     Ok((report, plan))
 }
 
@@ -4283,11 +4283,15 @@ const BASELINE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// 在 fence 綁的那條連線上跑（本機 `/bin/sh`、遠端 ssh）。呼叫端包在 `run_if_current` 裡。
 pub(crate) async fn baseline_run_script(fence: &crate::hosts::HostFence, script: &str) -> anyhow::Result<String> {
+    baseline_run_script_for(fence, script, BASELINE_WRITE_TIMEOUT).await
+}
+
+pub(crate) async fn baseline_run_script_for(fence: &crate::hosts::HostFence, script: &str, timeout: std::time::Duration) -> anyhow::Result<String> {
     if fence.conn().is_local() {
-        let out = crate::hosts::sh_local(script, BASELINE_WRITE_TIMEOUT).await?.ok_or_else(|| anyhow::anyhow!("local baseline script timed out"))?;
+        let out = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow::anyhow!("local baseline script timed out"))?;
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
-    fence.conn().ssh_exec_path_timeout(script, BASELINE_WRITE_TIMEOUT).await
+    fence.conn().ssh_exec_path_timeout(script, timeout).await
 }
 
 fn sync_busy(name: &str) -> LcError {
@@ -4350,7 +4354,7 @@ async fn baseline_apply_with_fence(app: &Arc<App>, name: &str, fence: &crate::ho
         let script = apply::render_apply_sh(&id, &plan.plan_rev, &prepared.writes).map_err(|e| LcError::Upstream(e.into()))?;
         let out = app
             .hosts
-            .run_if_current(fence, baseline_run_script(fence, &script))
+            .run_if_current(fence, baseline_run_script_for(fence, &script, apply::script_timeout(&prepared.writes)))
             .await
             .ok_or_else(|| baseline_superseded(name))?
             .map_err(|e| LcError::Upstream(format!("{e:#}")))?;

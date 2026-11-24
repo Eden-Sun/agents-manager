@@ -11,7 +11,7 @@
 //! - 還原時主機上的 `manifest` 是不可信輸入：先整份驗過（只認固定幾個目標、編號、權限），任一行不對整個拒絕，
 //!   驗完才開始寫。
 
-use super::plan::{Plan, MERGE_KEY, WRITE_FILE};
+use super::plan::{Plan, INSTALL_TOOL, MERGE_KEY, WRITE_FILE};
 use crate::hosts::sh_quote;
 use serde::Serialize;
 
@@ -87,6 +87,8 @@ enum Format {
     Toml { table: String, key: String, literal: String },
     Json { path: String, literal: String },
     AgyRtk,
+    File { content: &'static str, mode: &'static str },
+    Install { tool: String, command: String },
 }
 
 /// 要寫的一個鍵。`token` 是主機上的目標（`codex/config.toml`、`claude-default/settings.json`、`claude-cc<N>/settings.json`），
@@ -105,6 +107,24 @@ pub struct Prepared {
     pub manual: Vec<Outcome>,
 }
 
+/// 身份名 → 主機上的目錄記號：`default`、`cc<N>`；其他（自訂設定目錄）不支援。
+fn claude_dir_token(ident: &str) -> Option<String> {
+    let digits = ident.strip_prefix("cc").filter(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|c| c.is_ascii_digit()));
+    match (ident, digits) {
+        ("default", _) => Some("claude-default".into()),
+        (_, Some(n)) => Some(format!("claude-cc{n}")),
+        _ => None,
+    }
+}
+
+fn safe_tool(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 32 && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+fn safe_command(c: &str) -> bool {
+    !c.trim().is_empty() && c.len() <= 300 && !c.chars().any(char::is_control)
+}
+
 fn safe_seg(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
@@ -121,7 +141,7 @@ fn toml_literal(v: &serde_json::Value) -> Option<String> {
 
 /// 從計畫挑出要寫的鍵。`ids` 省略＝計畫裡全部 `merge_key`；給了就每個都必須是計畫裡的 `merge_key`，否則回那個 id（400）。
 pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> {
-    let fixable: Vec<_> = plan.actions.iter().filter(|a| a.action == MERGE_KEY || a.action == WRITE_FILE).collect();
+    let fixable: Vec<_> = plan.actions.iter().filter(|a| matches!(a.action, MERGE_KEY | WRITE_FILE | INSTALL_TOOL)).collect();
     let chosen: Vec<_> = match ids {
         None => fixable,
         Some(ids) => {
@@ -146,6 +166,30 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
             p.writes.push(KeyWrite { id: a.id.clone(), token: "agy/rtk-rewrite".into(), format: Format::AgyRtk });
             continue;
         }
+        if a.action == INSTALL_TOOL {
+            let tool = a.target.strip_prefix("tool/").filter(|t| safe_tool(t));
+            match (tool, a.command.as_deref().filter(|c| safe_command(c))) {
+                (Some(tool), Some(command)) => p.writes.push(KeyWrite {
+                    id: a.id.clone(),
+                    token: a.target.clone(),
+                    format: Format::Install { tool: tool.to_string(), command: command.to_string() },
+                }),
+                _ => p.manual.push(manual(super::plan::NO_INSTALLER)),
+            }
+            continue;
+        }
+        if a.action == WRITE_FILE {
+            let template = a.target.strip_prefix("claude:").and_then(|r| r.split_once('/')).and_then(|(ident, file)| {
+                let token = claude_dir_token(ident)?;
+                let t = super::manifest::shipped_values().ok()?.templates.get(file)?;
+                Some((format!("{token}/{file}"), *t))
+            });
+            match template {
+                Some((token, t)) => p.writes.push(KeyWrite { id: a.id.clone(), token, format: Format::File { content: t.content, mode: t.mode } }),
+                None => p.manual.push(manual(super::plan::NO_TEMPLATE)),
+            }
+            continue;
+        }
         let (Some(key), Some(value)) = (a.key.as_deref(), a.value.as_ref()) else {
             p.manual.push(manual(super::plan::NO_VALUE));
             continue;
@@ -168,15 +212,11 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
             continue;
         }
         if let Some(ident) = a.target.strip_prefix("claude:").and_then(|r| r.strip_suffix("/settings.json")) {
-            let digits = ident.strip_prefix("cc").filter(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|c| c.is_ascii_digit()));
-            let token = match (ident, digits) {
-                ("default", _) => "claude-default/settings.json".to_string(),
-                (_, Some(n)) => format!("claude-cc{n}/settings.json"),
-                _ => {
-                    p.manual.push(manual("unsupported_identity"));
-                    continue;
-                }
+            let Some(dir) = claude_dir_token(ident) else {
+                p.manual.push(manual("unsupported_identity"));
+                continue;
             };
+            let token = format!("{dir}/settings.json");
             if !key.split('.').all(safe_seg) {
                 p.manual.push(manual("unsupported_key"));
                 continue;
@@ -197,11 +237,18 @@ ba_root="$HOME/.config/agents-manager/baseline-backup"
 ba_token_ok() {
   case "$1" in ''|/*|*..*|*//*|*' '*) return 1 ;; esac
   case "$1" in
-    codex/config.toml|claude-default/settings.json) return 0 ;;
-    claude-cc*/settings.json)
-      ba_t=${1#claude-cc}; ba_t=${ba_t%/settings.json}
-      case "$ba_t" in ''|*[!0-9]*) return 1 ;; esac
-      return 0 ;;
+    codex/config.toml) return 0 ;;
+    claude-*/*)
+      ba_tkf=${1#*/}
+      case "$ba_tkf" in settings.json|CLAUDE.md|RTK.md|statusline-command.sh) ;; *) return 1 ;; esac
+      ba_tkd=${1%%/*}
+      case "$ba_tkd" in
+        claude-default) return 0 ;;
+        claude-cc*)
+          ba_tkn=${ba_tkd#claude-cc}
+          case "$ba_tkn" in ''|*[!0-9]*) return 1 ;; esac
+          return 0 ;;
+      esac ;;
   esac
   return 1
 }
@@ -209,8 +256,8 @@ ba_path() {
   ba_token_ok "$1" || return 1
   case "$1" in
     codex/config.toml) printf '%s/config.toml' "${CODEX_HOME:-$HOME/.codex}" ;;
-    claude-default/settings.json) printf '%s/.claude/settings.json' "$HOME" ;;
-    *) ba_t=${1%/settings.json}; printf '%s/.%s/settings.json' "$HOME" "$ba_t" ;;
+    claude-default/*) printf '%s/.claude/%s' "$HOME" "${1#*/}" ;;
+    *) printf '%s/.%s/%s' "$HOME" "${1%%/*}" "${1#*/}" ;;
   esac
 }
 # 權限（八進位三位）；讀不懂＝`-`（不 chmod）。
@@ -302,8 +349,12 @@ ba_backup() {
     ba_dir=$ba_new
   fi
   ba_n=$((ba_n + 1))
-  cp "$2" "$ba_dir/files/$ba_n" 2>/dev/null && chmod 600 "$ba_dir/files/$ba_n" 2>/dev/null || return 1
-  printf 'file %s 1 %s %s\n' "$ba_n" "$(ba_mode "$2")" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  if [ -n "$2" ]; then
+    cp "$2" "$ba_dir/files/$ba_n" 2>/dev/null && chmod 600 "$ba_dir/files/$ba_n" 2>/dev/null || return 1
+    printf 'file %s 1 %s %s\n' "$ba_n" "$(ba_mode "$2")" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  else
+    printf 'file %s 0 - %s\n' "$ba_n" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  fi
   ba_seen="$ba_seen$1|"
 }
 ba_key() { printf 'AM_BA key %s %s\n' "$@"; }
@@ -376,6 +427,56 @@ ba_agy_rtk() {
 }
 "#;
 
+const FILE_SH: &str = r#"
+ba_file() {
+  ba_i=$1
+  ba_tok=$2
+  ba_md=$3
+  if [ "$ba_stop" = 1 ]; then ba_key "$ba_i" "skipped aborted"; return; fi
+  ba_f=$(ba_path "$ba_tok") || { ba_key "$ba_i" "skipped bad_target"; return; }
+  ba_d=$(dirname "$ba_f")
+  if [ -L "$ba_f" ] || [ -L "$ba_d" ]; then ba_key "$ba_i" "skipped symlink"; return; fi
+  [ -d "$ba_d" ] || { ba_key "$ba_i" "skipped dir_missing"; return; }
+  if [ -e "$ba_f" ]; then ba_key "$ba_i" present; return; fi
+  ba_tmp=$(mktemp "$ba_d/.am-baseline.XXXXXX" 2>/dev/null) || { ba_key "$ba_i" "skipped write_failed"; return; }
+  if ! { cat > "$ba_tmp" 2>/dev/null && chmod "$ba_md" "$ba_tmp" 2>/dev/null; }; then rm -f "$ba_tmp"; ba_key "$ba_i" "skipped write_failed"; return; fi
+  if ! ba_backup "$ba_tok" ""; then
+    rm -f "$ba_tmp"
+    ba_stop=1
+    printf 'AM_BA error backup_failed\n'
+    ba_key "$ba_i" "skipped backup_failed"
+    return
+  fi
+  ba_sync "$ba_tmp"
+  if [ -e "$ba_f" ] || [ -L "$ba_f" ]; then rm -f "$ba_tmp"; ba_key "$ba_i" present; return; fi
+  if mv -f "$ba_tmp" "$ba_f" 2>/dev/null; then ba_key "$ba_i" applied; else rm -f "$ba_tmp"; ba_key "$ba_i" "skipped write_failed"; fi
+}
+"#;
+
+const INSTALL_SH: &str = r#"
+ba_find() {
+  for ba_c in "$(command -v "$1" 2>/dev/null)" "$HOME/.bun/bin/$1" "$HOME/.local/bin/$1" "/opt/homebrew/bin/$1" "/usr/local/bin/$1" "$HOME/.cargo/bin/$1" "/usr/bin/$1" "/bin/$1"; do
+    case "$ba_c" in /*) if [ -x "$ba_c" ]; then printf '%s' "$ba_c"; return 0; fi ;; esac
+  done
+  return 1
+}
+ba_install() {
+  ba_i=$1
+  ba_tl=$2
+  if [ "$ba_stop" = 1 ]; then ba_key "$ba_i" "skipped aborted"; return; fi
+  if ba_find "$ba_tl" >/dev/null; then ba_key "$ba_i" present; return; fi
+  PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+  export PATH
+  case "$3" in
+    brew\ *) command -v brew >/dev/null 2>&1 || { ba_key "$ba_i" "skipped no_brew"; return; } ;;
+  esac
+  /bin/sh -c "$3" </dev/null >/dev/null 2>&1 || { ba_key "$ba_i" "skipped install_failed"; return; }
+  ba_pt=$(ba_find "$ba_tl") || { ba_key "$ba_i" "skipped install_failed"; return; }
+  "$ba_pt" --version </dev/null >/dev/null 2>&1 || { ba_key "$ba_i" "skipped version_check_failed"; return; }
+  ba_key "$ba_i" applied
+}
+"#;
+
 /// 寫完才輪替：只算／只刪備份 id 形狀的真目錄，剛建的那份不刪。
 const APPLY_TAIL_SH: &str = r#"
 if [ -n "$ba_dir" ]; then
@@ -404,8 +505,27 @@ pub fn render_apply_sh(backup_id: &str, plan_rev: &str, writes: &[KeyWrite]) -> 
     if writes.iter().any(|w| matches!(w.format, Format::AgyRtk)) {
         s.push_str(AGY_RTK_SH);
     }
+    if writes.iter().any(|w| matches!(w.format, Format::File { .. })) {
+        s.push_str(FILE_SH);
+    }
+    if writes.iter().any(|w| matches!(w.format, Format::Install { .. })) {
+        s.push_str(INSTALL_SH);
+    }
     for (i, w) in writes.iter().enumerate() {
         let args = match &w.format {
+            Format::File { content, mode } => {
+                s.push_str(&format!("ba_file {i} {} {} <<'{}'\n{content}", sh_quote(&w.token), sh_quote(mode), super::manifest::TEMPLATE_END_MARK));
+                if !content.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(super::manifest::TEMPLATE_END_MARK);
+                s.push('\n');
+                continue;
+            }
+            Format::Install { tool, command } => {
+                s.push_str(&format!("ba_install {i} {} {}\n", sh_quote(tool), sh_quote(command)));
+                continue;
+            }
             Format::Toml { table, key, literal } => format!("toml {} {} {}", sh_quote(table), sh_quote(key), sh_quote(literal)),
             Format::Json { path, literal } => format!("json {} {}", sh_quote(path), sh_quote(literal)),
             Format::AgyRtk => {
@@ -417,6 +537,15 @@ pub fn render_apply_sh(backup_id: &str, plan_rev: &str, writes: &[KeyWrite]) -> 
     }
     s.push_str(&APPLY_TAIL_SH.replace("__AM_KEEP__", &KEEP_BACKUPS.to_string()));
     Ok(s)
+}
+
+/// 這批寫入在主機上最久可以跑多久：有安裝動作要等下載與編譯，其餘維持 60 秒。
+pub fn script_timeout(writes: &[KeyWrite]) -> std::time::Duration {
+    if writes.iter().any(|w| matches!(w.format, Format::Install { .. })) {
+        std::time::Duration::from_secs(900)
+    } else {
+        std::time::Duration::from_secs(60)
+    }
 }
 
 /// 套用腳本跑完的結果。
@@ -442,6 +571,10 @@ fn reason_code(s: &str) -> &'static str {
         "conflict" => "conflict",
         "backup_failed" => "backup_failed",
         "rtk_missing" => "rtk_missing",
+        "dir_missing" => "dir_missing",
+        "no_brew" => "no_brew",
+        "install_failed" => "install_failed",
+        "version_check_failed" => "version_check_failed",
         _ => "unknown",
     }
 }
@@ -785,13 +918,14 @@ pub fn parse_restore(out: &str) -> Option<RestoreRun> {
 
 /// 同腳本的 `ba_token_ok`。
 fn token_ok(t: &str) -> bool {
-    match t {
-        "codex/config.toml" | "claude-default/settings.json" => true,
-        _ => t
-            .strip_prefix("claude-cc")
-            .and_then(|r| r.strip_suffix("/settings.json"))
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())),
+    if t == "codex/config.toml" {
+        return true;
     }
+    let Some((dir, file)) = t.split_once('/') else { return false };
+    if !matches!(file, "settings.json" | "CLAUDE.md" | "RTK.md" | "statusline-command.sh") {
+        return false;
+    }
+    dir == "claude-default" || dir.strip_prefix("claude-cc").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -805,12 +939,12 @@ mod tests {
     const ID1: &str = "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4";
 
     fn act(id: &str, target: &str, key: &str, value: serde_json::Value) -> FixAction {
-        FixAction { id: id.into(), action: MERGE_KEY, severity: "warn", target: target.into(), key: Some(key.into()), value: Some(value), reason: None }
+        FixAction { id: id.into(), action: MERGE_KEY, severity: "warn", target: target.into(), key: Some(key.into()), value: Some(value), reason: None, command: None }
     }
 
     fn agy_rtk_plan() -> Plan {
         Plan {
-            actions: vec![FixAction { id: "agy.rtk_rewrite".into(), action: WRITE_FILE, severity: "warn", target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None }],
+            actions: vec![FixAction { id: "agy.rtk_rewrite".into(), action: WRITE_FILE, severity: "warn", target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None, command: None }],
             plan_rev: "rev-agy".into(),
         }
     }
@@ -838,6 +972,147 @@ mod tests {
         let run = home.apply(ID1, &agy_rtk_plan());
         assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("rtk_missing")));
         assert!(!home.h.join(".config/agents-manager/agy-rtk").exists());
+    }
+
+    fn file_plan(id: &str, target: &str) -> Plan {
+        Plan {
+            actions: vec![FixAction { id: id.into(), action: WRITE_FILE, severity: "warn", target: target.into(), key: None, value: None, reason: None, command: None }],
+            plan_rev: "rev-file".into(),
+        }
+    }
+
+    fn install_plan(tool: &str, command: &str) -> Plan {
+        Plan {
+            actions: vec![FixAction {
+                id: format!("tool.{tool}"),
+                action: INSTALL_TOOL,
+                severity: "warn",
+                target: format!("tool/{tool}"),
+                key: None,
+                value: None,
+                reason: None,
+                command: Some(command.into()),
+            }],
+            plan_rev: "rev-install".into(),
+        }
+    }
+
+    #[test]
+    fn a_missing_template_file_is_written_from_the_baseline_and_never_overwritten() {
+        let home = Home::new();
+        std::fs::create_dir_all(home.h.join(".claude-cc1")).unwrap();
+        let plan = file_plan("claude.cc1.RTK.md", "claude:cc1/RTK.md");
+        let run = home.apply(ID1, &plan);
+        assert_eq!(run.outcomes, vec![Outcome { id: "claude.cc1.RTK.md".into(), result: APPLIED, reason: None }]);
+        let want = super::super::manifest::shipped_values().unwrap().templates["RTK.md"].content;
+        assert_eq!(home.read(".claude-cc1/RTK.md"), want.as_bytes());
+        assert_eq!(mode(&home.h.join(".claude-cc1/RTK.md")), 0o600);
+        assert!(run.backup_written, "the absent original is recorded so a restore can delete the new file");
+        home.write(".claude-cc1/RTK.md", "mine\n");
+        let again = home.apply("20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", &plan);
+        assert_eq!(again.outcomes[0].result, PRESENT);
+        assert_eq!(home.read(".claude-cc1/RTK.md"), b"mine\n");
+    }
+
+    #[test]
+    fn the_statusline_template_is_written_executable_and_a_restore_deletes_it() {
+        let home = Home::new();
+        std::fs::create_dir_all(home.h.join(".claude")).unwrap();
+        let plan = file_plan("claude.default.statusline-command.sh", "claude:default/statusline-command.sh");
+        assert_eq!(home.apply(ID1, &plan).outcomes[0].result, APPLIED);
+        let f = home.h.join(".claude/statusline-command.sh");
+        assert_eq!(mode(&f), 0o700);
+        let want = super::super::manifest::shipped_values().unwrap().templates["statusline-command.sh"].content;
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), want);
+        let run = home.restore(ID1);
+        assert_eq!(run.files, vec![RestoredFile { file: "claude-default/statusline-command.sh".into(), result: "deleted" }]);
+        assert!(!f.exists());
+        assert_eq!(home.backups(), vec![ID1.to_string()]);
+    }
+
+    #[test]
+    fn a_template_file_is_not_written_into_a_missing_identity_dir_or_through_a_symlink() {
+        let home = Home::new();
+        let plan = file_plan("claude.cc7.CLAUDE.md", "claude:cc7/CLAUDE.md");
+        let run = home.apply(ID1, &plan);
+        assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("dir_missing")));
+        assert!(!home.h.join(".claude-cc7").exists());
+        assert!(!run.backup_written);
+        std::fs::create_dir_all(home.h.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(home.h.join("elsewhere"), home.h.join(".claude-cc7")).unwrap();
+        let run = home.apply("20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", &plan);
+        assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("symlink")));
+        assert!(!home.h.join("elsewhere/CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn prepare_only_accepts_template_files_for_default_and_numbered_identities() {
+        let ok = prepare(&file_plan("claude.default.CLAUDE.md", "claude:default/CLAUDE.md"), None).unwrap();
+        assert_eq!(ok.writes[0].token, "claude-default/CLAUDE.md");
+        for target in ["claude:work/CLAUDE.md", "claude:cc1/settings.json", "claude:cc1/other.md", "claude:cc1/../x/CLAUDE.md", "codex/hooks.json"] {
+            let got = prepare(&file_plan("x", target), None).unwrap();
+            assert!(got.writes.is_empty(), "{target}");
+            assert_eq!(got.manual.len(), 1, "{target}");
+        }
+    }
+
+    #[test]
+    fn an_install_runs_the_declared_command_then_checks_the_version() {
+        let home = Home::new();
+        let cmd = "mkdir -p \"$HOME/.local/bin\" && printf '#!/bin/sh\\necho 1.2.3\\n' > \"$HOME/.local/bin/amfakea\" && chmod 755 \"$HOME/.local/bin/amfakea\"";
+        let run = home.apply(ID1, &install_plan("amfakea", cmd));
+        assert_eq!(run.outcomes, vec![Outcome { id: "tool.amfakea".into(), result: APPLIED, reason: None }]);
+        assert!(home.h.join(".local/bin/amfakea").exists());
+        assert!(!run.backup_written, "installing a tool writes no config file");
+        let again = home.apply("20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", &install_plan("amfakea", "exit 9"));
+        assert_eq!(again.outcomes[0].result, PRESENT, "an installed tool is never reinstalled");
+    }
+
+    #[test]
+    fn a_failing_install_or_a_broken_binary_is_reported_not_applied() {
+        let home = Home::new();
+        let run = home.apply(ID1, &install_plan("amfakea", "exit 3"));
+        assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("install_failed")));
+        let ran = home.apply(
+            "20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4",
+            &install_plan("amfakeb", "mkdir -p \"$HOME/.local/bin\" && printf '#!/bin/sh\\nexit 1\\n' > \"$HOME/.local/bin/amfakeb\" && chmod 755 \"$HOME/.local/bin/amfakeb\""),
+        );
+        assert_eq!((ran.outcomes[0].result, ran.outcomes[0].reason), (SKIPPED, Some("version_check_failed")));
+        assert!(!super::super::auto::all_applied(&ran));
+    }
+
+    #[test]
+    fn a_brew_install_without_brew_is_skipped_without_running_anything() {
+        let home = Home::new();
+        let run = home.apply(ID1, &install_plan("amfakea", "brew install jq"));
+        assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("no_brew")));
+    }
+
+    #[test]
+    fn an_install_action_without_a_safe_command_or_tool_name_is_manual() {
+        for (tool, command) in [("jq", "\n"), ("../jq", "echo hi"), ("jq", "echo\nhi")] {
+            let got = prepare(&install_plan(tool, command), None).unwrap();
+            assert!(got.writes.is_empty(), "{tool} {command:?}");
+            assert_eq!(got.manual.len(), 1);
+        }
+    }
+
+    #[test]
+    fn the_install_timeout_is_longer_only_when_there_is_an_install() {
+        let installs = prepare(&install_plan("jq", "true"), None).unwrap().writes;
+        let files = prepare(&file_plan("claude.default.CLAUDE.md", "claude:default/CLAUDE.md"), None).unwrap().writes;
+        assert!(script_timeout(&installs) > script_timeout(&files));
+        assert_eq!(script_timeout(&files), std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn every_shipped_template_is_a_restorable_target_and_safe_to_embed() {
+        let v = super::super::manifest::shipped_values().unwrap();
+        assert!(!v.templates.is_empty());
+        for (name, t) in &v.templates {
+            assert!(token_ok(&format!("claude-default/{name}")), "{name}");
+            assert!(!t.content.lines().any(|l| l == super::super::manifest::TEMPLATE_END_MARK), "{name}");
+        }
     }
 
     fn hooks_plan() -> Plan {
@@ -1028,8 +1303,8 @@ mod tests {
     #[test]
     fn prepare_takes_only_merge_keys_and_excludes_model_keys_and_secrets_again() {
         let mut p = hooks_plan();
-        p.actions.push(FixAction { id: "codex.hooks.json".into(), action: plan::MANUAL, severity: "warn", target: "codex/hooks.json".into(), key: None, value: None, reason: Some(plan::NO_TEMPLATE) });
-        p.actions.push(FixAction { id: "tool.rtk".into(), action: plan::MANUAL, severity: "critical", target: "tool/rtk".into(), key: None, value: None, reason: Some(plan::NO_INSTALLER) });
+        p.actions.push(FixAction { id: "codex.hooks.json".into(), action: plan::MANUAL, severity: "warn", target: "codex/hooks.json".into(), key: None, value: None, reason: Some(plan::NO_TEMPLATE), command: None });
+        p.actions.push(FixAction { id: "tool.rtk".into(), action: plan::MANUAL, severity: "critical", target: "tool/rtk".into(), key: None, value: None, reason: Some(plan::NO_INSTALLER), command: None });
         p.actions.push(act("codex.config.toml:model", "codex/config.toml", "model", serde_json::json!("gpt-x")));
         p.actions.push(act("codex.config.toml:profiles.x.model", "codex/config.toml", "profiles.x.model", serde_json::json!("gpt-x")));
         p.actions.push(act("codex.config.toml:features.reasoning_effort", "codex/config.toml", "features.reasoning_effort", serde_json::json!("high")));

@@ -2489,7 +2489,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
 - `tools.agy.quota_error`（只有 agy，選填）：這台 agy 額度探測**最近一次失敗**的原因 `{"reason":"timeout"|"unreadable"|"exit"|"pane"|"not_connected","message","at"}`；已登入（`logged_in:true`）但額度暫時拿不到時才有，下一次探測成功就消失（有變就推 `host_changed`）。agy 明說沒憑證不算這個，改成 `logged_in:false`。只在 daemon 記憶體，重啟後清空。
-- `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message","note"?}]（`note`＝宣告檔的用途說明，只有選用工具缺了才有；2026-11-12 起只有 herdr 是 critical）, "checked_at", "os": "Linux"|"Darwin"|null}`。
+- `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**（另帶 `fixable`＝計畫裡可自動補的差異 id，與 `actions`＝`[{id, kind: "write"|"install"|"manual", command?, reason?}]`，網頁據此在每項後面標「將寫入／將安裝／需手動」）：`{"issues": null | [{"id","severity":"critical"|"warn","message","note"?}]（`note`＝宣告檔的用途說明，只有選用工具缺了才有；2026-11-12 起只有 herdr 是 critical）, "checked_at", "os": "Linux"|"Darwin"|null}`。
   過期標記：`checked_at` 是**最後一次成功**偵測的時間；偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）時舊結果原封不動留著，另帶
   `failed_at`（最後一次失敗的時間，之後成功就清成 `null`）與 `error`（失敗原因第一行，最多 200 字），並推 `host_changed`；`stale: true` ＝
   最後一次偵測失敗，**或** `checked_at` 比 6 小時 15 分（一個重量週期＋15 分寬限）還舊（讀不懂也算）。
@@ -2513,12 +2513,15 @@ issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[
   "actions": [
     { "id": "codex.config.toml:features.hooks", "action": "merge_key", "severity": "warn",
       "target": "codex/config.toml", "key": "features.hooks", "value": true },
-    { "id": "tool.rtk", "action": "manual", "severity": "critical", "target": "tool/rtk", "reason": "no_installer" } ] }
+    { "id": "tool.rtk", "action": "install_tool", "severity": "warn", "target": "tool/rtk",
+      "command": "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh" },
+    { "id": "tool.jq", "action": "manual", "severity": "warn", "target": "tool/jq", "reason": "needs_sudo", "command": "sudo apt install jq" },
+    { "id": "claude.cc1.RTK.md", "action": "write_file", "severity": "warn", "target": "claude:cc1/RTK.md" } ] }
 ```
 
-- 每筆動作只有這些欄位：`id`（差異 id）、`action`、`severity`、`target`（顯示用位置 `<CLI>[:<身份>]/<檔>`，**不是**主機上的路徑）、`key`（設定鍵的點號路徑）、`value`（宣告檔寫的新值，只有 `merge_key` 有）、`reason`（只有 `manual` 有）。**不回傳主機上現有檔的內容**。
-- `action`：`merge_key`＝缺的設定鍵、宣告檔替它寫了 `value`；`manual`＝其他一律手動。`write_file`／`install_tool` 保留給之後的自動補齊，這一版不會出現。
-- `reason`：`no_value`（鍵沒有宣告值；含 Mac 專用 plugin）、`no_template`（缺檔，沒有模板）、`no_installer`（缺工具）、`invalid_json`（`settings.json` 不是合法 JSON）、`secret`（`gitconfig.token`，永遠手動）、`parent_missing`（鍵所在的檔本身不在）、`unknown`（宣告檔不認得的 id）。
+- 每筆動作只有這些欄位：`id`（差異 id）、`action`、`severity`、`target`（顯示用位置 `<CLI>[:<身份>]/<檔>`，**不是**主機上的路徑）、`key`（設定鍵的點號路徑）、`value`（宣告檔寫的新值，只有 `merge_key` 有）、`reason`（只有 `manual` 有）、`command`（安裝指令，宣告檔寫死的，只有 `install_tool` 與 `needs_sudo` 的 `manual` 才有）。**不回傳主機上現有檔的內容**。
+- `action`：`merge_key`＝缺的設定鍵、宣告檔替它寫了 `value`；`write_file`＝缺的檔、宣告檔有模板（claude 身份目錄的 `CLAUDE.md`／`RTK.md`／`statusline-command.sh`；`agy/rtk-rewrite` 啟用檔）；`install_tool`＝缺的工具、依 `hosts[].baseline.os` 挑出宣告檔的官方安裝指令；`manual`＝其他一律手動。
+- `reason`：`no_value`（鍵沒有宣告值）、`no_template`（缺檔，沒有模板）、`no_installer`（缺工具，基準沒寫安裝方式或該 OS 沒有指令）、`needs_sudo`（Linux 安裝要 sudo，只列指令）、`os_unknown`（不知道主機作業系統）、`interactive`（Mac 專用 plugin，要在 claude 裡互動安裝）、`invalid_json`（`settings.json` 不是合法 JSON）、`secret`（`gitconfig.token`，永遠手動）、`parent_missing`（鍵所在的檔本身不在）、`unknown`（宣告檔不認得的 id）。
 - codex 的 model／effort／service_tier 相關鍵**永遠不會出現**在計畫裡（連 `manual` 都不列）。
 - 順序照 `issues`，同一個 id 只列一次。`plan_rev` 是動作內容的雜湊：同一份計畫恆同、任何動作變了就變。
 - 結果過期（`stale: true`，見 §12.6）照樣回，前端自己決定怎麼標。
@@ -2546,14 +2549,14 @@ issue #719 階段 3a／3b，SPEC §16.7。三條都只給使用者（Bot、AGM r
 
 `restore: "overwrite"` 表示備份含原檔，還原會直接覆寫；`restore: "delete"` 表示備份時檔案不存在，還原會刪除現在存在的檔。
 
-**apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部 `merge_key`）：
+**apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部可套用項：`merge_key`、`write_file`、`install_tool`）：
 
 ```json
 { "host": "mac_builder", "plan_rev": "9f3c…", "backup_id": "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", "error": null,
   "results": [ { "id": "codex.config.toml:features.hooks", "result": "applied" } ] }
 ```
 
-- 先擋：404 不認得的主機；409 `sync_disabled`＝這台在 `config.toml` 的 `[host_baseline.sync]` 是 `off`（沒列＝off；鍵對不上主機也是 off）；409 `auto_owns_sync`＝這台是 `auto`，由自動模式負責，手動補齊停用（還原不受影響）；409 `sync_busy`（`retryable: true`）＝同一台的自動補齊或手動補齊／還原正在執行；409 `baseline_unknown`（同 §12.6a）；409 `plan_outdated`＝`plan_rev` 跟 daemon 現在算出來的不同（回應帶目前的 `plan_rev`）；400 `not_fixable`（帶 `id`）＝`ids` 裡有不是 `merge_key` 的項目（手動項、不存在的 id）。以上都不連主機。
+- 先擋：404 不認得的主機；409 `sync_disabled`＝這台在 `config.toml` 的 `[host_baseline.sync]` 是 `off`（沒列＝off；鍵對不上主機也是 off）；409 `auto_owns_sync`＝這台是 `auto`，由自動模式負責，手動補齊停用（還原不受影響）；409 `sync_busy`（`retryable: true`）＝同一台的自動補齊或手動補齊／還原正在執行；409 `baseline_unknown`（同 §12.6a）；409 `plan_outdated`＝`plan_rev` 跟 daemon 現在算出來的不同（回應帶目前的 `plan_rev`）；400 `not_fixable`（帶 `id`）＝`ids` 裡有不是可套用項的項目（手動項、不存在的 id）。含安裝動作時主機上的腳本上限 15 分鐘（其餘 60 秒）；結果 `reason` 另有 `dir_missing`、`no_brew`、`install_failed`、`version_check_failed`。以上都不連主機。
 - 執行包在那台主機的 HostFence 裡（`run_if_current`）：主機在這之間重連／改指／被移除 → 409 `host_superseded`，腳本一次都沒送。ssh 失敗 502；腳本輸出被截斷（沒有結尾標記）也是 502，主機上可能已寫一部分（備份照樣在）。
 - `results[]`：每項 `{id, result, reason?}`。`result`：`applied`（補上了）、`present`（鍵已經在，不論值，沒動）、`skipped`（`reason`：`file_missing` 檔不在——3a 不建檔、`symlink` 目標或它的目錄是 symlink、`invalid_json`、`conflict` 中間的鍵不是物件、`write_failed`、`backup_failed`、`aborted` 前面備份失敗後面不做）、`manual`（`reason`：`no_jq` 主機沒有 jq、`unsupported_identity` 自訂的 claude 設定目錄、`unsupported_key`、`unsupported_value`、`secret`）。
 - 只會寫 codex `config.toml`（`$CODEX_HOME`，預設 `~/.codex`）與 claude `~/.claude`／`~/.claude-cc<N>` 的 `settings.json`。codex 的 model／effort／service_tier 鍵、`.gitconfig` 憑證在計畫與 apply 兩層各擋一次；缺檔（`write_file`）與工具安裝維持 `manual`、不會寫。

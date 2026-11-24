@@ -157,9 +157,19 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
   )
 }
 
-function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
+function BaselineFix({ fix, kind, command }: { fix: 'auto' | 'manual' | null; kind?: 'write' | 'install' | 'manual' | null; command?: string }) {
   const t = useT()
   if (fix === null) return null
+  if (kind === 'write') return <span className="host-baseline-fix auto">{t('（將寫入）')}</span>
+  if (kind === 'install') return <span className="host-baseline-fix auto" title={command}>{t('（將安裝）')}</span>
+  if (kind === 'manual' && command) {
+    return (
+      <span className="host-baseline-fix manual">
+        {t('（需手動）')}
+        <code className="host-baseline-fix-cmd">{command}</code>
+      </span>
+    )
+  }
   return <span className={`host-baseline-fix ${fix}`}>{fix === 'auto' ? t('（可自動補）') : t('（需手動）')}</span>
 }
 
@@ -199,7 +209,7 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
           {criticalItems.map((i) => (
             <li key={i.id} className={i.severity} title={i.id}>
               {i.message}
-              <BaselineFix fix={i.fix} />
+              <BaselineFix fix={i.fix} kind={i.kind} command={i.command} />
               {i.id.startsWith('tool.') ? <ToolInstallGuide tool={i.id.slice('tool.'.length)} os={osOf} onRecheck={recheckTools} /> : null}
             </li>
           ))}
@@ -212,7 +222,7 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
             {warnItems.map((i) => (
               <li key={i.id} className={i.severity} title={i.id}>
                 {i.message}
-                <BaselineFix fix={i.fix} />
+                <BaselineFix fix={i.fix} kind={i.kind} command={i.command} />
                 {i.note ? <span className="host-baseline-why">{t('選用：{note}', { note: i.note })}</span> : null}
                 {baselineWarnWhy(i.id) ? <span className="host-baseline-why">{baselineWarnWhy(i.id)}</span> : null}
                 {i.id.startsWith('tool.') ? <ToolInstallGuide tool={i.id.slice('tool.'.length)} os={osOf} onRecheck={recheckTools} /> : null}

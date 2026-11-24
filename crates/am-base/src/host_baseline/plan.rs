@@ -15,6 +15,14 @@ use serde::Serialize;
 pub const MERGE_KEY: &str = "merge_key";
 pub const MANUAL: &str = "manual";
 pub const WRITE_FILE: &str = "write_file";
+pub const INSTALL_TOOL: &str = "install_tool";
+
+/// Linux 上安裝要 sudo：只列手動項、顯示指令。
+pub const NEEDS_SUDO: &str = "needs_sudo";
+/// plugin 要在 claude 裡互動安裝。
+pub const INTERACTIVE: &str = "interactive";
+/// 不知道這台主機的作業系統，挑不出安裝指令。
+pub const OS_UNKNOWN: &str = "os_unknown";
 
 /// 鍵沒有宣告值：不知道該補成什麼。
 pub const NO_VALUE: &str = "no_value";
@@ -35,7 +43,7 @@ pub const UNKNOWN: &str = "unknown";
 pub struct FixAction {
     /// 對應的 issue id。
     pub id: String,
-    /// `merge_key` | `write_file` | `manual`
+    /// `merge_key` | `write_file` | `install_tool` | `manual`
     pub action: &'static str,
     pub severity: &'static str,
     /// 顯示用的位置：`<CLI>[:<身份>]/<檔>`（例 `codex/config.toml`、`claude:cc1/settings.json`、`tool/rtk`），不是主機上的路徑。
@@ -49,6 +57,9 @@ pub struct FixAction {
     /// `manual` 的原因。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// 安裝指令（宣告檔寫死的，不是主機上的內容；`install_tool` 與 `needs_sudo` 的 `manual` 才有）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -61,16 +72,21 @@ pub struct Plan {
 impl Plan {
     /// 可以自動補的差異 id（`hosts[].baseline.fixable`）。
     pub fn fixable(&self) -> Vec<String> {
-        self.actions.iter().filter(|a| a.action == MERGE_KEY || a.action == WRITE_FILE).map(|a| a.id.clone()).collect()
+        self.actions.iter().filter(|a| matches!(a.action, MERGE_KEY | WRITE_FILE | INSTALL_TOOL)).map(|a| a.id.clone()).collect()
     }
 }
 
 fn manual(id: &str, severity: &'static str, target: String, key: Option<String>, reason: &'static str) -> FixAction {
-    FixAction { id: id.to_string(), action: MANUAL, severity, target, key, value: None, reason: Some(reason) }
+    FixAction { id: id.to_string(), action: MANUAL, severity, target, key, value: None, reason: Some(reason), command: None }
 }
 
 /// 照差異的順序列出動作；同一個 id 只列一次。codex 禁止的鍵整個略過。
 pub fn build(m: &Manifest, values: &Values, issues: &[BaselineIssue]) -> Plan {
+    build_on(m, values, issues, None)
+}
+
+/// `os` 是那台主機的 `uname -s`（`Darwin`／`Linux`）；缺工具的安裝指令靠它挑，不知道就一律手動。
+pub fn build_on(m: &Manifest, values: &Values, issues: &[BaselineIssue], os: Option<&str>) -> Plan {
     let ids: std::collections::HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
     let mut seen = std::collections::HashSet::new();
     let mut actions = Vec::new();
@@ -78,7 +94,7 @@ pub fn build(m: &Manifest, values: &Values, issues: &[BaselineIssue]) -> Plan {
         if !seen.insert(i.id.as_str()) {
             continue;
         }
-        if let Some(a) = action_for(m, values, &ids, i) {
+        if let Some(a) = action_for(m, values, &ids, i, os) {
             actions.push(a);
         }
     }
@@ -86,16 +102,16 @@ pub fn build(m: &Manifest, values: &Values, issues: &[BaselineIssue]) -> Plan {
     Plan { plan_rev: crate::supervisor_inbox::short_hash(&rev), actions }
 }
 
-fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&str>, i: &BaselineIssue) -> Option<FixAction> {
+fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&str>, i: &BaselineIssue, os: Option<&str>) -> Option<FixAction> {
     let (id, sev) = (i.id.as_str(), i.severity);
     if id == "agy.rtk_rewrite" {
-        return Some(FixAction { id: id.into(), action: WRITE_FILE, severity: sev, target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None });
+        return Some(FixAction { id: id.into(), action: WRITE_FILE, severity: sev, target: "agy/rtk-rewrite".into(), key: None, value: None, reason: None, command: None });
     }
     if id == "gitconfig.token" {
         return Some(manual(id, sev, "git/.gitconfig".into(), None, SECRET));
     }
     if let Some(tool) = id.strip_prefix("tool.") {
-        return Some(manual(id, sev, format!("tool/{tool}"), None, NO_INSTALLER));
+        return Some(tool_action(values, id, sev, tool, os));
     }
     if let Some(key) = id.strip_prefix("codex.config.toml:") {
         if key.split('.').any(codex_forbidden) {
@@ -109,7 +125,7 @@ fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&st
             return Some(manual(id, sev, target, Some(key.into()), UNKNOWN));
         }
         return Some(match values.codex.get(key) {
-            Some(v) => FixAction { id: id.into(), action: MERGE_KEY, severity: sev, target, key: Some(key.into()), value: Some(v.clone()), reason: None },
+            Some(v) => FixAction { id: id.into(), action: MERGE_KEY, severity: sev, target, key: Some(key.into()), value: Some(v.clone()), reason: None, command: None },
             None => manual(id, sev, target, Some(key.into()), NO_VALUE),
         });
     }
@@ -123,6 +139,21 @@ fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&st
         return Some(claude_action(m, values, ids, i, rest));
     }
     Some(manual(id, sev, String::new(), None, UNKNOWN))
+}
+
+fn tool_action(values: &Values, id: &str, sev: &'static str, tool: &str, os: Option<&str>) -> FixAction {
+    let target = format!("tool/{tool}");
+    let Some(install) = values.installs.get(tool) else { return manual(id, sev, target, None, NO_INSTALLER) };
+    let (command, sudo) = match os {
+        Some("Darwin") => (install.darwin.clone(), false),
+        Some("Linux") => (install.linux.clone(), install.linux_sudo),
+        _ => return manual(id, sev, target, None, OS_UNKNOWN),
+    };
+    let Some(command) = command else { return manual(id, sev, target, None, NO_INSTALLER) };
+    if sudo {
+        return FixAction { command: Some(command), ..manual(id, sev, target, None, NEEDS_SUDO) };
+    }
+    FixAction { id: id.into(), action: INSTALL_TOOL, severity: sev, target, key: None, value: None, reason: None, command: Some(command) }
 }
 
 /// `claude.<身份>.<檔>`、`claude.<身份>.settings.json:<鍵名>`、`claude.<身份>.settings.json:json`、`claude.<身份>.plugin:<名>`。
@@ -141,16 +172,20 @@ fn claude_action(m: &Manifest, values: &Values, ids: &std::collections::HashSet<
             return manual(id, sev, target, Some(k.key.clone()), PARENT_MISSING);
         }
         return match values.claude.get(name) {
-            Some(v) => FixAction { id: id.into(), action: MERGE_KEY, severity: sev, target, key: Some(k.key.clone()), value: Some(v.clone()), reason: None },
+            Some(v) => FixAction { id: id.into(), action: MERGE_KEY, severity: sev, target, key: Some(k.key.clone()), value: Some(v.clone()), reason: None, command: None },
             None => manual(id, sev, target, Some(k.key.clone()), NO_VALUE),
         };
     }
     if let Some((ident, plugin)) = rest.rsplit_once(".plugin:") {
-        return manual(id, sev, format!("claude:{ident}/settings.json"), Some(format!("enabledPlugins.{plugin}")), NO_VALUE);
+        return manual(id, sev, format!("claude:{ident}/settings.json"), Some(format!("enabledPlugins.{plugin}")), INTERACTIVE);
     }
     for f in &m.claude_files {
         if let Some(ident) = rest.strip_suffix(&f.name).and_then(|r| r.strip_suffix('.')) {
-            return manual(id, sev, format!("claude:{ident}/{}", f.name), None, NO_TEMPLATE);
+            let target = format!("claude:{ident}/{}", f.name);
+            if values.templates.contains_key(&f.name) {
+                return FixAction { id: id.into(), action: WRITE_FILE, severity: sev, target, key: None, value: None, reason: None, command: None };
+            }
+            return manual(id, sev, target, None, NO_TEMPLATE);
         }
     }
     manual(id, sev, String::new(), None, UNKNOWN)
@@ -196,11 +231,10 @@ mod tests {
         assert_eq!((hooks.action, hooks.key.as_deref(), hooks.value.clone()), (MERGE_KEY, Some("features.hooks"), Some(serde_json::json!(true))));
         assert_eq!(hooks.target, "codex/config.toml");
         let want = [
-            ("tool.rtk", NO_INSTALLER, "tool/rtk"),
-            ("claude.cc1.statusline-command.sh", NO_TEMPLATE, "claude:cc1/statusline-command.sh"),
+            ("tool.rtk", OS_UNKNOWN, "tool/rtk"),
             ("claude.cc1.settings.json:statusLine", NO_VALUE, "claude:cc1/settings.json"),
             ("claude.my.dir.settings.json:json", INVALID_JSON, "claude:my.dir/settings.json"),
-            ("claude.default.plugin:imessage", NO_VALUE, "claude:default/settings.json"),
+            ("claude.default.plugin:imessage", INTERACTIVE, "claude:default/settings.json"),
             ("codex.config.toml:approval_policy", NO_VALUE, "codex/config.toml"),
             ("codex.hooks.json", NO_TEMPLATE, "codex/hooks.json"),
             ("herdr.config.toml", NO_TEMPLATE, "herdr/config.toml"),
@@ -212,7 +246,71 @@ mod tests {
             assert_eq!((a.action, a.reason, a.target.as_str(), a.value.is_none()), (MANUAL, Some(reason), target, true), "{id}");
         }
         assert_eq!(by_id(&p, "claude.cc1.settings.json:statusLine").key.as_deref(), Some("statusLine"));
-        assert_eq!(p.fixable(), vec!["codex.config.toml:features.hooks".to_string()]);
+        assert_eq!(p.fixable(), vec!["claude.cc1.statusline-command.sh".to_string(), "codex.config.toml:features.hooks".to_string()]);
+        let file = by_id(&p, "claude.cc1.statusline-command.sh");
+        assert_eq!((file.action, file.target.as_str(), file.value.is_none(), file.reason), (WRITE_FILE, "claude:cc1/statusline-command.sh", true, None));
+    }
+
+    #[test]
+    fn a_missing_file_without_a_template_stays_manual() {
+        let (m, v) = shipped();
+        let p = build(m, v, &[issue("claude.cc1.settings.json", CRITICAL), issue("codex.hooks.json", WARN), issue("herdr.config.toml", WARN)]);
+        assert!(p.actions.iter().all(|a| a.action == MANUAL && a.reason == Some(NO_TEMPLATE)), "{p:?}");
+        for f in ["CLAUDE.md", "RTK.md", "statusline-command.sh"] {
+            let p = build(m, v, &[issue(&format!("claude.default.{f}"), WARN)]);
+            assert_eq!(p.actions[0].action, WRITE_FILE, "{f}");
+        }
+    }
+
+    #[test]
+    fn a_missing_tool_is_installed_with_the_declared_command_for_that_os() {
+        let (m, v) = shipped();
+        let issues = [issue("tool.herdr", CRITICAL), issue("tool.rtk", WARN), issue("tool.bun", WARN), issue("tool.jq", WARN)];
+        let mac = build_on(m, v, &issues, Some("Darwin"));
+        for id in ["tool.herdr", "tool.rtk", "tool.bun", "tool.jq"] {
+            let a = by_id(&mac, id);
+            assert_eq!((a.action, a.target.as_str()), (INSTALL_TOOL, format!("tool/{}", &id[5..]).as_str()), "{id}");
+            assert!(a.command.as_deref().is_some_and(|c| c.starts_with("brew install ")), "{a:?}");
+        }
+        let linux = build_on(m, v, &issues, Some("Linux"));
+        for id in ["tool.herdr", "tool.rtk", "tool.bun"] {
+            let a = by_id(&linux, id);
+            assert_eq!(a.action, INSTALL_TOOL, "{id}");
+            assert!(a.command.as_deref().is_some_and(|c| c.starts_with("curl -fsSL https://")), "{a:?}");
+        }
+        let jq = by_id(&linux, "tool.jq");
+        assert_eq!((jq.action, jq.reason, jq.command.as_deref()), (MANUAL, Some(NEEDS_SUDO), Some("sudo apt install jq")));
+        assert_eq!(linux.fixable(), vec!["tool.herdr".to_string(), "tool.rtk".to_string(), "tool.bun".to_string()]);
+        let unknown = build(m, v, &issues);
+        assert!(unknown.actions.iter().all(|a| a.action == MANUAL && a.reason == Some(OS_UNKNOWN) && a.command.is_none()), "{unknown:?}");
+        let other = build_on(m, v, &issues, Some("FreeBSD"));
+        assert!(other.actions.iter().all(|a| a.action == MANUAL), "{other:?}");
+    }
+
+    #[test]
+    fn a_tool_the_baseline_does_not_know_how_to_install_is_manual() {
+        let (m, v) = shipped();
+        let p = build_on(m, v, &[issue("tool.claude", WARN)], Some("Linux"));
+        assert_eq!((p.actions[0].action, p.actions[0].reason), (MANUAL, Some(NO_INSTALLER)));
+    }
+
+    #[test]
+    fn every_sudo_install_is_manual_on_linux_and_no_install_command_ever_needs_a_secret() {
+        let (m, v) = shipped();
+        assert!(v.installs.len() >= 6);
+        for (tool, i) in &v.installs {
+            assert!(m.tools.iter().any(|t| &t.name == tool), "{tool}");
+            for c in [&i.darwin, &i.linux].into_iter().flatten() {
+                assert!(!c.contains('\n') && !c.to_ascii_lowercase().contains("password"), "{tool}: {c}");
+            }
+            if i.linux_sudo {
+                assert!(i.linux.as_deref().is_some_and(|c| c.starts_with("sudo ")), "{tool}");
+            } else if let Some(c) = &i.linux {
+                assert!(!c.contains("sudo"), "{tool}: a non-sudo install must really not need sudo");
+            }
+            let p = build_on(m, v, &[issue(&format!("tool.{tool}"), WARN)], Some("Linux"));
+            assert_eq!(p.actions[0].action == INSTALL_TOOL, !i.linux_sudo, "{tool}");
+        }
     }
 
     #[test]
@@ -323,7 +421,7 @@ mod tests {
         for needle in ["AM-SECRET", "AMSECRET", h.to_str().unwrap(), scratch.0.to_str().unwrap()] {
             assert!(!text.contains(needle), "`{needle}` leaked into the plan: {text}");
         }
-        let allowed = ["id", "action", "severity", "target", "key", "value", "reason"];
+        let allowed = ["id", "action", "severity", "target", "key", "value", "reason", "command"];
         for a in json["actions"].as_array().unwrap() {
             for k in a.as_object().unwrap().keys() {
                 assert!(allowed.contains(&k.as_str()), "unexpected field `{k}` in {a}");

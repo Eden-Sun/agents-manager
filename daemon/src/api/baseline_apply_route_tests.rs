@@ -34,7 +34,7 @@ fn hooks_report() -> BaselineReport {
         os: Some("Linux".into()),
         issues: Some(vec![
             BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into(), note: None },
-            BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into(), note: None },
+            BaselineIssue { id: "tool.jq".into(), severity: "critical", message: "m".into(), note: None },
         ]),
         checked_at: crate::db::now(),
         failed_at: None,
@@ -113,9 +113,9 @@ async fn apply_is_user_only_off_by_default_and_checks_the_plan_rev() {
     set_sync(&e.app, host, "ask").await;
     let (st, body) = apply(&e.app, host, RequestPrincipal::User, "not-the-rev").await;
     assert_eq!((st, body["reason"].as_str(), body["plan_rev"].as_str()), (StatusCode::CONFLICT, Some("plan_outdated"), Some(rev.as_str())), "{body}");
-    let b = BaselineApply { plan_rev: rev.clone(), ids: Some(vec!["tool.rtk".into()]) };
+    let b = BaselineApply { plan_rev: rev.clone(), ids: Some(vec!["tool.jq".into()]) };
     let (st, body) = body_of(baseline_apply(State(e.app.clone()), Path(host.into()), Extension(RequestPrincipal::User), Json(b)).await).await;
-    assert_eq!((st, body["reason"].as_str(), body["id"].as_str()), (StatusCode::BAD_REQUEST, Some("not_fixable"), Some("tool.rtk")), "{body}");
+    assert_eq!((st, body["reason"].as_str(), body["id"].as_str()), (StatusCode::BAD_REQUEST, Some("not_fixable"), Some("tool.jq")), "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 0, "no guard path may reach the host");
     assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), b"a = 1\n");
 }
@@ -136,7 +136,7 @@ async fn apply_then_restore_round_trips_and_restore_works_while_off() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["results"], json!([
         {"id": "codex.config.toml:features.hooks", "result": "applied"},
-    ]), "tool.rtk is manual in the plan and never offered: {body}");
+    ]), "tool.jq needs sudo on Linux: manual in the plan and never offered: {body}");
     let backup_id = body["backup_id"].as_str().unwrap().to_string();
     assert!(crate::host_baseline::apply::valid_backup_id(&backup_id), "{body}");
     assert!(body["error"].is_null(), "{body}");

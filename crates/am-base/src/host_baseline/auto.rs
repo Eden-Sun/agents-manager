@@ -108,6 +108,36 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_tool_or_file_follows_the_auto_gate_and_a_sudo_install_never_does() {
+        let (m, v) = (manifest::shipped().unwrap(), manifest::shipped_values().unwrap());
+        let issue = |id: &str| BaselineIssue { id: id.into(), severity: WARN, message: String::new(), note: None };
+        let s = AutoState::default();
+        let now = Instant::now();
+        let install = crate::host_baseline::plan::build_on(m, v, &[issue("tool.rtk")], Some("Linux"));
+        assert_eq!(gate(HostBaselineSyncMode::Auto, &install, &s, now), Gate::Apply);
+        assert_eq!(gate(HostBaselineSyncMode::Ask, &install, &s, now), Gate::Skip("not_auto"));
+        assert_eq!(gate(HostBaselineSyncMode::Off, &install, &s, now), Gate::Skip("not_auto"));
+        let file = build(m, v, &[issue("claude.default.CLAUDE.md")]);
+        assert_eq!(gate(HostBaselineSyncMode::Auto, &file, &s, now), Gate::Apply);
+        let sudo = crate::host_baseline::plan::build_on(m, v, &[issue("tool.jq")], Some("Linux"));
+        assert_eq!(gate(HostBaselineSyncMode::Auto, &sudo, &s, now), Gate::Skip("nothing_to_fix"));
+    }
+
+    #[test]
+    fn a_failed_install_backs_off_and_is_not_retried_in_a_loop() {
+        let (m, v) = (manifest::shipped().unwrap(), manifest::shipped_values().unwrap());
+        let issue = BaselineIssue { id: "tool.rtk".into(), severity: WARN, message: String::new(), note: None };
+        let p = crate::host_baseline::plan::build_on(m, v, &[issue], Some("Linux"));
+        let t0 = Instant::now();
+        let mut s = AutoState::default();
+        for _ in 0..MAX_FAILURES {
+            assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, t0 + Duration::from_secs(99999)), Gate::Apply);
+            record(&mut s, &p.plan_rev, false, t0);
+        }
+        assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, t0 + Duration::from_secs(99999)), Gate::Skip("gave_up"));
+    }
+
+    #[test]
     fn nothing_fixable_is_skipped() {
         let p = plan_nothing();
         assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &AutoState::default(), Instant::now()), Gate::Skip("nothing_to_fix"));

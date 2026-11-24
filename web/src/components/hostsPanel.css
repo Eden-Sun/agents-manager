@@ -437,3 +437,11 @@ details.env-fold summary {
 .host-baseline-restore-notice {
   color: var(--danger);
 }
+
+.host-baseline-apply-item .apply-item-command,
+.host-baseline-fix-cmd {
+  display: block;
+  color: var(--muted);
+  font-family: var(--mono, monospace);
+  overflow-wrap: anywhere;
+}

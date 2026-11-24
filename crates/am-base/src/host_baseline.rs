@@ -73,11 +73,13 @@ impl BaselineReport {
     /// dry-run 計畫（[`plan`]）裡可以自動補的差異 id。未知（`issues: None`）或宣告檔壞了＝空。
     pub fn view(&self, now: chrono::DateTime<chrono::Utc>) -> BaselineView {
         let report = self.snapshot(now);
-        let fixable = match (report.issues.as_deref(), manifest::shipped(), manifest::shipped_values()) {
-            (Some(issues), Ok(m), Ok(v)) => plan::build(m, v, issues).fixable(),
-            _ => Vec::new(),
+        let plan = match (report.issues.as_deref(), manifest::shipped(), manifest::shipped_values()) {
+            (Some(issues), Ok(m), Ok(v)) => Some(plan::build_on(m, v, issues, report.os.as_deref())),
+            _ => None,
         };
-        BaselineView { report, fixable }
+        let fixable = plan.as_ref().map(plan::Plan::fixable).unwrap_or_default();
+        let actions = plan.map(|p| p.actions.iter().map(ViewAction::of).collect()).unwrap_or_default();
+        BaselineView { report, fixable, actions }
     }
 }
 
@@ -87,6 +89,30 @@ pub struct BaselineView {
     #[serde(flatten)]
     pub report: BaselineReport,
     pub fixable: Vec<String>,
+    pub actions: Vec<ViewAction>,
+}
+
+/// 每個差異在計畫裡屬於哪一類：`write`（將寫入）、`install`（將安裝）、`manual`（需手動）。
+/// `command` 是宣告檔寫死的安裝指令（只有 `install`／要 sudo 的 `manual` 才有）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ViewAction {
+    pub id: String,
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+impl ViewAction {
+    fn of(a: &plan::FixAction) -> Self {
+        let kind = match a.action {
+            plan::MERGE_KEY | plan::WRITE_FILE => "write",
+            plan::INSTALL_TOOL => "install",
+            _ => "manual",
+        };
+        ViewAction { id: a.id.clone(), kind, command: a.command.clone(), reason: a.reason }
+    }
 }
 
 /// 偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）：已經有舊結果就標上失敗時間與原因，結果本身與 `checked_at` 原封不動；

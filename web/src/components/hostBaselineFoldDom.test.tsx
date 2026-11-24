@@ -128,3 +128,31 @@ it('#719 階段 2：每項尾端標「可自動補／需手動」；沒有 fixab
   await mount(<BaselineLine baseline={{ ...baseline, fixable: undefined }} />)
   assert.equal(document.querySelectorAll('.host-baseline-fix').length, 0)
 })
+
+it('#719 階段 3：將寫入／將安裝／需手動三類標籤，需手動的 sudo 項顯示安裝指令', async () => {
+  const baseline: HostBaseline = {
+    issues: [
+      { id: 'tool.rtk', severity: 'warn', message: '缺工具 rtk' },
+      { id: 'claude.cc1.RTK.md', severity: 'warn', message: 'claude cc1：缺 RTK.md' },
+      { id: 'tool.jq', severity: 'warn', message: '缺工具 jq' },
+    ],
+    checked_at: new Date().toISOString(),
+    os: 'Linux',
+    stale: false,
+    error: null,
+    fixable: ['tool.rtk', 'claude.cc1.RTK.md'],
+    actions: [
+      { id: 'tool.rtk', kind: 'install', command: 'curl -fsSL https://example.test/i.sh | sh' },
+      { id: 'claude.cc1.RTK.md', kind: 'write' },
+      { id: 'tool.jq', kind: 'manual', command: 'sudo apt install jq', reason: 'needs_sudo' },
+    ],
+  }
+  await mount(<BaselineLine baseline={baseline} />)
+  const lis = [...document.querySelectorAll('details.env-fold li')]
+  const by = (id: string) => lis.find((li) => li.getAttribute('title') === id)!
+  assert.match(by('tool.rtk').textContent ?? '', /（將安裝）/)
+  assert.match(by('claude.cc1.RTK.md').textContent ?? '', /（將寫入）/)
+  const jq = by('tool.jq')
+  assert.match(jq.textContent ?? '', /（需手動）/)
+  assert.equal(jq.querySelector('.host-baseline-fix-cmd')?.textContent, 'sudo apt install jq')
+})

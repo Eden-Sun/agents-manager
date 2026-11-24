@@ -29,6 +29,8 @@ const dict: Dict = {
   '選用：{note}': 'Optional: {note}',
   '（可自動補）': ' (auto-fixable)',
   '（需手動）': ' (manual)',
+  '（將寫入）': ' (will be written)',
+  '（將安裝）': ' (will be installed)',
   '已連線': 'Connected',
   '未連線': 'Not connected',
   '{n} 個 Project': { one: '{n} project', other: '{n} projects' },

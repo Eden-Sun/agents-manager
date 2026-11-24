@@ -16,6 +16,7 @@ scripts/ops/claude-release-task.md|daemon,ops|claude_review::
 scripts/ops/codex-release-task.md|daemon,ops|claude_review::
 scripts/ops/release-triage-task.md|daemon,ops|__daemon_release_triage_submission__
 ops/host-baseline/baseline.toml|daemon,ops|__am_base_crate__
+ops/host-baseline/templates/RTK.md|daemon,ops|__am_base_crate__
 scripts/project-cargo.sh|daemon,ops|runners::am_base_tests::cargo_shim::
 scripts/ops/host-baseline-sync-mac-verify.sh|daemon,ops|__am_base_crate__
 web/src/lib/outboxList.ts|web,daemon|runners::am_base_tests::outbox::

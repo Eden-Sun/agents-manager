@@ -91,6 +91,19 @@ struct RawTool {
     severity: String,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    install: Option<RawInstall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstall {
+    #[serde(default)]
+    darwin: Option<String>,
+    #[serde(default)]
+    linux: Option<String>,
+    #[serde(default)]
+    linux_sudo: bool,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +115,8 @@ struct RawFile {
     note: Option<String>,
     #[serde(default)]
     only_if_tool: Option<String>,
+    #[serde(default)]
+    template: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -225,11 +240,48 @@ fn files(raw: Vec<RawFile>, at: &str) -> Result<Vec<Item>, String> {
     Ok(out)
 }
 
+/// 缺檔時照寫的內容（編譯時嵌進 binary）。`name` 是 claude 身份目錄裡的檔名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Template {
+    pub name: &'static str,
+    pub content: &'static str,
+    pub mode: &'static str,
+}
+
+pub const TEMPLATES: &[Template] = &[
+    Template { name: "CLAUDE.md", content: include_str!("../../../../ops/host-baseline/templates/CLAUDE.md"), mode: "600" },
+    Template { name: "RTK.md", content: include_str!("../../../../ops/host-baseline/templates/RTK.md"), mode: "600" },
+    Template { name: "statusline-command.sh", content: include_str!("../../../../ops/host-baseline/templates/statusline-command.sh"), mode: "700" },
+];
+
+pub const TEMPLATE_END_MARK: &str = "AM_TPL_EOF";
+const TEMPLATE_MAX_BYTES: usize = 64 * 1024;
+
+/// 一個工具的安裝方式。指令是宣告檔寫死的（不來自主機）；`linux_sudo`＝Linux 上要 sudo，一律只列手動項。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Install {
+    pub darwin: Option<String>,
+    pub linux: Option<String>,
+    pub linux_sudo: bool,
+}
+
+fn install_command(c: Option<String>, at: &str) -> Result<Option<String>, String> {
+    match c {
+        None => Ok(None),
+        Some(c) if c.trim().is_empty() || c.chars().count() > 300 || c.chars().any(char::is_control) => {
+            Err(format!("{at}: an install command must be one non-empty line of at most 300 chars"))
+        }
+        Some(c) => Ok(Some(c.trim().to_string())),
+    }
+}
+
 /// 宣告檔替設定鍵寫的值（有值＝dry-run 計畫可以列成「自動補」）。key＝claude 鍵的 `name`／codex 的 `key`。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Values {
     pub claude: std::collections::BTreeMap<String, serde_json::Value>,
     pub codex: std::collections::BTreeMap<String, serde_json::Value>,
+    pub templates: std::collections::BTreeMap<String, Template>,
+    pub installs: std::collections::BTreeMap<String, Install>,
 }
 
 /// 一個值最多這麼大（序列化成 JSON 的 byte 數）。
@@ -284,7 +336,28 @@ impl Manifest {
             if tools.iter().any(|i| i.name == n) {
                 return Err(format!("tools: `{n}` is listed twice"));
             }
+            if let Some(i) = t.install {
+                let (darwin, linux) = (install_command(i.darwin, "tools.install")?, install_command(i.linux, "tools.install")?);
+                if darwin.is_none() && linux.is_none() {
+                    return Err(format!("tools.install: `{n}` has no command"));
+                }
+                values.installs.insert(n.clone(), Install { darwin, linux, linux_sudo: i.linux_sudo });
+            }
             tools.push(Item { severity: severity(&t.severity, "tools")?, name: n, note: note(t.note, "tools")?, only_if_tool: None });
+        }
+        for f in raw.claude.files.iter().filter(|f| f.template) {
+            let Some(t) = TEMPLATES.iter().find(|t| t.name == f.path) else {
+                return Err(format!("claude.files: `{}` asks for a template that is not shipped", f.path));
+            };
+            if t.content.len() > TEMPLATE_MAX_BYTES || t.content.lines().any(|l| l == TEMPLATE_END_MARK) || t.content.contains('\0') {
+                return Err(format!("claude.files: template `{}` is not safe to embed", f.path));
+            }
+            values.templates.insert(f.path.clone(), *t);
+        }
+        for (at, list) in [("codex.files", &raw.codex.files), ("herdr.files", &raw.herdr.files)] {
+            if list.iter().any(|f| f.template) {
+                return Err(format!("{at}: `template` is only supported in claude.files"));
+            }
         }
         let claude_files = files(raw.claude.files, "claude.files")?;
         let mut claude_keys: Vec<ClaudeKey> = Vec::new();

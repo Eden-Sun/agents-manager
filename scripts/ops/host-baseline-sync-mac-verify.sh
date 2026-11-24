@@ -11,11 +11,18 @@ ba_root="$HOME/.config/agents-manager/baseline-backup"
 ba_token_ok() {
   case "$1" in ''|/*|*..*|*//*|*' '*) return 1 ;; esac
   case "$1" in
-    codex/config.toml|claude-default/settings.json) return 0 ;;
-    claude-cc*/settings.json)
-      ba_t=${1#claude-cc}; ba_t=${ba_t%/settings.json}
-      case "$ba_t" in ''|*[!0-9]*) return 1 ;; esac
-      return 0 ;;
+    codex/config.toml) return 0 ;;
+    claude-*/*)
+      ba_tkf=${1#*/}
+      case "$ba_tkf" in settings.json|CLAUDE.md|RTK.md|statusline-command.sh) ;; *) return 1 ;; esac
+      ba_tkd=${1%%/*}
+      case "$ba_tkd" in
+        claude-default) return 0 ;;
+        claude-cc*)
+          ba_tkn=${ba_tkd#claude-cc}
+          case "$ba_tkn" in ''|*[!0-9]*) return 1 ;; esac
+          return 0 ;;
+      esac ;;
   esac
   return 1
 }
@@ -23,8 +30,8 @@ ba_path() {
   ba_token_ok "$1" || return 1
   case "$1" in
     codex/config.toml) printf '%s/config.toml' "${CODEX_HOME:-$HOME/.codex}" ;;
-    claude-default/settings.json) printf '%s/.claude/settings.json' "$HOME" ;;
-    *) ba_t=${1%/settings.json}; printf '%s/.%s/settings.json' "$HOME" "$ba_t" ;;
+    claude-default/*) printf '%s/.claude/%s' "$HOME" "${1#*/}" ;;
+    *) printf '%s/.%s/%s' "$HOME" "${1%%/*}" "${1#*/}" ;;
   esac
 }
 # 權限（八進位三位）；讀不懂＝`-`（不 chmod）。
@@ -111,8 +118,12 @@ ba_backup() {
     ba_dir=$ba_new
   fi
   ba_n=$((ba_n + 1))
-  cp "$2" "$ba_dir/files/$ba_n" 2>/dev/null && chmod 600 "$ba_dir/files/$ba_n" 2>/dev/null || return 1
-  printf 'file %s 1 %s %s\n' "$ba_n" "$(ba_mode "$2")" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  if [ -n "$2" ]; then
+    cp "$2" "$ba_dir/files/$ba_n" 2>/dev/null && chmod 600 "$ba_dir/files/$ba_n" 2>/dev/null || return 1
+    printf 'file %s 1 %s %s\n' "$ba_n" "$(ba_mode "$2")" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  else
+    printf 'file %s 0 - %s\n' "$ba_n" "$1" >> "$ba_dir/manifest" 2>/dev/null || return 1
+  fi
   ba_seen="$ba_seen$1|"
 }
 ba_key() { printf 'AM_BA key %s %s\n' "$@"; }
@@ -179,11 +190,18 @@ ba_root="$HOME/.config/agents-manager/baseline-backup"
 ba_token_ok() {
   case "$1" in ''|/*|*..*|*//*|*' '*) return 1 ;; esac
   case "$1" in
-    codex/config.toml|claude-default/settings.json) return 0 ;;
-    claude-cc*/settings.json)
-      ba_t=${1#claude-cc}; ba_t=${ba_t%/settings.json}
-      case "$ba_t" in ''|*[!0-9]*) return 1 ;; esac
-      return 0 ;;
+    codex/config.toml) return 0 ;;
+    claude-*/*)
+      ba_tkf=${1#*/}
+      case "$ba_tkf" in settings.json|CLAUDE.md|RTK.md|statusline-command.sh) ;; *) return 1 ;; esac
+      ba_tkd=${1%%/*}
+      case "$ba_tkd" in
+        claude-default) return 0 ;;
+        claude-cc*)
+          ba_tkn=${ba_tkd#claude-cc}
+          case "$ba_tkn" in ''|*[!0-9]*) return 1 ;; esac
+          return 0 ;;
+      esac ;;
   esac
   return 1
 }
@@ -191,8 +209,8 @@ ba_path() {
   ba_token_ok "$1" || return 1
   case "$1" in
     codex/config.toml) printf '%s/config.toml' "${CODEX_HOME:-$HOME/.codex}" ;;
-    claude-default/settings.json) printf '%s/.claude/settings.json' "$HOME" ;;
-    *) ba_t=${1%/settings.json}; printf '%s/.%s/settings.json' "$HOME" "$ba_t" ;;
+    claude-default/*) printf '%s/.claude/%s' "$HOME" "${1#*/}" ;;
+    *) printf '%s/.%s/%s' "$HOME" "${1%%/*}" "${1#*/}" ;;
   esac
 }
 # 權限（八進位三位）；讀不懂＝`-`（不 chmod）。
@@ -297,11 +315,18 @@ ba_root="$HOME/.config/agents-manager/baseline-backup"
 ba_token_ok() {
   case "$1" in ''|/*|*..*|*//*|*' '*) return 1 ;; esac
   case "$1" in
-    codex/config.toml|claude-default/settings.json) return 0 ;;
-    claude-cc*/settings.json)
-      ba_t=${1#claude-cc}; ba_t=${ba_t%/settings.json}
-      case "$ba_t" in ''|*[!0-9]*) return 1 ;; esac
-      return 0 ;;
+    codex/config.toml) return 0 ;;
+    claude-*/*)
+      ba_tkf=${1#*/}
+      case "$ba_tkf" in settings.json|CLAUDE.md|RTK.md|statusline-command.sh) ;; *) return 1 ;; esac
+      ba_tkd=${1%%/*}
+      case "$ba_tkd" in
+        claude-default) return 0 ;;
+        claude-cc*)
+          ba_tkn=${ba_tkd#claude-cc}
+          case "$ba_tkn" in ''|*[!0-9]*) return 1 ;; esac
+          return 0 ;;
+      esac ;;
   esac
   return 1
 }
@@ -309,8 +334,8 @@ ba_path() {
   ba_token_ok "$1" || return 1
   case "$1" in
     codex/config.toml) printf '%s/config.toml' "${CODEX_HOME:-$HOME/.codex}" ;;
-    claude-default/settings.json) printf '%s/.claude/settings.json' "$HOME" ;;
-    *) ba_t=${1%/settings.json}; printf '%s/.%s/settings.json' "$HOME" "$ba_t" ;;
+    claude-default/*) printf '%s/.claude/%s' "$HOME" "${1#*/}" ;;
+    *) printf '%s/.%s/%s' "$HOME" "${1%%/*}" "${1#*/}" ;;
   esac
 }
 # 權限（八進位三位）；讀不懂＝`-`（不 chmod）。

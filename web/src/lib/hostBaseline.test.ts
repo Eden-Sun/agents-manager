@@ -114,3 +114,30 @@ test('#719 階段 2：toHostBaseline 帶過 fixable；缺席或型別不對一�
     assert.deepEqual(hostBaselineView(b).items.map((i) => i.fix), ['manual', 'manual'])
   }
 })
+
+test('#719 階段 3：actions 把差異分成將寫入／將安裝／需手動，並帶安裝指令；沒有 actions 時退回 fix', () => {
+  const base = {
+    issues: [issue('tool.rtk', 'warn'), issue('tool.jq', 'warn'), issue('claude.cc1.RTK.md', 'warn'), issue('codex.hooks.json', 'warn')],
+    checked_at: 'x',
+    os: 'Linux',
+    stale: false,
+    error: null,
+    fixable: ['tool.rtk', 'claude.cc1.RTK.md'],
+  }
+  const actions = [
+    { id: 'tool.rtk', kind: 'install' as const, command: 'curl -fsSL https://example.test/install.sh | sh' },
+    { id: 'tool.jq', kind: 'manual' as const, command: 'sudo apt install jq', reason: 'needs_sudo' },
+    { id: 'claude.cc1.RTK.md', kind: 'write' as const },
+    { id: 'codex.hooks.json', kind: 'manual' as const, reason: 'no_template' },
+  ]
+  const v = hostBaselineView({ ...base, actions })
+  assert.deepEqual(v.items.map((i) => [i.id, i.kind, i.command ?? null]), [
+    ['tool.rtk', 'install', 'curl -fsSL https://example.test/install.sh | sh'],
+    ['tool.jq', 'manual', 'sudo apt install jq'],
+    ['claude.cc1.RTK.md', 'write', null],
+    ['codex.hooks.json', 'manual', null],
+  ])
+  assert.deepEqual(hostBaselineView(base).items.map((i) => i.kind), [null, null, null, null])
+  const parsed = toHostBaseline({ issues: base.issues, checked_at: 'x', os: 'Linux', fixable: base.fixable, actions: [...actions, { id: 'x', kind: 'bogus' }, 7] })
+  assert.deepEqual(parsed?.actions?.map((a) => a.id), ['tool.rtk', 'tool.jq', 'claude.cc1.RTK.md', 'codex.hooks.json'])
+})

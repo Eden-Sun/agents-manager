@@ -47,7 +47,7 @@ pub async fn after_detect(app: Arc<App>, host: String, fence: HostFence, checked
         return;
     }
     let Ok(script) = apply::render_apply_sh(&apply::new_backup_id(), &plan.plan_rev, &prepared.writes) else { return };
-    let Some(result) = app.hosts.run_if_current(&fence, crate::api::baseline_run_script(&fence, &script)).await else { return };
+    let Some(result) = app.hosts.run_if_current(&fence, crate::api::baseline_run_script_for(&fence, &script, apply::script_timeout(&prepared.writes))).await else { return };
     let ok = match result {
         Ok(out) => apply::parse_apply(&out, &prepared.writes).is_some_and(|r| all_applied(&r)),
         Err(_) => false,

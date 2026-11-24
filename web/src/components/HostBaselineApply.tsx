@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import * as api from '../api'
-import type { HostBaseline, HostBaselinePlan, HostBaselineApplyResult } from '../api/types'
+import type { BaselineAction, HostBaseline, HostBaselinePlan, HostBaselineApplyResult } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -45,6 +45,10 @@ function itemResultText(t: ReturnType<typeof useT>, res: string, reason?: string
     if (reason === 'write_failed') return t('略過（寫入失敗）')
     if (reason === 'backup_failed') return t('略過（備份失敗）')
     if (reason === 'aborted') return t('略過（操作中斷）')
+    if (reason === 'dir_missing') return t('略過（目錄不存在）')
+    if (reason === 'no_brew') return t('略過（沒有 Homebrew）')
+    if (reason === 'install_failed') return t('略過（安裝失敗）')
+    if (reason === 'version_check_failed') return t('略過（安裝後版本檢查失敗）')
     return t('略過')
   }
   if (res === 'manual') {
@@ -53,9 +57,32 @@ function itemResultText(t: ReturnType<typeof useT>, res: string, reason?: string
     if (reason === 'unsupported_key') return t('需手動（不支援的設定鍵）')
     if (reason === 'unsupported_value') return t('需手動（不支援的設定值）')
     if (reason === 'secret') return t('需手動（機密資料）')
+    if (reason === 'needs_sudo') return t('需手動（需要 sudo）')
+    if (reason === 'interactive') return t('需手動（要在 claude 裡互動安裝）')
     return t('需手動')
   }
   return t('未知結果')
+}
+
+const isApplicable = (action: string) => action === 'merge_key' || action === 'write_file' || action === 'install_tool'
+
+function PlanGroup({ title, actions, showCommand }: { title: string; actions: BaselineAction[]; showCommand?: boolean }) {
+  const t = useT()
+  if (actions.length === 0) return null
+  return (
+    <>
+      <div className="host-baseline-apply-items-head">{title}</div>
+      <ul className="host-baseline-apply-items">
+        {actions.map((a) => (
+          <li key={a.id} className="host-baseline-apply-item">
+            <span className="apply-item-id">{a.id}</span>
+            <span className="apply-item-target">{t('目標：{target}', { target: a.target })}</span>
+            {showCommand && a.command ? <code className="apply-item-command">{a.command}</code> : null}
+          </li>
+        ))}
+      </ul>
+    </>
+  )
 }
 
 export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineApplyProps) {
@@ -104,8 +131,7 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
     setApplying(true)
     setErrorMsg(null)
     try {
-      const mergeActions = plan.actions.filter((a) => a.action === 'merge_key')
-      const ids = mergeActions.map((a) => a.id)
+      const ids = plan.actions.filter((a) => isApplicable(a.action)).map((a) => a.id)
       const res = await api.applyHostBaseline(host, { plan_rev: plan.plan_rev, ids })
       setApplyResult(res)
       setConfirmOpen(false)
@@ -132,6 +158,10 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
   }
 
   const mergeActions = plan ? plan.actions.filter((a) => a.action === 'merge_key') : []
+  const writeActions = plan ? plan.actions.filter((a) => a.action === 'write_file') : []
+  const installActions = plan ? plan.actions.filter((a) => a.action === 'install_tool') : []
+  const manualActions = plan ? plan.actions.filter((a) => a.action === 'manual') : []
+  const applicableCount = mergeActions.length + writeActions.length + installActions.length
 
   const confirmBody = (
     <div className="host-baseline-apply-dialog">
@@ -146,17 +176,10 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
           {errorMsg}
         </div>
       ) : null}
-      <div className="host-baseline-apply-items-head">
-        {t('預計補齊項目：')}
-      </div>
-      <ul className="host-baseline-apply-items">
-        {mergeActions.map((a) => (
-          <li key={a.id} className="host-baseline-apply-item">
-            <span className="apply-item-id">{a.id}</span>
-            <span className="apply-item-target">{t('目標：{target}', { target: a.target })}</span>
-          </li>
-        ))}
-      </ul>
+      <PlanGroup title={t('預計補齊項目：')} actions={mergeActions} />
+      <PlanGroup title={t('將寫入（缺的檔案，照基準建立）：')} actions={writeActions} />
+      <PlanGroup title={t('將安裝（官方安裝方式，裝完驗版本）：')} actions={installActions} showCommand />
+      <PlanGroup title={t('需手動（不會自動處理）：')} actions={manualActions} showCommand />
     </div>
   )
 
@@ -178,7 +201,7 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
         body={confirmBody}
         confirmLabel={applying ? t('套用中…') : t('確認補齊')}
         cancelLabel={t('取消')}
-        confirmDisabled={applying || mergeActions.length === 0}
+        confirmDisabled={applying || applicableCount === 0}
         onConfirm={() => void handleConfirm()}
         onCancel={() => {
           setConfirmOpen(false)

@@ -48,12 +48,15 @@ async fn the_plan_is_user_only_and_reads_only_the_cached_baseline() {
     assert_eq!((body["host"].as_str(), body["stale"].as_bool()), (Some(local), Some(false)));
     assert_eq!(body["actions"][0]["action"], "merge_key");
     assert_eq!(body["actions"][0]["value"], true);
-    assert_eq!((body["actions"][1]["action"].as_str(), body["actions"][1]["reason"].as_str()), (Some("manual"), Some("no_installer")));
+    assert_eq!((body["actions"][1]["action"].as_str(), body["actions"][1]["reason"].as_str()), (Some("install_tool"), None));
+    assert!(body["actions"][1]["command"].as_str().is_some_and(|c| c.contains("rtk")), "{body}");
     assert!(body["plan_rev"].as_str().is_some_and(|r| !r.is_empty()));
     let view = e.app.host_baseline.lock().await.get(local).unwrap().view(chrono::Utc::now());
-    assert_eq!(view.fixable, vec!["codex.config.toml:features.hooks".to_string()]);
+    assert_eq!(view.fixable, vec!["codex.config.toml:features.hooks".to_string(), "tool.rtk".to_string()]);
+    assert_eq!(view.actions.iter().map(|a| (a.id.as_str(), a.kind)).collect::<Vec<_>>(), vec![("codex.config.toml:features.hooks", "write"), ("tool.rtk", "install")]);
     let v = serde_json::to_value(&view).unwrap();
     assert_eq!((v["fixable"][0].as_str(), v["issues"][1]["id"].as_str()), (Some("codex.config.toml:features.hooks"), Some("tool.rtk")), "flattened: {v}");
+    assert_eq!(v["actions"][1]["kind"], "install", "{v}");
 
     e.app.host_baseline.lock().await.insert(local.into(), report(Some(issues), "2026-01-01T00:00:00.000Z".into(), true));
     let (st, body) = call(&e.app, local, RequestPrincipal::User).await;

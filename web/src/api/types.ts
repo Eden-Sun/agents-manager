@@ -70,16 +70,25 @@ export interface HostBaseline {
   stale: boolean
   error: string | null
   fixable?: string[]
+  actions?: BaselineViewAction[]
+}
+
+export interface BaselineViewAction {
+  id: string
+  kind: 'write' | 'install' | 'manual'
+  command?: string
+  reason?: string
 }
 
 export interface BaselineAction {
   id: string
-  action: 'merge_key' | 'manual' | string
+  action: 'merge_key' | 'write_file' | 'install_tool' | 'manual' | string
   severity: 'critical' | 'warn'
   target: string
   key?: string
   value?: unknown
   reason?: string
+  command?: string
 }
 
 export interface HostBaselinePlan {

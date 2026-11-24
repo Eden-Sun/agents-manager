@@ -323,3 +323,45 @@ it('錯誤只顯示錯誤碼加固定文案，不顯示主機上的任何檔案�
     globalThis.fetch = origFetch
   }
 })
+
+it('#719 階段 3：確認框分「將寫入／將安裝／需手動」，只送可套用的 id', async () => {
+  const origFetch = globalThis.fetch
+  let appliedBody: { plan_rev: string; ids: string[] } | null = null
+  const plan: HostBaselinePlan = {
+    host: 'worker-1',
+    checked_at: new Date().toISOString(),
+    stale: false,
+    plan_rev: 'rev-3',
+    actions: [
+      { id: 'claude.cc1.RTK.md', action: 'write_file', severity: 'warn', target: 'claude:cc1/RTK.md' },
+      { id: 'tool.rtk', action: 'install_tool', severity: 'warn', target: 'tool/rtk', command: 'brew install rtk' },
+      { id: 'tool.jq', action: 'manual', severity: 'warn', target: 'tool/jq', reason: 'needs_sudo', command: 'sudo apt install jq' },
+    ],
+  }
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString()
+    if (url.includes('/baseline/plan')) return new Response(JSON.stringify(plan), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    if (url.includes('/baseline/apply')) {
+      appliedBody = JSON.parse(init?.body as string)
+      return new Response(JSON.stringify({ backup_id: null, results: [{ id: 'tool.rtk', result: 'skipped', reason: 'install_failed' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    return new Response('{}', { status: 200 })
+  }) as unknown as typeof fetch
+  try {
+    await mount(<HostBaselineApply host="worker-1" baseline={{ ...sampleBaseline, fixable: ['claude.cc1.RTK.md', 'tool.rtk'] }} syncMode="ask" />)
+    await click(document.querySelector<HTMLButtonElement>('.host-baseline-apply-btn')!)
+    const dialog = document.querySelector('[role=alertdialog]')!
+    const text = dialog.textContent ?? ''
+    assert.match(text, /將寫入/)
+    assert.match(text, /將安裝/)
+    assert.match(text, /需手動/)
+    assert.match(text, /brew install rtk/)
+    assert.match(text, /sudo apt install jq/)
+    const confirmBtn = [...dialog.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('確認補齊'))!
+    await click(confirmBtn)
+    assert.deepEqual(appliedBody, { plan_rev: 'rev-3', ids: ['claude.cc1.RTK.md', 'tool.rtk'] })
+    assert.match(document.body.textContent ?? '', /略過（安裝失敗）/)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
