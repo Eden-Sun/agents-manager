@@ -409,6 +409,37 @@ mod tests {
         assert_eq!(sweep_at(&app, None, t0 + 14 * MIN, 5 * MIN).await, vec![f.turn_id.clone()], "hook 停了、再閒置滿門檻才收");
     }
 
+    /// #2191：claude 2.1.331 起 SubagentStop 等最後一則回覆寫進 transcript 才觸發，可能比回合收尾晚到。
+    /// 晚到的 SubagentStop 只把閒置計時延後一個門檻（它算 hook 活動），hook 停了之後照常收斂，不會卡住。
+    #[tokio::test]
+    async fn a_late_subagent_stop_defers_the_close_once_and_then_converges() {
+        let f = stuck("查一下").await;
+        let app = f.env.app.clone();
+        let _ = am_base::hook_inbox::migrate(app.db()).await;
+        let body = serde_json::json!({"bot_id": f.bot_id, "provider": "claude",
+            "payload": {"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "Explore"}});
+        sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at, processed_at) VALUES (?, ?, 'claude', 'http', ?, ?, ?)")
+            .bind(db::ulid())
+            .bind(&f.bot_id)
+            .bind(body.to_string())
+            .bind(db::iso_in(-60))
+            .bind(db::iso_in(-60))
+            .execute(app.db())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET created_at=? WHERE id=?").bind(db::iso_in(-600)).bind(&f.turn_id).execute(app.db()).await.unwrap();
+
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        assert!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await.is_empty(), "一分鐘前的 SubagentStop 仍算活動：延後一次");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+
+        sqlx::query("UPDATE hook_events SET processed_at=? WHERE bot_id=?").bind(db::iso_in(-900)).bind(&f.bot_id).execute(app.db()).await.unwrap();
+        assert!(sweep_at(&app, None, t0 + 8 * MIN, 5 * MIN).await.is_empty(), "從 hook 停了那次重新計時，還沒滿門檻");
+        assert_eq!(sweep_at(&app, None, t0 + 14 * MIN, 5 * MIN).await, vec![f.turn_id.clone()], "hook 停了、閒置滿門檻就收斂");
+        assert_ne!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
     #[tokio::test]
     async fn unconfirmed_idle_turn_is_not_completed_without_a_proven_reply() {
         let f = stuck("unconfirmed prompt").await;

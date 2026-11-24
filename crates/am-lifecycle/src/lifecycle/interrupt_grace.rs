@@ -313,8 +313,10 @@ pub fn claude_interrupted_at(log: &str) -> Option<DateTime<Utc>> {
 pub fn codex_interrupted_at(log: &str) -> Option<DateTime<Utc>> {
     let mut last: Option<Option<DateTime<Utc>>> = None;
     for line in log.lines() {
-        if codex_user_text(line).is_some() {
-            last = Some(None);
+        if let Some(text) = codex_user_text(line) {
+            if !is_child_notice(&text) {
+                last = Some(None);
+            }
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
@@ -328,6 +330,12 @@ pub fn codex_interrupted_at(log: &str) -> Option<DateTime<Utc>> {
         }
     }
     last.flatten()
+}
+
+/// codex 0.172.0 把子 agent 排隊的回報包成 `<subagent_notification>` 寫進對話（binary 內的 context 片段）。
+/// 中斷之後它可能落在下一回合，不是使用者又打了字，不能把接管寬限結清。
+fn is_child_notice(text: &str) -> bool {
+    text.trim_start().starts_with("<subagent_notification>")
 }
 
 /// claude 的使用者中斷標記：帶 `interruptedMessageId`，或文字是 `[Request interrupted by user…]`（工具執行中被按掉的那種沒有 id）。
@@ -601,6 +609,17 @@ mod tests {
             NotEcho("在新回合開始之後才擷取"),
         );
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), None), Some(("b", Some(t0 + s(1)))))));
+    }
+
+    /// #2193：中斷之後，子 agent 排隊的回報（user 角色、`<subagent_notification>`）不算使用者又打了字，接管標記仍在；
+    /// 真的使用者輸入照舊結清。
+    #[test]
+    fn a_child_notice_after_an_interrupt_is_not_user_input() {
+        let aborted = json!({"timestamp": "2026-09-16T12:01:00.000Z", "type": "event_msg", "payload": {"type": "turn_aborted", "reason": "interrupted"}}).to_string();
+        let child = json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<subagent_notification>\nworker 完成\n</subagent_notification>"}]}}).to_string();
+        let typed = json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "我自己來"}]}}).to_string();
+        assert!(codex_interrupted_at(&[aborted.clone(), child.clone()].join("\n")).is_some(), "子 agent 回報不結清接管");
+        assert_eq!(codex_interrupted_at(&[aborted.clone(), child, typed].join("\n")), None, "之後真的打了字就結清");
     }
 
     #[test]

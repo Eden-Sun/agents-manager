@@ -45,6 +45,16 @@ async fn identity_args(app: &impl IdentityAccess, bot: &db::Bot, host: &str) -> 
 /// 會重建 `PATH`（macOS `path_helper`、`brew shellenv`、`~/.local/bin`），把 pane env 裡擺在最前面的 herdr／cargo shim
 /// 擠到真 herdr 後面。bot 打 `herdr agent start` 就繞過 shim：不補 `--no-daemon`、`-p`，codex 子 agent 連上版本較舊的共用
 /// app-server，新模型被拒。關掉之後工具的 shell 直接繼承 pane 的 `PATH`。
+/// codex 0.172.0 的 `resume` 會還原這段對話存下的工作目錄（與權限同理，#2192），除非啟動時明確 `-C` 覆寫。
+/// bot 參數自己已帶 `-C`／`--cd` 就照使用者的，不再加（clap 不收重複的旗標）。
+fn codex_resume_cwd_args(bot_args: &[String], cwd: &str) -> Vec<String> {
+    let user_set = bot_args.iter().any(|a| a == "-C" || a == "--cd" || a.starts_with("--cd="));
+    if user_set || cwd.trim().is_empty() {
+        return Vec::new();
+    }
+    vec!["-C".into(), cwd.into()]
+}
+
 fn codex_pane_guard_args(kind: &str) -> Vec<String> {
     if kind == "codex" {
         vec![
@@ -1663,6 +1673,7 @@ async fn start_inner_body(
     if let Some((session_id, resume_args)) = resume {
         if bot.kind == "codex" {
             let mut resumed = resume_args;
+            resumed.extend(codex_resume_cwd_args(&bot.args(), restricted.as_deref().unwrap_or_else(|| bot_cwd(bot, project))));
             resumed.extend(args);
             args = resumed;
         } else {
@@ -2301,7 +2312,12 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     }
     if let Some((_, resume_args)) = resume.clone() {
         if bot.kind == "codex" {
+            let cwd_args = match db::project(app.db(), &bot.project_id).await {
+                Ok(Some(project)) => codex_resume_cwd_args(&bot.args(), bot_cwd(&bot, &project)),
+                _ => Vec::new(),
+            };
             let mut resumed = resume_args;
+            resumed.extend(cwd_args);
             resumed.extend(args);
             args = resumed;
         } else {
@@ -2480,6 +2496,37 @@ mod add_dir_args_tests {
         let args: Vec<String> = ["--restricted", "--add-dir", "/o/B1", "--add-dir=/x", "--add-dir", "--model", "opus"].map(String::from).to_vec();
         assert_eq!(super::add_dir_args(&args), vec!["/o/B1", "/x"]);
         assert!(super::add_dir_args(&["--model".to_string(), "opus".to_string()]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod codex_resume_cwd_tests {
+    use super::*;
+
+    /// 換了 cwd 之後 `codex resume` 仍要帶 `-C`：不帶就回到存下的舊目錄；權限覆寫跟在後面，兩者都在。
+    #[test]
+    fn a_codex_resume_pins_the_cwd_and_the_permission_override() {
+        let mut argv = resume_args_by_kind("codex", "s1").unwrap();
+        argv.extend(codex_resume_cwd_args(&[], "/work/proj"));
+        argv.extend(permission_args("codex", true));
+        assert_eq!(argv, ["resume", "s1", "-C", "/work/proj", "--yolo"]);
+        assert!(!argv.iter().any(|a| a == "exec"), "不走 codex exec resume");
+
+        let mut locked = resume_args_by_kind("codex", "s1").unwrap();
+        locked.extend(codex_resume_cwd_args(&[], "/work/proj"));
+        locked.extend(permission_args("codex", false));
+        assert_eq!(locked, ["resume", "s1", "-C", "/work/proj", "-c", "sandbox_mode=\"workspace-write\""]);
+    }
+
+    /// bot 參數自己帶了 `-C`／`--cd`：不再加，避免 clap 的重複旗標錯誤。空的 cwd 也不加。
+    #[test]
+    fn a_bot_that_sets_its_own_cwd_or_no_cwd_adds_nothing() {
+        for own in [vec!["-C", "/x"], vec!["--cd", "/x"], vec!["--cd=/x"]] {
+            let own: Vec<String> = own.into_iter().map(String::from).collect();
+            assert!(codex_resume_cwd_args(&own, "/work/proj").is_empty(), "{own:?}");
+        }
+        assert!(codex_resume_cwd_args(&[], "  ").is_empty());
+        assert_eq!(codex_resume_cwd_args(&["--model".into(), "gpt".into()], "/p"), ["-C", "/p"]);
     }
 }
 
