@@ -78,7 +78,6 @@ fn pre_tool_use_decision_with(data_dir: &Path, stdin_text: &str, timeout: Durati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     struct Dir(PathBuf);
     impl Dir {
@@ -104,8 +103,7 @@ mod tests {
 
     fn fake_rtk(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("rtk");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&p, format!("#!/bin/sh\n{body}\n"));
         p
     }
 
