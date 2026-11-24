@@ -87,12 +87,12 @@ pub fn open_dialog(run_id: &str) -> Option<Dialog> {
     open().lock().unwrap().get(run_id).filter(|e| !e.closing).map(|e| e.dialog)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn is_open(run_id: &str) -> bool {
     open().lock().unwrap().contains_key(run_id)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
 mod retain_tests {
     use super::*;
     #[test]

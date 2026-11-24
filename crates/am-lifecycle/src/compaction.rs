@@ -249,7 +249,7 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
     Ok(())
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
 mod tests {
     use super::*;
 
