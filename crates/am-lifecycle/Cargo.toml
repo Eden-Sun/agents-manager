@@ -7,7 +7,7 @@ edition = "2021"
 # App-backed tests are compiled by agents-managerd's composition test harness.
 daemon-test-harness = []
 # #1862 L2：只給 daemon 的測試建置（dev-dependencies）用，窄轉呼叫私有項（`test_seams`）；正式 build 不啟用。
-test-hooks = []
+test-hooks = ["am-base/test-hooks"]
 
 [dependencies]
 am-base = { path = "../am-base" }
