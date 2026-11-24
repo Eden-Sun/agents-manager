@@ -108,3 +108,29 @@ daemon 的 lib、bin、`api_doc_parity` 三個測試執行檔，前後的 `--lis
 check.sh 守衛 `session_production_code_reaches_other_features_only_through_ports` 原本只把 `cfg(test)`／`cfg(all(test, …))` 當測試區塊，過渡 gate 下的 `restart_child_in_pane_with` 被當成正式碼；`am_base::source_mask::test_mask` 補認 test-hooks gate。
 
 清單對帳：am-lifecycle 測試清單前後逐位元組相同（722 條）。daemon lib 由 6,166 條到 6,160 條，少的 6 條（`lifecycle::start::add_dir_args_tests` 1 條、`specialist_section_tests` 5 條）是 crate 裡 `#[cfg(test)]` 的純測試，掛載期間在 daemon 重複執行一次，翻轉後只在 am-lifecycle 執行，仍在 crate 清單內；沒有新增項。lib 的 `--ignored`、bin、`api_doc_parity` 前後相同。`rust_test_mount_test` 通過（未掛 0、harness 0）。
+
+## #1862 L3 撤掛載後的兩個情境
+
+撤前 `d132e8202`（`e65c5dc72^`），撤後 `e65c5dc72`。同一 Ubuntu shim 熱池成員 `shared`，負載與記憶體閘在計時外，兩邊各先暖編 daemon 與 am-lifecycle 測試，再取兩次樣本。daemon lib test 與 am-lifecycle lib test 秒數取自各樣本的 timing 報告。
+
+(a) 改 `daemon/src/webpush.rs` 一行，`cargo test -p agents-managerd --no-run --timings`：
+
+| 樣本 | 牆鐘秒 | daemon lib test 秒 | daemon lib 秒 |
+| --- | ---: | ---: | ---: |
+| 撤前 1 | 75.74 | 70.21 | 22.57 |
+| 撤前 2 | 86.34 | 80.58 | 20.44 |
+| 撤後 1 | 70.07 | 64.42 | 21.99 |
+| 撤後 2 | 69.39 | 63.75 | 17.36 |
+
+(b) 改 `crates/am-lifecycle/src/lifecycle/screen.rs` 一行，`cargo test -p am-lifecycle --timings`（含編譯與 722 條執行）：
+
+| 樣本 | 牆鐘秒 | am-lifecycle lib test 秒 |
+| --- | ---: | ---: |
+| 撤前 1 | 25.36 | 8.69 |
+| 撤前 2 | 24.58 | 8.50 |
+| 撤後 1 | 22.24 | 6.87 |
+| 撤後 2 | 24.22 | 7.79 |
+
+(a) 牆鐘中位數由 81.04 秒到 69.73 秒（約 −14%），daemon lib test 由 75.40 秒到 64.09 秒（約 −15%）：daemon 測試執行檔不再重編一份 lifecycle 原始碼。撤前第二筆偏高，兩筆樣本只能看出方向。(b) 由 24.97 秒到 23.23 秒，在雜訊範圍內；crate-only 路徑本來就不經過 daemon，撤掛載不影響它。改 am-lifecycle 後跑 daemon 測試仍要整個重編 daemon（依賴鏈），只改 lifecycle 時用 `cargo test -p am-lifecycle` 約 23 秒即可得到 crate 內的回饋。
+
+撤後改 daemon 一行仍要約 64 秒的 daemon lib test，時間在 daemon 自己的程式碼與測試（約 6,160 條）。要再下降，需要把 daemon 的熱區或測試繼續拆出去，不是 lifecycle 掛載的問題。
