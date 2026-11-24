@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import * as api from '../api'
 import { ApiError } from '../api/types'
 import { copyText } from '../lib/copyText'
+import { openTerminalLink } from '../lib/terminalLink'
 import { t } from '../lib/i18n'
 import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from '../lib/shellFrame'
 import { fontSizeFor } from '../lib/shellFont'
@@ -95,6 +96,7 @@ export function HostShellXterm({
       fontSize: 13,
       fontFamily: getComputedStyle(el).getPropertyValue('--font-mono').trim() || 'monospace',
       theme: readTheme(el),
+      linkHandler: { activate: (_e, uri) => openTerminalLink(uri), allowNonHttpProtocols: false },
     })
     const fit = new FitAddon()
     term.loadAddon(fit)

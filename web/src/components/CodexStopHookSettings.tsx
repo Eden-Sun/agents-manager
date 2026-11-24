@@ -30,7 +30,7 @@ export function CodexStopHookSettings() {
     }
   }
 
-  const confirm = async () => {
+  const confirmTrust = async () => {
     if (!pending) return
     const target = pending
     setBusy(true)
@@ -73,7 +73,7 @@ export function CodexStopHookSettings() {
         title={t('信任 AG Man 的 Codex Stop hook？')}
         body={pending ? t('這會讓 {target} 的 codex 在每個回合結束時執行 AG Man 的 stop hook，並在該帳號目錄的 config.toml 寫入一筆 trusted_hash（寫入前會備份）。', { target: label(pending) }) : ''}
         confirmLabel={t('信任此 hook')}
-        onConfirm={() => void confirm()}
+        onConfirm={() => void confirmTrust()}
         onCancel={() => setPending(null)}
       />
     </section>

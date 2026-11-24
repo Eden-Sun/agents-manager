@@ -1888,3 +1888,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **測試**：
   - `noticesDom.test.tsx`：驗證一般 info 點擊本體關閉、帶 action 與 error 通知點擊本體不關閉、關閉按鈕 stopPropagation。
   - `deployNow.test.ts`：驗證精簡後的部署通知文案斷言。
+
+## 不使用原生 alert／confirm／prompt（2026-11-24）
+- **規則**：網頁一律用站內對話框（ConfirmDialog 等），不呼叫瀏覽器原生 `alert`／`confirm`／`prompt`。oxlint 的 `no-alert` 與 `web/src/nativeDialogGuard.test.ts` 守門。
+- **終端機連結**：xterm 預設的 OSC 8 連結處理會跳原生 confirm。HostShellXterm 設 `linkHandler`，只開 http／https（`window.open(…, '_blank', 'noopener,noreferrer')`），其他 scheme 直接忽略，不再確認。
+- **測試**：`terminalLink.test.ts`（https 直接開、非 http(s) 忽略、從不呼叫 confirm）；`nativeDialogGuard.test.ts`（每個 `new Terminal(` 都帶 `linkHandler` 與 `allowNonHttpProtocols: false`）。
