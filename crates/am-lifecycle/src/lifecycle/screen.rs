@@ -2,7 +2,7 @@
 
 use am_base::capture::claude::{codex_usage_notice_line, month_num_token};
 pub use am_base::composer_parse::{prompt_echo_prefix, strip_grok_decor};
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use super::s6_ports::{ScreenContext, ScreenServices};
 use super::*;
@@ -73,7 +73,7 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
             app.insert_system_notice(&conversation_id, &notice).await?;
             tracing::info!(bot = %bot.name, kind = %bot.kind, notice = %notice, "CLI account notice captured");
         }
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         super::race_point::hit("codex_notice_after_insert", bot_id).await;
         if is_limit {
             if !fresh && in_flight.is_none() {
@@ -1036,7 +1036,7 @@ fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::Dat
 
 /// codex 撞限橫幅的那一筆撞限：到期是橫幅上寫的時間（撞的當下解析），沒寫就沒有（credits 用完，等下一個成功回合清）。
 /// 正式路徑在 `turn_error::mark_codex_limit_hit` 組（欠帳要留著撞的當下那一份），這支給測試直接寫一格。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn codex_limit_hit(notice: &str, at: String) -> crate::quota::LimitHit {
     crate::quota::LimitHit { message: notice.to_string(), until: parse_codex_try_again(notice), at, bucket: None }
 }
@@ -1389,7 +1389,7 @@ fn codex_tool_cell_mask(kind: &str, lines: &[&str]) -> Vec<bool> {
     mask
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod extract_tests {
     use super::*;
 
@@ -2720,7 +2720,7 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
 /// `-c model_reasoning_summary="concise"`（字頭仍是 `Working`：帳號撞限，summary 還沒流出）。
 /// `finished` 是 resume 已成功回合，完成行 `  done Aug 2 at 3:00 AM`（別天、duration 3.5s 所以沒有
 /// `Worked for`）。解析器對其他完成行格式的覆蓋仍用下面 `COMPLETIONS`。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_0155_screen_tests {
     use super::*;
 
@@ -2889,7 +2889,7 @@ mod codex_0155_screen_tests {
 /// 撞限橫幅寫進額度那一格（`apply_codex_limit_hit_quota`）的去重規則。
 /// Codex 0.157.0 的 inline 冷啟動畫面（私有 prefix、`--no-daemon --no-alt-screen`）：
 /// 初始 frame 的模型與目錄仍在載入，不能被誤認成使用者輸入或回合回覆。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_0157_screen_tests {
     use super::*;
 
@@ -2908,7 +2908,7 @@ mod codex_0157_screen_tests {
 /// codex 0.159.3 的帳號安全設定提醒 inline banner（#779，openai/codex#49744）。伺服器分批開放，本機帳號還沒輪到，
 /// fixture 是照上游 rust-v0.159.3 的 snapshot（`security_setup_banner`、`security_setup_after_cutoff`、
 /// `inline_banner_wrapped_and_truncated`）排出來的版面，樣式照 `actionable_banner.rs`：標題粗體、提示 dim、選中列 `›`。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_01593_banner_tests {
     use super::*;
     use crate::lifecycle::{box_state, plain_without_hints, BoxState};
@@ -2972,7 +2972,7 @@ mod codex_01593_banner_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_bullet_row_tests {
     use super::*;
 
@@ -2989,7 +2989,7 @@ mod codex_bullet_row_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_warning_footer_tests {
     use super::*;
 
@@ -3037,7 +3037,7 @@ mod codex_warning_footer_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod issue_1664_screenshot_tests {
     use super::*;
 
@@ -3064,7 +3064,7 @@ mod issue_1664_screenshot_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod synthetic_codex_compaction_tests {
     use super::*;
 
@@ -3106,7 +3106,7 @@ mod synthetic_codex_compaction_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod sent_echo_window_tests {
     use super::*;
 
@@ -3163,7 +3163,7 @@ mod sent_echo_window_tests {
 }
 
 /// 滿意度問卷不是回覆（終端備援會把它當成 assistant 訊息存進對話）。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod feedback_survey_reply_tests {
     use super::*;
 
@@ -3202,7 +3202,7 @@ mod feedback_survey_reply_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod same_or_nearly_same_reply_tests {
     use super::*;
 
@@ -3236,7 +3236,7 @@ mod same_or_nearly_same_reply_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_safety_recourse_tests {
     use super::*;
 
@@ -3251,7 +3251,7 @@ mod codex_safety_recourse_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod agy_1_5_12_scroll_indicator_tests {
     use super::*;
     use crate::composer_parse::{box_state, composer_text, pane_awaits_input, BoxState};

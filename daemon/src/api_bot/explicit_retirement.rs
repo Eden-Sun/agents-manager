@@ -3,12 +3,12 @@ use std::{future::Future, sync::Arc};
 use crate::lifecycle::api_bot_port::{ApiFreshError as E, ApiFreshResult as R, ApiFreshTarget};
 use super::retention::RetentionCandidate;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 fn lost_ack_faults() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 pub(super) fn arm_lost_ack_for_test(session: &str) {
     assert!(lost_ack_faults().lock().unwrap().insert(session.to_owned()));
 }
@@ -98,13 +98,13 @@ async fn retire_body_locked_inner(app: &Arc<crate::state::App>, lifecycle: &ApiO
         if !app.shutdown.is_cancelled() && !app.api_bot_runtime.clear_explicit_retire(&guard, &token) { return Err(E::Unconfirmed); }
         return Err(error);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     crate::race_point::hit("api_fresh_before_commit", &target.session_id).await;
     if app.shutdown.is_cancelled() {
         if tx.rollback().await.is_err() { return Err(E::Unconfirmed); }
         return Err(E::Busy);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     let commit_result = {
         use std::future::Future;
         let mut commit = Box::pin(tx.commit());
@@ -117,13 +117,13 @@ async fn retire_body_locked_inner(app: &Arc<crate::state::App>, lifecycle: &ApiO
             }
         }
     };
-    #[cfg(not(all(test, feature = "daemon-test-harness")))]
+    #[cfg(not(test))]
     let commit_result = tx.commit().await;
     let mut commit_failed = commit_result.is_err();
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     if !commit_failed && lost_ack_faults().lock().unwrap().remove(&target.session_id) { commit_failed = true; }
     if commit_failed {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_fresh_before_readback", &target.session_id).await;
         let result = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM api_bot_sessions WHERE id=?)").bind(&target.session_id).fetch_one(&app.db).await;
         match result {
@@ -138,7 +138,7 @@ async fn retire_body_locked_inner(app: &Arc<crate::state::App>, lifecycle: &ApiO
             Ok(false) => {}
         }
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     crate::race_point::hit("api_fresh_after_commit", &target.session_id).await;
     if !app.api_bot_runtime.finish_explicit_retire(&guard, &token) { return Err(E::Unconfirmed); }
     Ok(R::Cleared)

@@ -474,7 +474,7 @@ pub(crate) async fn retire(
     Ok(Json(json!({"session": session})))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod parse_tests {
     use super::*;
 

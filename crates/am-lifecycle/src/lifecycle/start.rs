@@ -1771,14 +1771,14 @@ async fn start_inner_body(
         }
     }
     let mut started = false;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     let mut first_agent_start = true;
     for attempt in 0..10u32 {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         if first_agent_start {
             super::race_point::hit("restart_before_agent_start", &bot.id).await;
         }
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         {
             first_agent_start = false;
         }
@@ -1846,7 +1846,7 @@ async fn start_inner_body(
     }
     let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
     crate::codex_live::spawn_boot_version_read(app.db(), &client, fence.or(ready_fence.as_ref()), &bot.kind, &bot.id, run_id, &pane_id);
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     {
         super::race_point::hit("start_before_running", &bot.id).await;
     }
@@ -1902,7 +1902,7 @@ async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::ki
     crate::kind_probe::verdict(host, kind, found)
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn restart_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_bot_with(app, bot_id, StartOpts::default()).await
 }
@@ -1980,7 +1980,7 @@ async fn restart_bot_with_authority_body(
     let intent_id = app.prepare_restart_intent(bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, app.boot_id())
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record the restart intent: {e:#}")))?;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping, fence).await;
     settle_restart_intent(app, &intent_id, &res).await;
@@ -2056,7 +2056,7 @@ async fn restart_stop_and_start_body(
         }
         Err(e) => return Err(e),
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("restart_after_stop", bot_id).await;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
@@ -2152,7 +2152,7 @@ async fn restart_start_body(
 }
 
 /// herdr `agent.start` 回「名字被占」：原 pane 的舊 agent 還在（狀態 Done、名字沒釋放）。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn agent_name_taken(e: &anyhow::Error) -> bool {
     if let Some(h) = e.downcast_ref::<crate::herdr::HerdrError>() {
         return h.code == "agent_name_taken";
@@ -2164,13 +2164,13 @@ fn agent_name_taken(e: &anyhow::Error) -> bool {
 /// 同名 `agent.start --resume <上一個 session>`。pane 是父 agent 開的，且 shell 裡的環境
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
 /// 過程中 pane 不見了就不重開。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn restart_child_in_pane(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_child_in_pane_with(app, bot_id, false).await
 }
 
 /// 同上；`require_idle` 見 [`StartOpts::require_idle`]。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, require_idle: bool) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -2196,7 +2196,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record child restart grace: {e:#}")))?;
 
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("child_restart_before_stopping", bot_id).await;
     if require_idle {
         if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
@@ -2272,7 +2272,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
             ));
         }
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     {
         super::race_point::hit("child_restart_between_runs", bot_id).await;
     }
@@ -2448,7 +2448,7 @@ pub async fn resume_restart_locked(app: &impl StartContext, bot_id: &str, opts: 
     started
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "start_tests/account_file_tests.rs"]
 mod account_file_tests;
 
@@ -2483,7 +2483,7 @@ mod add_dir_args_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

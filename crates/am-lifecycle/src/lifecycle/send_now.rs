@@ -175,7 +175,7 @@ pub async fn deliver(
         }
     };
     let mut fate = key_fate(&press_submit(client, &typed).await);
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("send_now_after_key", &bot.id).await;
     let mut presses = 1;
     let proven = loop {
@@ -204,7 +204,7 @@ pub async fn deliver(
         Err(e) => {
             let seen = delivered.as_ref().ok().copied().unwrap_or(Delivered::Unproven("send_now_unconfirmed"));
             super::interruption::owe_delivery(&bot.id, new_turn, seen.record(), db::now());
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("send_now_owed", &bot.id).await;
             let settled = super::interruption::settle_locked(app, &bot.id, super::interruption::Evidence::Nothing).await;
             if settled.is_ok() && !super::interruption::owes(&bot.id, &interrupted.id) {
@@ -221,7 +221,7 @@ fn unknown(bot: &db::Bot, run: &db::Run, interrupted: &db::Turn, proof: Option<S
     Outcome::Unknown(why)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     fn status(version: &str) -> String {

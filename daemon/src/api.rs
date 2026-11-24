@@ -7459,7 +7459,7 @@ mod handoff_delete_tests;
 #[cfg(test)]
 mod handoff_restore_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod native_api_http_tests;
 
 #[cfg(test)]

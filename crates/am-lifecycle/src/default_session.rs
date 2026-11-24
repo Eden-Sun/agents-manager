@@ -297,7 +297,7 @@ async fn ensure_imported_bot(
     Ok((bot, true))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::{imported_name, same_workdir, sync, SESSION};
     use std::collections::HashSet;

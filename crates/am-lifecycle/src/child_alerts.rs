@@ -379,7 +379,7 @@ pub const CRID_PREFIX: &str = "child-blocked:";
 
 /// 把通知送給 parent（`prompt_relayed_queueable`：parent 在回合中就排隊，不插隊、不打斷）。
 /// 抽出來是為了讓「排隊而不是插隊」測得到——那條路只碰 DB，不需要 herdr。正式路徑走 [`deliver_attempt`]（#567）。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn deliver(
     app: &impl crate::events::ports::TurnCommands,
     parent_id: &str,
@@ -495,7 +495,7 @@ pub async fn last_sent(app: &impl crate::capabilities::Db, parent_id: &str, base
     })
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
     use super::*;
 
@@ -528,7 +528,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod retain_tests {
     use super::*;
 

@@ -4,14 +4,12 @@
 //! one chain with `hookrecv`'s late-hook write-back (a turn closed here with no reply must still be
 //! fillable by a hook that arrives afterwards); they are kept together on purpose.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "observed_status.rs"]
 pub mod observed_status;
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 #[path = "observed_status.rs"]
 mod observed_status;
 
@@ -43,10 +41,10 @@ pub async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyhow::Resu
     observed_status::reblock_if_prompt(app, run).await
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "codex_session_refresh.rs"]
 pub mod codex_session_refresh;
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 
@@ -101,24 +99,24 @@ fn progress_backoff(interval: Duration, failures: u32) -> Duration {
     interval.saturating_mul(1u32 << failures.min(6)).min(PROGRESS_BACKOFF_MAX.max(interval))
 }
 
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(feature = "test-hooks"))]
 fn progress_interval(_run_id: &str) -> Duration {
     PROGRESS_INTERVAL
 }
 
 /// 測試可以把單一 run 的輪詢調快（[`progress_poll_tests`]），別的測試的 poller 照舊。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn progress_interval(run_id: &str) -> Duration {
     progress_interval_override(run_id).unwrap_or(PROGRESS_INTERVAL)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 fn progress_interval_overrides() -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Duration>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 fn progress_interval_override(run_id: &str) -> Option<Duration> {
     progress_interval_overrides().lock().ok()?.get(run_id).copied()
 }
@@ -191,7 +189,7 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             if started.elapsed() > PROGRESS_MAX {
                 break;
             }
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("progress_poll", &run_id).await;
             let run = match still_ours(&app2, &run_id, &bot_id, &turn_id, &mut bot, &mut sent).await {
                 Ok(Some(run)) => run,
@@ -777,7 +775,7 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
     Some(cut)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/nbsp_composer_tests.rs"]
 mod nbsp_composer_tests;
 
@@ -904,7 +902,7 @@ fn folded_codex_chars(box_text: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/folded_paste_tests.rs"]
 pub(crate) mod folded_paste_tests;
 
@@ -1010,9 +1008,9 @@ macro_rules! resend_type {
         }
     };
 }
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 resend_type!(pub);
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(feature = "test-hooks"))]
 resend_type!(pub(self));
 
 fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
@@ -1021,7 +1019,7 @@ fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
 }
 
 impl Resend {
-    #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn sent(self) -> bool {
         self == Resend::Sent
     }
@@ -1250,9 +1248,9 @@ macro_rules! stall_types {
         }
     };
 }
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 stall_types!(pub);
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(feature = "test-hooks"))]
 stall_types!(pub(self));
 
 fn stall_unsure(turn_id: &str, e: &anyhow::Error) -> bool {
@@ -1297,7 +1295,7 @@ async fn stall_round(
             Err(e) => unsure = stall_unsure(turn_id, &e),
         }
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("stall_after_nudge", turn_id).await;
     let mut resent_now = false;
     if !st.nudged && !st.resent && !unsure {
@@ -1808,7 +1806,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     } else if let Some(r) = codex_rollout_reply.clone() {
         Some(r)
     } else {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         super::race_point::hit("fallback_after_echo", &turn.id).await;
         let screen = anchored.as_deref().unwrap_or(reply_screen);
         tracing::debug!(turn = %turn.id, branch = if anchored.is_some() { "echo" } else { "cursor" }, screen_len = screen.len(), fingerprint = %fingerprint(screen), "terminal fallback: reply window");
@@ -2289,20 +2287,20 @@ fn truncate_hookless_reply(reply: String) -> String {
 
 
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/progress_rate_tests.rs"]
 mod progress_rate_tests;
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/lost_prompt_tests.rs"]
 mod lost_prompt_tests;
 
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/grok_limit_screen_tests.rs"]
 mod grok_limit_screen_tests;
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "poller_tests/codex_limit_quote_tests.rs"]
 mod codex_limit_quote_tests;
 
@@ -2328,7 +2326,7 @@ pub trait FallbackTimers: Send + Sync {
 }
 
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod no_reply_notice_tests {
     use super::*;
 
@@ -2342,7 +2340,7 @@ mod no_reply_notice_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
@@ -2353,7 +2351,7 @@ pub mod test_seams {
     pub fn is_no_reply_notice(text: &str) -> bool { super::is_no_reply_notice(text) }
     pub const HOOKLESS_REPLY_MAX: usize = super::HOOKLESS_REPLY_MAX;
     pub const STALL_SECS: u64 = super::STALL_SECS;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     pub use super::{Resend, Stall, StallRound};
     pub async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
         super::arm_fallback_after(app, run_id, bot_id, delay).await

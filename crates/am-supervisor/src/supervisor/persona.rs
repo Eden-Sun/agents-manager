@@ -119,7 +119,7 @@ pub fn loaded_state(run_started_at: Option<&str>, persona_updated_at: Option<&st
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

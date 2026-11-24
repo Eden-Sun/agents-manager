@@ -344,7 +344,7 @@ async fn accept_on_body_inner(
         if choice != ResumeChoice::Resume {
             return Err(give_up_after_observation(app, run, &bot, client, CURSOR_NOT_ON_RESUME, true, now, observed_menu_pending).await);
         }
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         super::race_point::hit("cold_resume_before_key", &run.id).await;
         if !current(app, run, client).await? {
             return Err(give_up_after_observation(app, run, &bot, client, AUTHORITY_CHANGED, false, now, observed_menu_pending).await);
@@ -443,7 +443,7 @@ async fn after_start_body(
         if crate::composer_parse::box_state(kind, &read.text)
             == crate::composer_parse::BoxState::Empty
         {
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("cold_resume_start_empty_frame", &run.id).await;
             stable += 1;
             if stable >= 4 {
@@ -462,11 +462,11 @@ async fn after_start_body(
     AgentStatus::Unknown
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "claude_resume_menu_tests.rs"]
 mod tests;
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

@@ -501,7 +501,7 @@ pub async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snaps
 }
 
 /// The polling loop is composed in `runners::supervisor::health`.
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod probe_cache_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

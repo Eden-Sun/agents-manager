@@ -524,7 +524,7 @@ pub fn annotate(run_json: &mut Value, kind: &str, now_ms: i64) {
     o.insert("prompt_cache".into(), pc);
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod lineage_sync_tests {
     use super::*;
 

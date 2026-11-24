@@ -191,7 +191,7 @@ impl ApiBotRuntime {
         if !app.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
         let dependencies = self.dependencies_snapshot();
 
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_run_stop_before_admission", &key.run_id).await;
         let _bot_admission = self.bot_gate(&key.bot_id).await;
         let _admission = self.admission_gate(key).await;
@@ -449,7 +449,7 @@ impl ApiBotRuntime {
         .await
     }
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     pub(super) fn arm_delivery_lost_ack_for_test(turn: &str) {
         assert!(delivery_lost_acks().lock().unwrap().insert(turn.to_owned()));
     }
@@ -737,7 +737,7 @@ impl ApiBotRuntime {
             .save(&state)
             .await
             .map_err(|_| if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Upstream })?;
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_run_spawn_after_owner_writes", &key.run_id).await;
 
         let registry_key = RunTurnKey {
@@ -763,9 +763,9 @@ impl ApiBotRuntime {
         let (accept_tx, accept_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
         let mut join_wait = joined_rx.clone();
         let release_shutdown = app.shutdown.clone();
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         let runner_run_id = key.run_id.clone();
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_same_run_before_control_cas", &key.run_id).await;
         let (run_ticket, cancel) = {
         let mut controls = self.inner.controls.lock().expect("control mutex poisoned");
@@ -781,7 +781,7 @@ impl ApiBotRuntime {
                     let admitted = tokio::select! { biased; _ = release_shutdown.cancelled() => false, _ = cancel.cancelled() => false, result = release => result.is_ok() };
                     if !admitted { return Ok(TurnOutcome::Cancelled); }
                 }
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(test)]
                 crate::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
                 let responses_before = state.responses.len();
@@ -952,7 +952,7 @@ impl ApiBotRuntime {
                 accepted.then_some(session_commit),
             )));
             let outcome = task.await;
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(test)]
             crate::race_point::hit("api_same_run_proof_before_cas", &owner_key.run_id).await;
             let mut controls = owner_inner.controls.lock().expect("control mutex poisoned");
             if let Some(record) = controls.get_mut(&owner_key) {
@@ -967,7 +967,7 @@ impl ApiBotRuntime {
             }
         }));
         if native_pending {
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(test)]
             crate::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
             let admitted = async {
                 let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| ())?;
@@ -975,7 +975,7 @@ impl ApiBotRuntime {
                     .bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id).bind(bot.cwd.as_deref()).bind(&project.path).execute(&mut *tx).await.map_err(|_| ())?;
                 if changed.rows_affected() != 1 || app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| ())?; return Err(()); }
                 tx.commit().await.map_err(|_| ())?;
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(test)]
                 if delivery_lost_acks().lock().unwrap().remove(&key.turn_id) { return Err(()); }
                 Ok::<(), ()>(())
             }.await;
@@ -990,7 +990,7 @@ impl ApiBotRuntime {
                 let _ = tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait_join(&mut join_wait)).await;
                 return Err(ApiBotError::Unconfirmed);
             }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(test)]
             crate::race_point::hit("api_native_after_delivery_commit", &key.turn_id).await;
             if app.shutdown.is_cancelled() {
                 if let Some(tx) = accept_tx { let _ = tx.send(false); }
@@ -1011,7 +1011,7 @@ impl ApiBotRuntime {
                 return Err(ApiBotError::Unconfirmed);
             }
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_run_spawn_after_registry", &key.run_id).await;
         Ok(())
     }
@@ -1392,7 +1392,7 @@ async fn own_ticket_inner(
                 let clean = (joined == Completion::Completed && payload.outcome() == super::receipt::JoinOutcome::Completed)
                     || (joined == Completion::Failed && payload.outcome() == super::receipt::JoinOutcome::Failed);
                 if clean && published {
-                    #[cfg(all(test, feature = "daemon-test-harness"))]
+                    #[cfg(test)]
                     crate::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
                     if shutdown.is_cancelled() { return None; }
                     return Some(super::same_run::Finalized { identity: owner.identity, revision, payload });
@@ -1704,7 +1704,7 @@ async fn settle_joined_completion_body(
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             notify.notify_one();
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         if failures >= API_BOT_COMPLETION_MAX_ATTEMPTS {
             tokio::select! {
                 biased;
@@ -1767,7 +1767,7 @@ async fn store_joined_completion_with_test_fault(
     if injected_fault == Some((CompletionStoreFault::AmbiguousAfterCommit, 0))
         && matches!(&stored, Ok(super::completion::Outcome::Committed(_)))
     {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_completion_ack_lost", &owner.key.run_id).await;
         return Err(super::completion::StoreError::Ambiguous);
     }
@@ -2113,7 +2113,7 @@ async fn stored_revision(
     .flatten()
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 fn delivery_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
@@ -2323,7 +2323,7 @@ impl ApiBotRuntime {
             tx.rollback().await.map_err(|_| StartupError::Storage)?;
             return Ok(StartupRestore::Fenced);
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(test)]
         crate::race_point::hit("api_startup_before_cursor_cas", &identity.bot_id).await;
         if !self.startup_guard_matches(app, identity, guard) {
             tx.rollback().await.map_err(|_| StartupError::Storage)?;

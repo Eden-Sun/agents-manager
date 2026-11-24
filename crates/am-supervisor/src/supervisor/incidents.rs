@@ -653,7 +653,7 @@ pub async fn system_health(app: &(impl crate::capabilities::DataDir + crate::cap
 mod tests {
     use super::*;
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_huge_stalled_threshold_yields_no_cutoff_instead_of_panicking() {
         let now = chrono::Utc::now();
@@ -675,7 +675,7 @@ mod tests {
 
     /// #427：角色 bot 不可用要連續看到一分鐘（兩拍）才開 incident。偵測從「送不出去才看畫面」
     /// 改成「每一拍都看」之後，一拍的閃動不該驚動使用者；真的卡住時它會一直都在。恢復了自動關。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_role_that_is_unavailable_for_two_ticks_opens_and_clears_by_itself() {
         let mut d = Detector::default();
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn bot_stopped_threshold_keeps_elapsed_time_when_the_wall_clock_moves_back() {
         let mut d = Detector::default();
@@ -710,7 +710,7 @@ mod tests {
     /// 讀不到畫面時**不能**把已經開著的那筆當成恢復——「探針沒跑」跟「它好了」長得一樣，
     /// 把後者當前者等於對使用者宣告一個沒人觀察到的恢復（同 host／bot 探針的既有原則）。
     /// 兩顆角色共用一個 kind，所以其中一顆瞎掉時另一顆的也一起留著：寧可晚關，不可誤關。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_role_probe_that_could_not_run_neither_opens_nor_resolves() {
         let mut d = Detector::default();
@@ -727,7 +727,7 @@ mod tests {
     /// #459：壞掉的是巡檢自己時，`incident_opened` 不能推回巡檢——那正是這個檔案自己對
     /// `notify_exhausted` 防過的反模式（「把一則送不出去的通知變成兩則」）。協調者在就送它；
     /// 協調者沒建立時**一則都不推**（沒有第二條路），incident 本身照開、留在 UI 與 `system_health`。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_broken_patrol_is_never_told_about_itself() {
         assert!(notifiable(ROLE_UNAVAILABLE_KIND, "responder", false), "協調者壞了：巡檢收得到，跟有沒有協調者無關");
@@ -738,7 +738,7 @@ mod tests {
     }
 
     /// 兩顆角色各自一筆：`resource` 是角色名，所以協調者卡住不會蓋掉巡檢那一筆（反之亦然）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn each_role_gets_its_own_incident_row() {
         let mut d = Detector::default();
@@ -768,7 +768,7 @@ mod tests {
 
     /// #534：重試節奏是分鐘級的。20／60 秒只夠撐過「ssh 抖一下」，那台在重開機時三次全都趕不上，
     /// 而下一次機會要等它掉線再連上。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn the_remote_retry_schedule_is_minutes_not_seconds() {
         assert_eq!(crate::shim_refresh::REMOTE_RETRY_WAITS, [0, 300, 900, 3600]);
@@ -776,7 +776,7 @@ mod tests {
 
     /// #472：分類器連續失敗到門檻才開 incident，而且**不推 inbox**——
     /// 壞掉的就是分類那條路，推進去那一則同樣會停在 `role IS NULL` 沒人收得到。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_failing_classifier_opens_an_incident_that_never_goes_through_the_inbox() {
         assert!(CLASSIFY_FAILURE_LIMIT >= 2, "至少要撐過一拍，否則一次抖動就開票");
@@ -796,7 +796,7 @@ mod tests {
 
     /// A host that drops for ten seconds during a reconnect is not an outage. One that stays
     /// down past the threshold is, and it is written down exactly once.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_blip_is_not_an_incident_but_a_real_outage_is() {
         let mut d = Detector::default();
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(d.plan(&seen, &[("host_disconnected".into(), "mac2".into())], &[], &t, 9999).open.len(), 1);
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_condition_that_clears_resolves_exactly_the_open_one() {
         let mut d = Detector::default();
@@ -823,7 +823,7 @@ mod tests {
 
     /// The counter-churn case from 2026-09-10: bots starting and finishing all night is not a
     /// system fault and must not produce a single incident.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn bot_churn_produces_nothing() {
         let mut d = Detector::default();
@@ -835,7 +835,7 @@ mod tests {
 
     /// Stalled work and exhausted notifications carry their own age test, so they open on the
     /// first pass that sees them rather than waiting a second threshold.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn probes_that_already_tested_age_open_immediately() {
         let mut d = Detector::default();
@@ -847,7 +847,7 @@ mod tests {
     /// A probe whose query errored returns no observations — exactly like a probe that looked
     /// and found nothing. Treating them the same makes the sweep announce a recovery nobody
     /// saw, which is worse than silence: it closes an incident that is still happening.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_probe_that_could_not_run_never_resolves_its_incidents() {
         let mut d = Detector::default();
@@ -868,7 +868,7 @@ mod tests {
 
     /// A blind pass must not restart a threshold that was already accumulating, or a fault
     /// could dodge every incident by coinciding with an intermittent query failure.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_blind_pass_does_not_reset_a_threshold_in_progress() {
         let mut d = Detector::default();
@@ -882,7 +882,7 @@ mod tests {
     }
 
     /// The incidents that say "the inbox is broken" must not be announced through the inbox.
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn the_broken_notification_channel_is_not_used_to_report_itself() {
         assert!(!notifiable("notify_exhausted", "responder", false), "this one would retry, exhaust, and open another incident");
@@ -896,7 +896,7 @@ mod tests {
     ///
     /// 沒夾的話 `0` 會讓 `notify_attempts >= 0` 對**每一則** pending 巡檢事件成立：一則都還沒送過就
     /// 開 critical incident，而通知本身其實正常在送（送出那一路用的是 1）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn a_zero_or_negative_notify_budget_is_clamped_like_the_sending_path_does() {
         let mut cfg = crate::config::SupervisorCfg::default();
@@ -910,7 +910,7 @@ mod tests {
 
     /// 探針查詢失敗：`system_health` 回 unknown 並列出是哪一類看不到；下一輪跑得起來就回 healthy。
     /// 真的有 degraded 的 incident 時照舊是 degraded（unknown 不蓋過真的故障）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn a_probe_that_cannot_run_makes_the_system_half_unknown_not_healthy() {
         let app = super::super::bot_requests::flow_tests::app().await;
@@ -926,7 +926,7 @@ mod tests {
         assert_eq!((h["status"].as_str(), h["blind_probes"].as_array().map(Vec::len)), (Some("degraded"), Some(0)));
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[test]
     fn not_knowing_outranks_healthy_but_not_a_real_fault() {
         assert_eq!(worst("healthy", "unknown"), "unknown");

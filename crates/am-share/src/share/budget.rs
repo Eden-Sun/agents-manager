@@ -270,7 +270,7 @@ pub async fn sweep<S: SiteEnv>(app: &S) -> Vec<(String, Measured)> {
     newly_full
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

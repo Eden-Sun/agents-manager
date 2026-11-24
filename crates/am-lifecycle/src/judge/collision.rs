@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::release_triage::ledger::{self, IssueRef, Row};
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 macro_rules! race_gate_type {
     ($vis:vis) => {
         $vis struct AskedRaceGate {
@@ -34,13 +34,13 @@ macro_rules! race_gate_type {
         }
     };
 }
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 race_gate_type!(pub);
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(not(feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks"))]
 race_gate_type!(pub(self));
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 static ASKED_RACE_GATE: std::sync::OnceLock<std::sync::Mutex<Option<AskedRaceGate>>> = std::sync::OnceLock::new();
 
 /// #264 量過的門檻。低於的只記帳本。
@@ -93,9 +93,9 @@ macro_rules! candidate_type {
         }
     };
 }
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 candidate_type!(pub);
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(feature = "test-hooks"))]
 candidate_type!(pub(self));
 
 impl Candidate {
@@ -321,7 +321,7 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 || cand.host_fence.as_ref().is_some_and(|f| !f.is_current_now())) {
                 return Ok(());
             }
-            #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(any(test, feature = "test-hooks"))]
             gate_after_asked_for_test(&pair).await;
             let snapshot = snapshot(&pair, &mine, &other);
             let slot = match super::reserve_same_work_slot(
@@ -482,7 +482,7 @@ async fn asked(app: &impl crate::capabilities::Db, pair: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 async fn gate_after_asked_for_test(pair: &str) {
     let barrier = ASKED_RACE_GATE
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -848,9 +848,9 @@ fn worktree_dirname(cwd: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     pub use super::{AskedRaceGate, Candidate};
     pub const HINT_NOISE: &str = super::HINT_NOISE;
     pub const MAX_PAIRS: usize = super::MAX_PAIRS;
@@ -878,7 +878,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod tests {
     use super::*;
     use crate::release_triage::{ledger::Status, Bucket, Entry};

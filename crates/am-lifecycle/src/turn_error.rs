@@ -480,7 +480,7 @@ async fn last_turn(db: &DbContext<sqlx::SqlitePool>, run_id: &str) -> Result<Opt
         .await?)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
     use super::*;
 
@@ -489,7 +489,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod tests {
     use super::{agy_reset_until, api_error_line, CONTENT_BLOCKED, is_quota_exhaustion, is_quota_limit, kind_of};
 
@@ -1120,12 +1120,12 @@ async fn owed_limit_hit_inner(app: &impl TurnErrorContext, bot: &db::Bot, identi
     crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit)
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn owes_limit_hit(app: &impl crate::capabilities::BootId, bot_id: &str) -> bool {
     owed(app, bot_id).is_some()
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod quota_limit_tests {
     use super::*;
 

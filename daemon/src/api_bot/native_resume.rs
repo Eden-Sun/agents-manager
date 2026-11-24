@@ -114,7 +114,7 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
     Ok(ResumeHandoffProof { identity: AdapterIdentity { session_id: session, bot_id: bot.to_owned(), run_id: old_run.to_owned(), turn_id: turn, generation }, revision })
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -10,7 +10,7 @@
 //!
 //! 每一步都是 [`step`]：時間由呼叫端傳進來（測試不睡覺），pane 走 app 的 herdr client（測試用 MockHerdr）。
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use super::*;
 use super::s6_ports::RelayWatchContext;
@@ -51,9 +51,9 @@ fn watching() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     WATCHING.get_or_init(Default::default)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub struct Registered(pub String);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 struct Registered(String);
 
 impl Registered {
@@ -267,7 +267,7 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
         return if w.nudges >= MAX_NUDGES && now.duration_since(w.started) >= GIVE_UP_AFTER { give_up(app, w).await } else { Step::Waiting };
     }
     let Some((client, pane, candidate)) = read else { return Step::Waiting };
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("relay_before_nudge", &bot.id).await;
     let Ok(fresh) = super::delivery::read_styled_snapshot(&client, &pane, "visible", 80).await else { return Step::Waiting };
     if !super::composer_draft::same_snapshot(&bot.kind, &candidate, &fresh)
@@ -449,7 +449,7 @@ fn spawn_watch(app: &impl RelayWatchContext, mut watch: Watch) {
 }
 
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     pub async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step { super::give_up(app, w).await }

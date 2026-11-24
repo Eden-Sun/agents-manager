@@ -90,7 +90,7 @@ pub fn policy_rev_now(
     policy_rev_of(&resolve(bot, role_policy, is_share_bot).0)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use am_base::runtime_policy::RuntimeSettings;

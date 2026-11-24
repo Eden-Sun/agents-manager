@@ -85,7 +85,7 @@ impl Admitted {
         &self.run_id
     }
 
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     pub fn for_test(run_id: &str) -> Self {
         Admitted { run_id: run_id.to_string() }
     }
@@ -149,7 +149,7 @@ pub async fn classify(pool: &sqlx::SqlitePool, bot_id: &str, run: &db::Run, ev: 
     decide(&now, &ev, prior.as_deref().map(|run_id| PriorRun { run_id }).as_ref())
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     fn gen<'a>(run_id: &'a str, session: Option<&'a str>) -> Generation<'a> {

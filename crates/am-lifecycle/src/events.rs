@@ -188,7 +188,7 @@ pub(crate) async fn apply_agent_title(app: &(impl crate::capabilities::BotStatus
     app.emit_bot_status(&run.bot_id).await;
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

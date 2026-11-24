@@ -20,8 +20,6 @@
 //! - **daemon 重啟**：開機對帳完成後（`reconcile::autostart_after_reconcile`），還在等、沒有 run 的再替它啟動一次
 //!   （重啟前那次可能根本沒做完、或起不來的原因已經排除）。每次開機最多一次，失敗照樣只記原因。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 use super::send_now::ports::AttachTxPort;
 use std::collections::HashSet;
@@ -36,7 +34,7 @@ enum Accepted {
 }
 
 /// `POST /bots/{id}/prompt` 帶 `start_if_stopped`。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn prompt_starting(
     app: &impl LcHost,
     bot_id: &str,
@@ -243,7 +241,7 @@ pub fn kick(app: &impl LcHost, bot_id: &str) {
 
 /// 測試裡不做：背景的 RPC 會跟測試自己推的狀態機搶（同 `schedule_flush_queued`），測試直接呼叫 [`start_for_waiting`]。
 fn spawn_start(app: &impl LcHost, bot_id: &str, mark: Starting) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let (app, id) = ((*app).clone(), bot_id.to_string());
@@ -251,7 +249,7 @@ fn spawn_start(app: &impl LcHost, bot_id: &str, mark: Starting) {
 }
 
 /// 替還在等的那一則啟動 bot（已經有人在起就不疊）。正式路徑都在背景（[`kick`]），測試直接等它做完。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn start_for_waiting(app: &impl LcHost, bot_id: &str) {
     if let Some(mark) = Starting::begin(bot_id) {
         start_with(app, bot_id, mark).await;
@@ -335,8 +333,8 @@ enum Started {
 /// 由測試自己呼叫 [`flush_if_running`]。重啟（`restart_bot_with`／子 agent 原地重啟）遇到同一種 `Uncommitted` 也走這裡（#165）。
 pub fn flush_once_running(app: &impl LcHost, bot_id: &str, run_id: &str) {
     tracing::warn!(bot = %bot_id, run = %run_id, "agent 起來了、running 還沒記下：等對帳收斂後再叫 flush");
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    if cfg!(any(test, feature = "test-hooks")) {
+        #[cfg(feature = "test-hooks")]
         watch_log().lock().unwrap().push(run_id.to_string());
         return;
     }
@@ -365,14 +363,14 @@ pub async fn flush_if_running(app: &impl LcHost, bot_id: &str, run_id: &str) -> 
     }
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn watch_log() -> &'static Mutex<Vec<String>> {
     static L: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     L.get_or_init(Default::default)
 }
 
 /// 測試用：有沒有替這顆 run 排「收成 running 就叫 flush」。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn watching_for_running(run_id: &str) -> bool {
     watch_log().lock().unwrap().iter().any(|r| r == run_id)
 }
@@ -614,7 +612,7 @@ async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<Stri
 }
 
 fn retry_resume(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let (app, host) = ((*app).clone(), host.to_string());
@@ -624,7 +622,7 @@ fn retry_resume(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) {
     });
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

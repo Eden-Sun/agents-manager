@@ -79,7 +79,7 @@ async fn scan_body(app: &Arc<crate::state::App>) -> anyhow::Result<()> {
                 Ok(guard) => guard,
                 Err(_) => { tracing::info!(reason="api_retention_busy", "API retention deferred"); continue; }
             };
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(test)]
             crate::race_point::hit("api_retention_before_tx", &key.run_id).await;
             let mut tx = crate::db::begin_write(&app.db).await?;
             if let Err(reason) = prove(&mut tx, c).await {

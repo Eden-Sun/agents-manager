@@ -3105,10 +3105,10 @@ pub async fn ack_inbox(pool: &SqlitePool, id: &str) -> Result<bool> {
     Ok(res.rows_affected() > 0)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "store_tests/tests_crate_only.rs"]
 mod tests;
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "store_tests/persona_migration_tests.rs"]
 mod persona_migration_tests;

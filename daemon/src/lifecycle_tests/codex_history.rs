@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-//! #1862 L2-1：`HistoryHook::default()` 在 daemon 測試建置是空的（掛載期間靠 `all(test, daemon-test-harness)`），這條只能留在 daemon。
+//! #1862 L2-1：`HistoryHook::default()` 在 daemon 測試建置是空的，這條只能留在 daemon。
 
 mod tests {
     use crate::lifecycle_tests::prelude::*;

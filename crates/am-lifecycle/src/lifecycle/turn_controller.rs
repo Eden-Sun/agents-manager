@@ -411,7 +411,7 @@ async fn settled(conn: &mut sqlx::SqliteConnection, turn_id: &str, from: &str, t
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

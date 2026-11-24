@@ -18,8 +18,6 @@
 //! `Submitted`; `NotAttempted` — **nothing was sent**, the turn must not be left in flight; and
 //! `Unproven` — keys were sent and the result cannot be proven, which is what `unknown` means.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 use std::time::Duration;
 
@@ -306,7 +304,7 @@ pub fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
 /// after the baseline is read, so an old identical message sliding out of any window cannot hide
 /// a new one, and the cost is the new bytes only. A partial first line fails to parse and is
 /// skipped; a partial last line is simply not complete yet. `Err` = unreadable, never zero.
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
     log_hits_since(LogFormat::Claude, path, offset, text)
 }
@@ -662,7 +660,7 @@ pub enum SessionMatch {
 
 pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proof: &Proof) -> SessionMatch {
     let Proof::Transcript { format, path, session_id } = proof else { return SessionMatch::Same };
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     if fail_session_read_for_test(run_id) {
         return SessionMatch::Unavailable;
     }
@@ -680,18 +678,18 @@ pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proo
     }
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn session_read_failures() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     FAILURES.get_or_init(Default::default)
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn fail_next_session_read_for_test(run_id: &str) {
     session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string());
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn fail_session_read_for_test(run_id: &str) -> bool {
     session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)
 }
@@ -780,7 +778,7 @@ pub async fn type_prepared(
     text: &str,
     ready: Ready,
 ) -> anyhow::Result<Delivered> {
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("delivery_before_typing", &run.bot_id).await;
     match type_text(app, client, run, bot, text, ready).await? {
         Typing::Done(d) => Ok(d),
@@ -826,7 +824,7 @@ pub async fn type_text(
 ) -> anyhow::Result<Typing> {
     let (pane, proof, submit, offset, baseline, structured) = match ready {
         Ready::AgentPrompt { target } => {
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("agent_prompt_before_rpc", &run.bot_id).await;
             if let Err(reason) =
                 super::prompt::final_agent_prompt_guard(app, client, run, bot, &target).await
@@ -837,7 +835,7 @@ pub async fn type_text(
                     retry: true,
                 }));
             }
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("agent_prompt_after_guard", &run.bot_id).await;
             if !app.hosts().is_current(&client.fence).await {
                 return Ok(Typing::Done(Delivered::NotAttempted {
@@ -1181,7 +1179,7 @@ pub async fn deliver_prompt(
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod plain_warn_tests {
     use super::*;
     #[test]
@@ -1197,7 +1195,7 @@ mod plain_warn_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     /// 送後核對的補按規則（`may_press_retry_submit`）：只有「完整比對仍是自己的草稿、沒有送達證據、還沒補按過」才補一次。
     const LONG_SCREEN: &str = include_str!("fixtures/codex-synthetic-long-draft.txt");
@@ -1870,7 +1868,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod api_tests {
     //! Through `prompt()` itself: what reaches the database when nothing could be sent.
     use super::*;
@@ -1888,7 +1886,7 @@ mod api_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

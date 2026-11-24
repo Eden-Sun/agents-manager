@@ -4,7 +4,7 @@
 //! 資料庫是真的暫存 SQLite（`db::open_with(path, [supervisor::store migration])`，與正式啟動同一份共用 schema 加上 supervisor 自己的
 //! migration，沒有複製 SQL）；設定是真的 `ConfigStore`（daemon 版的投影驗證與稽核 hooks 這裡是 no-op）。
 //! `emit` 不是 no-op：記下每個事件（`events()` 可讀），`current_seq` 是遞增的序號；它沒有 WebSocket 客戶端可推。
-//! 要 herdr、額度表、prompt 路徑、runner 的測試留在 daemon（`daemon-test-harness`）。
+//! 要 herdr、額度表、prompt 路徑、runner 的測試留在 daemon。
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

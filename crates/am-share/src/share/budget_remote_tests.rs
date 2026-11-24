@@ -4,25 +4,20 @@
 //! `is_full`／`sweep`／keep 標記要的是 DB、主機登記與 `SiteEnv`／`ShareStorage`，放在 `with_app`（crate-only，用 `test_env::TestShareEnv`）。
 
 use std::fs;
-#[cfg(not(feature = "daemon-test-harness"))]
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-#[cfg(not(feature = "daemon-test-harness"))]
 use std::time::SystemTime;
 
 use am_base::config::HostCfg;
 use am_base::hosts::HostConn;
-#[cfg(not(feature = "daemon-test-harness"))]
 use am_base::hosts::HostFence;
 
 use super::remote_fs::*;
-#[cfg(not(feature = "daemon-test-harness"))]
 use super::site::{FencedConn, RemoteSite};
 use super::test_dirs;
 
-#[cfg(not(feature = "daemon-test-harness"))]
 fn site(scratch: &Path, host: &str) -> RemoteSite {
     test_support::local_sh_fake(host, scratch);
     let cfg = HostCfg { name: host.to_string(), ssh: "fake-ssh".to_string(), herdr_session: "test-session".to_string(), ..Default::default() };
@@ -37,21 +32,17 @@ fn site(scratch: &Path, host: &str) -> RemoteSite {
     RemoteSite { conn: FencedConn::new(HostFence::for_conn_for_test(&conn)), host: host.to_string(), home, root, workspace, outbox }
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 fn set_mtime(path: &Path, when: SystemTime) {
     fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 fn epoch(t: SystemTime) -> u64 {
     t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 const DAY: Duration = Duration::from_secs(86_400);
 
 /// 在假遠端跑保留政策腳本，`now` 往後撥（ctime 沒辦法往回改，只能撥「現在」）。
-#[cfg(not(feature = "daemon-test-harness"))]
 async fn prune_at(site: &RemoteSite, days: u64, cap_bytes: u64, cap_files: usize, now: Option<u64>) -> Result<u64, RfsError> {
     let script = prune_outbox_script_at(&site.outbox, days, cap_bytes, cap_files, now);
     let out = site.conn.ssh_exec_timeout(&script, Duration::from_secs(60)).await.unwrap();
@@ -62,7 +53,6 @@ fn frame(tag: &str, payload: &str) -> String {
     format!("AM_RFS1\n{tag} {}\n{payload}\nAM_RFS_DONE\n", payload.len())
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn measure_counts_workspace_and_outbox_but_not_the_keep_mark_or_symlink_targets() {
     let scratch = test_dirs::scratch_dir("rs4-measure");
@@ -89,7 +79,6 @@ async fn measure_counts_workspace_and_outbox_but_not_the_keep_mark_or_symlink_ta
     assert!(!with_mark.truncated && !with_mark.full());
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn measure_of_a_missing_workspace_is_zero_but_a_symlinked_one_is_refused() {
     let scratch = test_dirs::scratch_dir("rs4-measure-missing");
@@ -105,7 +94,6 @@ async fn measure_of_a_missing_workspace_is_zero_but_a_symlinked_one_is_refused()
     assert_eq!(site.measure().await.unwrap_err(), RfsError::Untrusted, "工作目錄是符號連結：不量、fail closed");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[test]
 fn the_measure_output_is_parsed_strictly() {
     let m = parse_measure(frame("MEASURE", "1048576 2048 300 0").as_bytes()).unwrap();
@@ -118,7 +106,6 @@ fn the_measure_output_is_parsed_strictly() {
     assert_eq!(parse_measure(frame("EVIL", "1 2 3 0").as_bytes()).unwrap_err(), RfsError::Untrusted, "沒宣告的 TAG 作廢");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_file_is_pruned_only_when_both_mtime_and_ctime_are_past_the_keep_days() {
     let scratch = test_dirs::scratch_dir("rs4-prune-age");
@@ -143,7 +130,6 @@ async fn a_file_is_pruned_only_when_both_mtime_and_ctime_are_past_the_keep_days(
     assert!(ob.join(".am-share-keep").exists(), "標記檔不刪");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_overfull_outbox_is_trimmed_from_the_oldest_by_count_and_by_bytes() {
     let scratch = test_dirs::scratch_dir("rs4-prune-cap");
@@ -168,7 +154,6 @@ async fn an_overfull_outbox_is_trimmed_from_the_oldest_by_count_and_by_bytes() {
     assert_eq!(left(ob), [".am-share-keep", "f5.bin"]);
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn pruning_deletes_newline_names_recurses_but_never_removes_directories_or_follows_symlinks() {
     let scratch = test_dirs::scratch_dir("rs4-prune-misc");
@@ -191,7 +176,6 @@ async fn pruning_deletes_newline_names_recurses_but_never_removes_directories_or
     assert!(ob.join("sub").is_dir(), "遠端從不 rm -rf：空目錄留著");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn pruning_a_missing_outbox_is_nothing_and_a_symlinked_one_is_refused() {
     let scratch = test_dirs::scratch_dir("rs4-prune-missing");
@@ -205,7 +189,6 @@ async fn pruning_a_missing_outbox_is_nothing_and_a_symlinked_one_is_refused() {
     assert!(elsewhere.join("old.txt").exists(), "符號連結的目標不能被清");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[test]
 fn the_prune_script_never_uses_rm_dash_r_and_keeps_the_mark() {
     let s = prune_outbox_script("/home/u/.config/agents-manager/outbox/B", 14, 500 * 1024 * 1024, 1000);
@@ -213,7 +196,6 @@ fn the_prune_script_never_uses_rm_dash_r_and_keeps_the_mark() {
     assert!(s.contains("! -name .am-share-keep") && s.contains("-newercm"), "{s}");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn the_keep_mark_script_replaces_a_symlinked_mark_instead_of_writing_through_it() {
     let scratch = test_dirs::scratch_dir("rs4-keep-link");
@@ -229,7 +211,6 @@ async fn the_keep_mark_script_replaces_a_symlinked_mark_instead_of_writing_throu
     assert!(!mark.exists());
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 mod with_app {
     use std::sync::{Arc, Mutex};
 

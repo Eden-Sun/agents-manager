@@ -12,9 +12,9 @@ use am_base::agent_relay::ct_eq;
 use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 use super::test_env::App;
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 use std::sync::Arc;
 
 use super::roles::{self, Role};
@@ -430,7 +430,7 @@ pub async fn role_bot_by_id(app: &impl crate::capabilities::Db, bot_id: &str) ->
     Ok(None)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -468,7 +468,7 @@ mod tests {
 }
 
 /// 整條路：真的 App、真的 DB，驗「fable 沒被叫醒」與去重、迴圈、額度。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod dedupe_window_tests {
     //! issue #442：沒帶 request id 的去重視窗要錨在「還開著的那筆申請」，不是牆上時鐘的固定格子。
     //!
@@ -624,7 +624,7 @@ mod dedupe_window_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub(crate) mod flow_tests {
     use super::*;
 
@@ -657,7 +657,7 @@ pub(crate) mod flow_tests {
         sqlx::query_as("SELECT kind, event_key, role, wake FROM supervisor_inbox ORDER BY created_at, id").fetch_all(&app.db).await.unwrap()
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn nr_relay_role_recipient_is_a_bot_id() {
         let app = app().await;
@@ -671,7 +671,7 @@ pub(crate) mod flow_tests {
         assert_eq!(role_bot_by_id(&app, "resp").await.unwrap().as_deref(), Some("resp"));
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn without_a_responder_nothing_is_intercepted() {
         let app = app().await;
@@ -679,7 +679,7 @@ pub(crate) mod flow_tests {
         assert!(inbox(&app).await.is_empty());
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn a_hundred_identical_requests_are_one_event_and_never_touch_patrol() {
         let app = app().await;
@@ -701,7 +701,7 @@ pub(crate) mod flow_tests {
         assert_eq!(roles::get(&app.db, Role::Patrol).await.unwrap().wakes, 0);
     }
 
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn users_daemon_and_ordinary_targets_are_left_alone() {
         let app = app().await;
@@ -714,7 +714,7 @@ pub(crate) mod flow_tests {
     /// 寄件時在哪種回合**不算數**（review 2026-09-16 H1）：bot 在協調者的通知型交辦（「已核准，可以建置」）
     /// 裡建完、接著在同一個回合申請重啟——那是新的申請，要叫醒協調者。只有寄件端明講 `--ack`／
     /// `--reply-to` 的才只記錄。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn a_new_request_sent_inside_a_notice_turn_still_wakes_the_responder() {
         let app = app().await;
@@ -766,7 +766,7 @@ pub(crate) mod flow_tests {
 
     /// 沒帶 request id 的申請：前一筆還沒處理完才算重送；已經結案（協調者 ack 了）之後同一句再送，
     /// 是新的一次申請，要重新入列並叫醒（review 2026-09-16 c3 L1）。帶了 id 的照舊回原本那筆。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn the_same_words_after_the_first_was_handled_are_a_new_request() {
         let app = app().await;
@@ -794,7 +794,7 @@ pub(crate) mod flow_tests {
     }
 
     /// 同一個 request id 換一段話**不是**重播：回 409 而不是假裝送到了（那會讓申請靜靜消失）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn the_same_request_id_with_different_content_is_refused_not_swallowed() {
         let app = app().await;
@@ -821,7 +821,7 @@ pub(crate) mod flow_tests {
     /// 處理完 >24h 的大 payload 會被壓成摘要（`store::compact_handled_payloads`）。同一個 request id 一天之後重送——
     /// 重播判斷要看 payload 裡的 `fingerprint`：壓掉之後讀不到，就會把「一模一樣的重送」誤判成
     /// 「同一個 request id 換了內容」回 409（申請端以為自己的申請沒進任何人的佇列）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn a_replay_of_a_compacted_request_is_still_a_replay() {
         let app = app().await;
@@ -842,7 +842,7 @@ pub(crate) mod flow_tests {
 
     /// 雙角色啟用前由巡檢收走、還沒 ack 的協調事件：啟用後仍然是巡檢的，協調者不會也拿去送
     /// （那會變成同一則事件兩邊各送一次，而且協調者永遠標不成 delivered）。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn an_event_already_claimed_by_patrol_stays_with_patrol_after_the_switch() {
         let app = app().await;
@@ -862,7 +862,7 @@ pub(crate) mod flow_tests {
 
     /// inbox 清單的角色條件要在 SQL 的 LIMIT 之前：最舊的一整頁都是別人的事件時，自己的待辦
     /// 還是要翻得到。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn the_inbox_filter_happens_before_the_limit() {
         let app = app().await;
@@ -885,7 +885,7 @@ pub(crate) mod flow_tests {
 
     /// 角色之間的回信要**明講**回哪一則（`--reply-to <event_id>`）才只記錄；只因為「在收到那一批的回合裡」
     /// 就當成回信，會把協調者交接回來的新問題吞掉。
-    #[cfg(all(test, not(feature = "daemon-test-harness")))]
+    #[cfg(test)]
     #[tokio::test]
     async fn a_reply_between_roles_is_quiet_only_when_it_names_what_it_answers() {
         let app = app().await;

@@ -264,7 +264,7 @@ async fn claude_account(app: &impl crate::tools::ToolsTable, host: &str, identit
     claude_account_from_tools(&tools, host, identity)
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 #[path = "hookrecv_tests/account_tests.rs"]
 mod account_tests;
 
@@ -532,7 +532,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 #[path = "hookrecv_tests/classify_tests.rs"]
 mod classify_tests;
 
@@ -704,7 +704,7 @@ async fn store_resent_prompt_tx(
         .bind(&turn.id)
         .fetch_one(&mut **tx)
         .await?;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::lifecycle::race_point::hit("resent_prompt_after_count_read", &turn.id).await;
     if have > 0 {
         return Ok(None);
@@ -925,7 +925,7 @@ async fn fill_or_drop_late_hook(
             .bind(&turn.id)
             .fetch_one(&mut *tx)
             .await?;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::lifecycle::race_point::hit("late_hook_after_reply_count", &turn.id).await;
     if !body_text.trim().is_empty() && has_reply > 0 && same_turn {
         return replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id, event_id).await;
@@ -1975,7 +1975,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 } else { None };
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
                 let mut tx = app.db().begin().await?;
-                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+                #[cfg(feature = "test-hooks")]
                 crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
@@ -2149,9 +2149,9 @@ macro_rules! drained_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 drained_type!(pub, pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 drained_type!(, ,);
 
 fn parse_drain_output(text: &str) -> Drained<'_> {
@@ -2180,7 +2180,7 @@ fn spool_line_log_context(line: &str) -> String {
     format!("malformed spool record: {} bytes (payload omitted)", line.len())
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 #[path = "hookrecv_tests/spool_log_privacy_tests.rs"]
 mod spool_log_privacy_tests;
 
@@ -2368,9 +2368,9 @@ macro_rules! drain_gate_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 drain_gate_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 drain_gate_type!(,);
 
 pub fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, DrainGate>> {
@@ -2470,9 +2470,9 @@ macro_rules! spool_line_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 spool_line_type!(pub, pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 spool_line_type!(, ,);
 
 /// 讀下一行（不含換行），記憶體上界是 [`MAX_SPOOL_LINE`]。EOF 回 `None`；最後一行沒有換行也照樣回。
@@ -2547,7 +2547,7 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
             std::fs::rename(&s, &c)
         })
         .await??;
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         crate::lifecycle::race_point::hit("spool_claimed", bot_id).await;
         fold_spool_blocking(claim.clone(), staging.clone()).await?;
     }
@@ -2586,7 +2586,7 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
     Ok(n)
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 #[path = "hookrecv_tests/drain_tests.rs"]
 mod drain_tests;
 
@@ -2599,7 +2599,7 @@ mod drain_tests;
 /// Grok 撞限解除：只有「撞限之後才送出」的 in-flight 回合收到的 end_turn Stop 才清，`hit.at < turn.delivered_at <= received_at`（#1872）。
 /// 全部走 `process_locked`（真的 hook 入口：圍籬、分類、清除一條路），不只測 helper。
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 #[path = "hookrecv_tests/codex_title_tests.rs"]
 mod codex_title_tests;
 
@@ -2678,7 +2678,7 @@ async fn reconcile_after_spawn_hint<H: HookHost>(app: &H, bot_id: &str) {
 
 
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
@@ -2773,7 +2773,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod resend_staleness_tests {
     use super::*;
 

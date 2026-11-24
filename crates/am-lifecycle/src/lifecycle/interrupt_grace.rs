@@ -20,8 +20,6 @@
 //! 同一個時刻另記一筆**被中斷的是哪一回合**（[`InterruptedTurn`]），給 `StopFailure` 認 Esc 的回聲用
 //! （#117）。兩筆各自清：回聲到了只結清回聲那筆，排隊寬限照舊。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::stuck_turns::{idle_for, observe_at};
 use super::*;
 use chrono::{DateTime, Utc};
@@ -111,7 +109,7 @@ pub fn expect_interrupt_echo(bot_id: &str, interrupted: InterruptedTurn) {
     pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), interrupted);
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn pending_echo(bot_id: &str) -> Option<InterruptedTurn> {
     pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned()
 }
@@ -512,7 +510,7 @@ pub async fn hold_at(
     left
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -670,7 +668,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

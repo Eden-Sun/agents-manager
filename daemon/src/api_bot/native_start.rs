@@ -18,7 +18,7 @@ fn start_body<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, mode: Mode) -> 
 }
 async fn start_body_inner(app: &Arc<crate::state::App>, bot: &str, mode: Mode) -> Result<ApiNativeStartResult, E> {
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() { refused(bot, "startup_gate_not_ready_or_shutdown"); return Err(E::Unconfirmed); }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     let lock = {
         let mut future = Box::pin(super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot));
         let mut notified = false;
@@ -31,7 +31,7 @@ async fn start_body_inner(app: &Arc<crate::state::App>, bot: &str, mode: Mode) -
             result
         }).await.map_err(|e| { failed(bot, "bot_lock")(e); E::Unconfirmed })?
     };
-    #[cfg(not(all(test, feature = "daemon-test-harness")))]
+    #[cfg(not(test))]
     let lock = super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot).await.map_err(|e| { failed(bot, "bot_lock")(e); E::Unconfirmed })?;
     if app.api_bot_runtime.explicit_retire_quarantined(bot) { refused(bot, "retire_quarantined"); return Err(E::Unconfirmed); }
     if let Mode::Resume { required: false } = mode {
@@ -184,12 +184,12 @@ fn failed<E: std::fmt::Debug>(bot: &str, step: &'static str) -> impl FnOnce(E) {
     move |error| tracing::warn!(bot = %bot, step, ?error, "api native start not confirmed")
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 fn pending_observers() -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>> {
     static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>> = std::sync::OnceLock::new();
     MAP.get_or_init(Default::default)
 }
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 pub(super) fn observe_next_lock_pending(bot: &str) -> tokio::sync::oneshot::Receiver<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     assert!(pending_observers().lock().unwrap().insert(bot.to_owned(), tx).is_none());

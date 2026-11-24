@@ -214,7 +214,7 @@ pub async fn codex_rollout_reply_for_hookless(
     .ok()?
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     #[test]
     fn native_task_complete_error_requires_matching_native_boundaries() {

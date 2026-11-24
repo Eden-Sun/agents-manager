@@ -13,6 +13,7 @@ pub fn test_mask(src: &str) -> Vec<bool> {
             || head.starts_with("#[cfg(all(test,")
             || head.starts_with("#[cfg(any(test, feature = \"test-hooks\"")
             || head.starts_with("#[cfg(any(feature = \"test-hooks\"")
+            || head.starts_with("#[cfg(feature = \"test-hooks\")]")
         {
             let (mut depth, mut seen, mut j) = (0i32, false, i);
             while j < lines.len() {
@@ -35,16 +36,17 @@ pub fn test_mask(src: &str) -> Vec<bool> {
     mask
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::test_mask;
 
     #[test]
     fn test_mask_skips_cfg_test_items() {
         assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
-        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"daemon-test-harness\"))]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
-        assert!(test_mask("fn a() {}\n#[cfg(any(feature = \"test-hooks\", all(test, feature = \"daemon-test-harness\")))]\nfn b() {\n}\nfn c() {}\n") == vec![false, true, true, true, false]);
+        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"some-feature\"))]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
+        assert!(test_mask("fn a() {}\n#[cfg(any(feature = \"test-hooks\", all(test, feature = \"some-feature\")))]\nfn b() {\n}\nfn c() {}\n") == vec![false, true, true, true, false]);
+        assert!(test_mask("#[cfg(feature = \"test-hooks\")]\nfn b() {}\nfn c() {}\n") == vec![true, true, false]);
         assert!(test_mask("#[cfg(any(test, feature = \"test-hooks\"))]\nfn b() {}\nfn c() {}\n") == vec![true, true, false]);
-        assert!(test_mask("#[cfg(not(any(feature = \"test-hooks\", all(test, feature = \"daemon-test-harness\"))))]\nfn b() {}\n") == vec![false, false]);
+        assert!(test_mask("#[cfg(not(any(feature = \"test-hooks\", all(test, feature = \"some-feature\"))))]\nfn b() {}\n") == vec![false, false]);
     }
 }

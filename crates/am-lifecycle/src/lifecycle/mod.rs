@@ -5,8 +5,6 @@ use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
 use crate::hosts::{sh_quote, HostConn, HostFence};
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +28,7 @@ impl std::ops::Deref for RunClient {
 
 /// 等畫面反應的固定間隔（ctrl+c 之後、輪詢 pane 之間）。測試只要求「等過一輪」，縮到 10 毫秒；正式路徑不變。
 pub(crate) fn pane_settle(d: Duration) -> Duration {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return d.min(Duration::from_millis(10));
     }
     d
@@ -38,17 +36,17 @@ pub(crate) fn pane_settle(d: Duration) -> Duration {
 
 macro_rules! test_visible_struct {
     ($(#[$sm:meta])* $sv:vis struct $name:ident { $($(#[$fm:meta])* $fv:vis $f:ident : $t:ty),* $(,)? }) => {
-        $(#[$sm])* #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))] pub struct $name { $($(#[$fm])* pub $f: $t,)* }
-        $(#[$sm])* #[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))] $sv struct $name { $($(#[$fm])* $fv $f: $t,)* }
+        $(#[$sm])* #[cfg(any(test, feature = "test-hooks"))] pub struct $name { $($(#[$fm])* pub $f: $t,)* }
+        $(#[$sm])* #[cfg(not(any(test, feature = "test-hooks")))] $sv struct $name { $($(#[$fm])* $fv $f: $t,)* }
     };
 }
 
 macro_rules! test_visible_item {
     ($visibility:vis, $(#[$attribute:meta])* $keyword:ident $($item:tt)+) => {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         $(#[$attribute])*
         pub $keyword $($item)+
-        #[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+        #[cfg(not(feature = "test-hooks"))]
         $(#[$attribute])*
         $visibility $keyword $($item)+
     };
@@ -69,13 +67,13 @@ pub mod grok_hook;
 pub mod agy_hook;
 pub mod agy_busy;
 pub mod agy_session;
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub mod agy_tests;
 pub mod grok_transcript;
 pub mod claude_child_log;
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub mod suggestion_list_tests;
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub mod diag_support;
 pub mod start;
 pub mod runtime_overlay;
@@ -108,7 +106,7 @@ pub mod transcript_origin;
 pub use transcript_origin::starter_origin_at;
 pub mod screen;
 pub mod transcript_stage;
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub mod claude_linux_screens;
 pub mod limit_banner;
 pub mod stuck_turns;
@@ -145,14 +143,14 @@ pub mod paste_check;
 pub mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub mod native_transport_prototype;
 /// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub use crate::race_point;
 /// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
 /// #188：子 agent 不能走 stop + start；夾具（一顆有真 mock pane 的子 agent）給批次重啟的測試共用。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub mod restart_kind_tests;
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
@@ -197,14 +195,14 @@ pub use screen::*;
 pub use setup::*;
 pub use slash::*;
 pub use deferred_live::{defer_live, is_busy_reason, is_deferred, schedule_deferred_live};
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub use deferred_live::apply_deferred_once;
 
 pub async fn recover_live_apply_debts(app: &(impl s6_ports::LiveApplyDebtContext + Clone)) {
     live_apply_debt::recover(app).await;
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub use delivery::*;
 pub use start::*;
@@ -216,7 +214,7 @@ pub use stop::*;
 pub use interrupt_grace::{settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 pub use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};
 pub use owed_delivery::{owed_as_unknown, settle_locked as settle_owed_deliveries};
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};
 pub use stuck_turns::{close_after_session_paused, observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
 
@@ -312,7 +310,7 @@ async fn client_for_run_with_host_fence(
     Ok(client)
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

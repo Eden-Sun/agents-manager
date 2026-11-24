@@ -20,7 +20,7 @@
 //! 帳只在記憶體：daemon 重啟就沒了。重啟後還 in_flight 的那一筆照舊由 hook 或閒置 watchdog（`stuck_turns`）收，
 //! 跟記帳之前一樣——不會永遠卡住，只是慢。
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use super::s6_ports::InterruptionContext;
 use super::*;
@@ -595,7 +595,7 @@ async fn adopt_landed_send_now(app: &impl InterruptionContext, bot_id: &str, tur
 
 /// 欠著的帳沒有 hook 也要補上：DB 一時寫不進去多半很快就好。只補欠著的（待證的要證據，不是時間）。
 pub fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let app = (*app).clone();
@@ -627,7 +627,7 @@ pub fn uncommitted(run_id: &str, turn_id: &str, cause: Option<&anyhow::Error>) -
     }))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod retain_tests {
     use super::*;
 
@@ -642,7 +642,7 @@ mod retain_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

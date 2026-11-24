@@ -141,7 +141,7 @@ fn is_status_line(line: &str) -> bool {
     l.contains('·') && l.contains("% left")
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

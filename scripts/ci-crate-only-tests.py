@@ -4,7 +4,7 @@ import re
 import sys
 from pathlib import Path
 
-GATE = re.compile(r'#\[cfg\(all\(test,\s*not\(feature\s*=\s*"daemon-test-harness"\)\)\)\]')
+GATE = re.compile(r'#\[cfg\(test\)\]')
 RAW = re.compile(r'(?:[bc])?r(#{0,255})"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
 

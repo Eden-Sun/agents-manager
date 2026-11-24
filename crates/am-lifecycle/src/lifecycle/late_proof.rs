@@ -132,7 +132,7 @@ impl PendingRegistry {
     }
 }
 
-#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(feature = "test-hooks"))]
 fn registry() -> &'static Mutex<PendingRegistry> {
     static M: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
     M.get_or_init(Default::default)
@@ -140,7 +140,7 @@ fn registry() -> &'static Mutex<PendingRegistry> {
 
 /// 測試裡每條測試執行緒（current-thread runtime 跑在它上面）各一份 registry：全進程共用的 static 會讓
 /// 平行測試留下的條目被別條的清掃算進去（#1670）。正式程式碼仍是全進程一份。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn registry() -> &'static Mutex<PendingRegistry> {
     thread_local! {
         static M: &'static Mutex<PendingRegistry> = Box::leak(Box::default());
@@ -374,7 +374,7 @@ pub fn clear(run_id: &str) {
     registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn forget_pending_for_restart_test(run_id: &str) {
     registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
@@ -388,7 +388,7 @@ fn take_after_owed_write(run_id: &str, turn_id: &str) -> Option<Pending> {
     registry().lock().unwrap_or_else(|e| e.into_inner()).take_for_turn(run_id, turn_id)
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn expire_pending_for_test(run_id: &str) {
     if let Some(p) = registry().lock().unwrap_or_else(|e| e.into_inner()).by_run.get_mut(run_id) {
         p.noted = Instant::now() - CLAIM_WITHIN - Duration::from_secs(1);
@@ -507,7 +507,7 @@ async fn watch_loop(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str
     None
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn armed_in_tests() -> &'static Mutex<Vec<(String, Pending)>> {
     static M: OnceLock<Mutex<Vec<(String, Pending)>>> = OnceLock::new();
     M.get_or_init(Default::default)
@@ -527,7 +527,7 @@ pub fn arm_after_owed_write(app: &(impl LcHost + Clone + 'static), run_id: &str,
         arm_pending(app, run_id, bot_id, turn_id, p);
         return;
     }
-    #[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     {
         let app = (*app).clone();
         let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
@@ -590,12 +590,12 @@ async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &
 }
 
 fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
-    #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(any(test, feature = "test-hooks"))]
     {
         let _ = (app, run_id, bot_id);
         armed_in_tests().lock().unwrap_or_else(|e| e.into_inner()).push((turn_id.to_string(), p));
     }
-    #[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     {
         spawn_watch(app, run_id, bot_id, turn_id, p);
     }
@@ -618,7 +618,7 @@ fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: 
 }
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

@@ -51,7 +51,7 @@ pub async fn send_queued_now(
     Ok(())
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::screen_has_queued;
 

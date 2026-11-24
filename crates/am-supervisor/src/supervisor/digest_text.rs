@@ -119,7 +119,7 @@ pub fn snippet(s: &str, max: usize) -> String {
     if cut.chars().count() < t.chars().count() { format!("{cut}…") } else { cut }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use serde_json::json;
 

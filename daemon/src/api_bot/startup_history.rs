@@ -50,7 +50,7 @@ async fn classify_body(pool: &sqlx::SqlitePool, item: &Pending) -> Result<Startu
     Ok(result)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

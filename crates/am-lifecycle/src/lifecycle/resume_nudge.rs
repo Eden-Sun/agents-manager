@@ -31,7 +31,7 @@
 //! （transcript 在那台機器上，這裡讀不到尾巴，跟 `stuck_turns` 一樣只讀本機）。同一個 run 只補一次
 //! （`client_request_id = resume-nudge:<run_id>`）。等待記在這個行程的記憶體裡，daemon 在這段時間重啟就不補。
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use super::s6_ports::ResumeNudgeContext;
 use super::*;
@@ -202,7 +202,7 @@ pub fn poke(app: &impl ResumeNudgeContext, bot_id: &str) {
 
 /// 測試裡不排：測試直接叫 [`check_at`]、自己帶時間（同 `schedule_flush_queued`）。
 fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, delay: Duration) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let app = (*app).clone();
@@ -385,7 +385,7 @@ pub async fn withdraw_unless_resumed(app: &impl super::s6_ports::QueueContext, t
     Ok(true)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod retain_tests {
     use super::*;
     #[test]
@@ -399,7 +399,7 @@ mod retain_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -459,7 +459,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

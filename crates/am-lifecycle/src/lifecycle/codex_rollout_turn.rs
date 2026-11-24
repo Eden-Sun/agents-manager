@@ -243,7 +243,7 @@ pub(super) fn for_latest(lines: &[&str], complete: usize, since: &DateTime<Fixed
     Proof::Native(prove().map(NativeOutcome::Reply))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::super::{codex_latest_reply_since, codex_reply_for_turn};
     use serde_json::json;

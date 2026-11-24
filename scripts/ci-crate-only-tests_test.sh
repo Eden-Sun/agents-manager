@@ -6,10 +6,10 @@ import runpy
 from pathlib import Path
 module = runpy.run_path('scripts/ci-crate-only-tests.py')
 check = module['crate_only']
-gate = '#[cfg(all(test, not(feature = "daemon-test-harness")))]\n'
+gate = '#[cfg(test)]\n'
 assert check(gate + 'mod tests { #[test] fn pure() { let s = "}"; } }')
 assert check(gate + 'mod tests;')
-assert not check('#[cfg(test)] mod tests { #[test] fn app() {} }')
+assert not check('#[test] fn app() {}')
 assert not check(gate + 'mod pure {}\n#[test] fn app() {}')
 assert not check(gate + 'mod pure {}\nmod unknown;')
 assert not check('let fixture = r#"' + gate + 'mod tests;"#;')

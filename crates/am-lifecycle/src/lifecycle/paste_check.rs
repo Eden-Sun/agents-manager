@@ -82,7 +82,7 @@ fn box_rows(kind: &str, screen: &str, tail: usize) -> Option<Vec<String>> {
     (!rows.is_empty()).then_some(rows)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::super::*;
     use super::{claude_box_max_rows, lost_head};

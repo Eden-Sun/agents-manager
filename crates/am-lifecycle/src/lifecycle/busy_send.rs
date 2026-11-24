@@ -1,6 +1,6 @@
 //! Persist user prompts accepted while a running agent is busy (#733).
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use super::{prompt, *};
 use super::send_now::ports::{AttachTxPort, SupervisorSendRepo};
@@ -94,7 +94,7 @@ pub(super) async fn queue_awaiting_idle(
     .fetch_optional(&mut *tx)
     .await
     .map_err(up)?;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("busy_queue_after_slot_read", conversation_id).await;
     if let Some(turn_id) = existing {
         drop(tx);
@@ -168,7 +168,7 @@ pub(super) async fn queue_awaiting_idle(
     })
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

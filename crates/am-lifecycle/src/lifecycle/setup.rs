@@ -1407,7 +1407,7 @@ pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db:
     if bot.kind != "claude" {
         return;
     }
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let cfg_dir = env.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(str::to_string);
@@ -1602,7 +1602,7 @@ pub fn model_args(bot: &db::Bot) -> Vec<String> {
     out
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod hook_cmd_parts_tests {
     use super::{claude_settings, hook_cmd_parts_for, write_private};
     #[test]
@@ -1648,7 +1648,7 @@ mod hook_cmd_parts_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod model_args_tests {
     use super::model_args;
     use crate::db::Bot;
@@ -2080,9 +2080,6 @@ mod remote_hook_tests {
     //! SPEC §11.4.2 — runs `REMOTE_HOOK_SH` with `/bin/sh` against a fake `$HOME` and `herdr`.
     //! The shell parses top-level event hints; authoritative classification is `hookrecv::classify`.
     use std::io::Write as _;
-    #[cfg(feature = "daemon-test-harness")]
-    use crate::testing as tt;
-    #[cfg(not(feature = "daemon-test-harness"))]
     use crate::test_dirs as tt;
     use std::process::{Command, Stdio};
 
@@ -2217,10 +2214,8 @@ mod remote_hook_tests {
         }
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn macos_local_codex_stop_reads_large_stdin_and_reports_the_native_session() {
         let sb = Sandbox::new(true);
@@ -2244,7 +2239,6 @@ mod remote_hook_tests {
         assert!(calls[0].contains("--agent-session-id codex-stdin"));
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn macos_local_codex_legacy_argv_and_active_stop_stdin_keep_their_semantics() {
         let sb = Sandbox::new(false);
@@ -2264,7 +2258,6 @@ mod remote_hook_tests {
     /// issue #753：Stop 的 payload 不帶使用者訊息，agm-host 又讀不到遠端的 transcript，遲到的 Stop 就證明不了「是同一回合」。
     /// `hook.sh` 在 spool 前從**本機** transcript 讀出最後一則使用者訊息，放進 payload 的 `agm_user_text`：
     /// 跳過 tool_result 與 meta 那種不是人打的條目；讀不到、沒有 python3、不是 Stop 就原樣不動（沒有證據，daemon 照舊不蓋）。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_stop_carries_the_last_user_message_from_the_local_transcript() {
         let sb = Sandbox::new(false);
@@ -2313,7 +2306,6 @@ mod remote_hook_tests {
 
     /// #1283：auto-compact 的摘要（`isCompactSummary`）、slash 指令的回音、sidechain 都不是人打的一問：跳過，
     /// 回到真正那句 `跑完整測試`（與本機 `user_prompt_raw` 同一套規則）。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_stop_skips_compact_summaries_and_command_echoes() {
         let sb = Sandbox::new(false);
@@ -2346,7 +2338,6 @@ mod remote_hook_tests {
     }
 
     /// #1759：遠端壓縮做完的 `SessionStart`（source=compact）帶上那台 transcript 最後一個 compact_boundary（含閒置提示）。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_compact_session_start_carries_the_last_boundary() {
         let sb = Sandbox::new(false);
@@ -2382,7 +2373,6 @@ mod remote_hook_tests {
 
     /// 2026-10-02：遠端 transcript 在那台機器上，`hook.sh` 在 Stop／StopFailure 前把已答完（或取消）的 `AskUserQuestion`
     /// 讀出來放進 `agm_asks`；沒答完的、別的工具的結果不帶；孤立 surrogate 不能弄壞 spool 那一行。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_stop_carries_the_finished_ask_user_question_records() {
         let sb = Sandbox::new(false);
@@ -2458,7 +2448,6 @@ mod remote_hook_tests {
     /// transcript 裡的使用者訊息帶孤立的 surrogate 跳脫（`\\ud83d`，貼上的字被 UTF-16 切在 emoji 中間）：Python 的
     /// `json.dumps` 會原樣寫回去，但 serde_json 讀不了孤立 surrogate——整行 spool 解析失敗、Stop 事件整筆被丟，
     /// 比沒帶證據更糟。帶不進去就不帶，事件本身一定要是合法 JSON。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_lone_surrogate_in_the_transcript_never_breaks_the_spool_line() {
         let sb = Sandbox::new(false);
@@ -2478,7 +2467,6 @@ mod remote_hook_tests {
 
     /// issue #754：背景工作完成喚醒的那一輪沒有新 prompt，transcript 最後一則使用者訊息是上一句。
     /// `hook.sh` 另外帶 `agm_origin_kind`（最新一筆有 `origin.kind` 的使用者條目），daemon 才分得出來；工具結果沒有 origin，不算起點。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_stop_carries_who_started_the_turn() {
         let line = |v: serde_json::Value| format!("{v}\n");
@@ -2525,7 +2513,6 @@ mod remote_hook_tests {
     }
 
     /// 起點那筆條目的時間跟著 `agm_origin_kind` 一起帶來：喚醒那一輪的使用者條目沒有 origin，起點要是它前面那筆 `human`，時間也是那筆的。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_remote_stop_carries_when_the_starter_was_typed() {
         let line = |v: serde_json::Value| format!("{v}\n");
@@ -2553,7 +2540,7 @@ mod remote_hook_tests {
     }
 
     /// 去重 B：Stop 的 transcript 只讀一次、`_am_transcript` 只由一顆 python3 執行（使用者文字與 AskUserQuestion 共用）。
-    #[cfg(all(unix, not(feature = "daemon-test-harness")))]
+    #[cfg(unix)]
     #[test]
     fn a_stop_reads_the_transcript_in_one_python_run() {
         let sb = Sandbox::new(false);
@@ -2583,7 +2570,6 @@ mod remote_hook_tests {
     }
 
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_generated_hook_spools_under_its_own_instance_root() {
         let default = super::remote_hook_sh(crate::hosts::REMOTE_ROOT);
@@ -2606,7 +2592,6 @@ mod remote_hook_tests {
     }
 
     /// #1031：子 agent 的 pane 帶 `AM_CHILD_OF`，它繼承的是母 bot 的身份：遠端 hook 不 spool、也不叫 herdr；沒帶就照舊。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_child_pane_never_spools_a_remote_hook_as_its_parent() {
         let sb = Sandbox::new(true);
@@ -2621,7 +2606,6 @@ mod remote_hook_tests {
     }
 
     /// #1031：遠端 grok 的 dispatcher 也一樣：子 agent 的 pane 不轉給母 bot 的 `hook.sh`。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_child_pane_never_reaches_the_remote_grok_hook() {
         let home = tt::track(std::env::temp_dir().join(format!("am-grok-child-{}", crate::db::ulid())));
@@ -2651,7 +2635,6 @@ mod remote_hook_tests {
     /// issue #43／#495：token 不上命令列。dispatcher 仍然用 `AM_HOOK_TOKEN` 判斷「這是不是 daemon 開的
     /// pane」（`inject_hooks = false` 就是靠它擋掉），但不把值傳下去：遠端那支 `hook.sh` 根本不讀第三個
     /// 參數（`: "$TOKEN"`），本機的 `hook_cmd::hook_token()` 旗標空著時會自己去讀 env。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn neither_grok_dispatcher_puts_the_token_on_the_command_line() {
         for slug in [None, Some("a1b2")] {
@@ -2673,7 +2656,6 @@ mod remote_hook_tests {
 
     /// grok 會把每個實例的 dispatcher 都叫一次：各自只接自己實例的 pane（`AM_INSTANCE`），
     /// 同 id 的 bot 才不會被兩邊各記一次。正式實例的舊 pane 沒有這個變數，照舊歸正式。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn each_grok_dispatcher_only_serves_its_own_instance() {
         let home = tt::track(std::env::temp_dir().join(format!("am-grok-{}", crate::db::ulid())));
@@ -2708,7 +2690,6 @@ mod remote_hook_tests {
 
     /// issue #92：遠端的 hook 也要帶這個行程自己的 run id（pane env 的 `AM_RUN_ID`），daemon 才分得出
     /// `--resume` 前後兩個行程送的同一個 session。怪字元一律濾掉：spool 裡一行壞掉的 JSON 會永遠卡在那裡。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_remote_hook_names_the_run_its_process_was_started_for() {
         let parse = |line: &str| -> crate::hookrecv::HookBody { serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")) };
@@ -2727,7 +2708,6 @@ mod remote_hook_tests {
         assert_eq!(parse(lines[2]).run_id.as_deref().map(str::trim), Some(""), "沒有 AM_RUN_ID：空字串，圍籬當成沒帶");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn claude_stop_spools_then_reports_idle() {
         let sb = Sandbox::new(true);
@@ -2751,7 +2731,6 @@ mod remote_hook_tests {
         assert!(!c.contains("--message"), "{c}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn claude_stop_failure_spools_then_reports_idle() {
         let sb = Sandbox::new(true);
@@ -2765,7 +2744,6 @@ mod remote_hook_tests {
         assert!(text.contains("StopFailure"), "failure event is spooled too: {text}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn macos_local_remote_hook_returns_before_a_stalled_herdr_report() {
         let sb = Sandbox::new(true);
@@ -2820,7 +2798,6 @@ mod remote_hook_tests {
         assert!(pid_path.exists(), "the report still starts in the background");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn nested_stop_and_grok_shutdown_spool_without_reporting() {
         let sb = Sandbox::new(true);
@@ -2830,7 +2807,6 @@ mod remote_hook_tests {
         assert!(sb.calls().is_empty(), "neither is a turn ending: {:?}", sb.calls());
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn grok_end_turn_reports_idle() {
         let sb = Sandbox::new(true);
@@ -2842,7 +2818,6 @@ mod remote_hook_tests {
     }
 
     /// Token slot `-` (review 2026-09-12 #8) is treated like a real token: spool, then report.
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_placeholder_token_slot_changes_nothing() {
         let sb = Sandbox::new(true);
@@ -2860,7 +2835,6 @@ mod remote_hook_tests {
         assert!(calls[1].contains("--agent-session-id c-4"), "{calls:?}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn codex_takes_the_payload_from_argv() {
         let sb = Sandbox::new(true);
@@ -2872,7 +2846,6 @@ mod remote_hook_tests {
         assert!(calls[0].contains("--state idle ") && calls[0].contains("--agent-session-id c-3"), "{calls:?}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn session_start_only_reports_the_session() {
         let sb = Sandbox::new(true);
@@ -2884,7 +2857,6 @@ mod remote_hook_tests {
         assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn remote_event_hints_ignore_nested_fields_and_tolerate_missing_metadata() {
         let sb = Sandbox::new(true);
@@ -2918,7 +2890,6 @@ mod remote_hook_tests {
         }
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn remote_hook_repairs_invalid_utf8_before_spooling_json() {
         let sb = Sandbox::new(false);
@@ -2935,7 +2906,6 @@ mod remote_hook_tests {
         assert!(!body.truncated, "UTF-8 repair is separate from payload-size truncation");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn remote_hook_preserves_escaped_surrogate_pairs_and_repairs_lone_surrogates() {
         let sb = Sandbox::new(false);
@@ -2949,7 +2919,6 @@ mod remote_hook_tests {
         assert_eq!(body.payload["lone"], "\u{fffd}", "a lone surrogate is replaced");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn empty_remote_payload_is_spooled_as_json_null() {
         let sb = Sandbox::new(false);
@@ -2961,7 +2930,6 @@ mod remote_hook_tests {
         assert!(body.payload.is_null(), "{body:?}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn without_herdr_it_spools_and_says_so() {
         let sb = Sandbox::new(false);
@@ -2973,7 +2941,6 @@ mod remote_hook_tests {
     }
 
     /// #652：大行並行寫進同一個 jsonl 會交錯，drain 兩則都丟。一則一檔之後每一則都是完整 JSON。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn macos_local_parallel_large_hooks_stay_one_json_each() {
         let sb = Sandbox::new(false);
@@ -3010,7 +2977,6 @@ mod remote_hook_tests {
     }
 
     /// #653：截斷後仍以 `{` 開頭。原樣嵌進 JSON 整行無效，`truncated` 沒人讀得到。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn macos_local_truncated_object_is_wrapped_so_the_line_parses() {
         let sb = Sandbox::new(false);
@@ -3028,7 +2994,6 @@ mod remote_hook_tests {
         assert!(raw.len() <= 1_048_576 + 8, "head -c 之後不該比上限長一截：{}", raw.len());
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     fn mode_of(p: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
@@ -3036,7 +3001,6 @@ mod remote_hook_tests {
 
     /// #494：spool 裡是完整的 hook payload（prompt、工具輸入、回覆）。目錄 0700、檔案 0600，
     /// 不交給那台機器的 umask 決定——Linux 預設 022 的話以前是 0644，同機任何使用者都讀得到。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_generated_hook_keeps_the_spool_private() {
         let sb = Sandbox::new(false);
@@ -3074,7 +3038,6 @@ mod remote_hook_tests {
 
     /// 收緊只管我們自己寫的東西：使用者的 statusLine 指令要在**原本的** umask 底下跑，
     /// 不然它建出來的檔案會莫名其妙變成 0600。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_users_own_statusline_command_keeps_its_own_umask() {
         let sb = Sandbox::new(true);
@@ -3088,7 +3051,6 @@ mod remote_hook_tests {
         assert_eq!(mode_of(&sb.bot_dir().join("hook-status.json")), 0o600, "我們自己的單槽檔還是 0600");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn statusline_overwrites_a_single_slot_and_runs_the_user_command() {
         let sb = Sandbox::new(true);
@@ -3110,7 +3072,6 @@ mod remote_hook_tests {
         assert!(sb.calls().is_empty(), "the status line reports no state");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn seq_is_strictly_increasing() {
         let sb = Sandbox::new(true);
@@ -3127,7 +3088,6 @@ mod remote_hook_tests {
         assert!(seqs[1] > seqs[0], "herdr drops a seq that did not grow: {seqs:?}");
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn without_a_pane_id_it_only_spools() {
         let sb = Sandbox::new(true);
@@ -3147,7 +3107,7 @@ mod remote_hook_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod pane_env_tests {
     use super::*;
     /// 正式／隔離 × 本機／遠端 × 自訂 env 帶了偽造值、清空值、完全沒帶：結果只看 daemon 自己。
@@ -3171,7 +3131,7 @@ mod pane_env_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod claude_settings_tests {
     use super::*;
 
@@ -3296,7 +3256,7 @@ mod claude_settings_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod herdr_skill_timeout_tests {
     use super::*;
     fn fake_herdr(body: &str) -> std::path::PathBuf {
@@ -3326,7 +3286,7 @@ mod herdr_skill_timeout_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod codex_stop_args_tests {
     use super::*;
     #[test]
@@ -3344,7 +3304,7 @@ mod codex_stop_args_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

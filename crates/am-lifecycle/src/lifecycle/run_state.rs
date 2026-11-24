@@ -11,7 +11,7 @@
 //! - `Err(_)`：DB 寫不進去。狀態沒變；不做後續不可逆的動作，錯誤往上傳。外面的副作用已經發生的，
 //!   用 [`schedule_settle`] 排重試，讓狀態照證據收斂，不留一顆永遠卡住的 run。
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 use crate::capabilities::Db;
 use crate::lifecycle::s6_ports::RunStateServices;
 use super::*;
@@ -136,8 +136,8 @@ fn settling() -> &'static std::sync::Mutex<std::collections::HashSet<(String, &'
 /// 測試裡不開背景 task，只記下排了什麼（[`scheduled`]），由測試自己呼叫 [`settle_once`]。
 pub fn schedule_settle<A: RunStateServices + Clone>(app: &A, run_id: &str, how: Settle) {
     tracing::warn!(run = run_id, ?how, "run state is not committed; retrying in the background");
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    if cfg!(any(test, feature = "test-hooks")) {
+        #[cfg(feature = "test-hooks")]
         test_log().lock().unwrap().push((run_id.to_string(), how));
         return;
     }
@@ -213,21 +213,21 @@ pub async fn settle_once(app: &impl RunStateServices, run_id: &str, how: &Settle
     }
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 fn test_log() -> &'static std::sync::Mutex<Vec<(String, Settle)>> {
     static L: std::sync::OnceLock<std::sync::Mutex<Vec<(String, Settle)>>> = std::sync::OnceLock::new();
     L.get_or_init(Default::default)
 }
 
 /// 測試用：這顆 run 排過哪些重試。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn scheduled(run_id: &str) -> Vec<Settle> {
     test_log().lock().unwrap().iter().filter(|(r, _)| r == run_id).map(|(_, s)| s.clone()).collect()
 }
 
 /// 測試用的故障注入：之後把 `runs.state` 寫成 `state` 的 UPDATE 一律失敗（像 SQLite 的 I/O／busy 錯誤），
 /// 直到 [`accept_run_state`] 拿掉。不影響其他欄位與其他目標狀態的寫入。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn refuse_run_state(app: &impl Db, state: &str) {
     sqlx::query(&format!(
         "CREATE TRIGGER refuse_run_state_{state} BEFORE UPDATE OF state ON runs WHEN NEW.state = '{state}'
@@ -239,14 +239,14 @@ pub async fn refuse_run_state(app: &impl Db, state: &str) {
 }
 
 /// 測試用：DB 恢復。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn accept_run_state(app: &impl Db, state: &str) {
     sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(app.db()).await.unwrap();
 }
 
 /// 測試用的故障注入（#156）：之後改這一筆回合 `status` 的 UPDATE 一律失敗，直到 [`accept_turn_close`]。
 /// 只擋這一筆：同一顆 bot 其他回合（排著的那些）照常寫得進去。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn refuse_turn_close(app: &impl Db, turn_id: &str) {
     sqlx::query(&format!(
         "CREATE TRIGGER refuse_turn_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{turn_id}'
@@ -258,13 +258,13 @@ pub async fn refuse_turn_close(app: &impl Db, turn_id: &str) {
 }
 
 /// 測試用：DB 恢復。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn accept_turn_close(app: &impl Db) {
     sqlx::query("DROP TRIGGER refuse_turn_close").execute(app.db()).await.unwrap();
 }
 
 /// 測試用：這顆 bot 的對話裡放一筆回合；`in_flight` 的掛在 `run_id` 底下。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn a_turn(app: &impl Db, bot_id: &str, run_id: Option<&str>, status: &str) -> String {
     let conv = db::conversation_id(app.db(), bot_id).await.unwrap();
     let id = db::ulid();
@@ -280,18 +280,18 @@ pub async fn a_turn(app: &impl Db, bot_id: &str, run_id: Option<&str>, status: &
     id
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn turn_status(app: &impl Db, turn_id: &str) -> String {
     sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 
 /// 測試用：這筆回合底下補了幾則系統說明（收掉、撤掉時各補一則）。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn system_notes(app: &impl Db, turn_id: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

@@ -9,8 +9,6 @@
 //! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查草稿框的邊界／位置、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
 //! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -237,7 +235,7 @@ async fn planned_authority_matches(app: &impl crate::capabilities::Db, run: &db:
 
 /// 測試專用的診斷（#1957）：submit 回 `draft_changed` 時把是哪一道檢查失敗、畫面快照（revision、框的 frame）與 DB 綁定欄位的前後值印到 stderr。
 /// libtest 只在測試失敗時才把 stderr 秀出來，所以正式行為與通過的測試都不受影響。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 async fn draft_changed_diag(app: &impl LcHost, site: &str, kind: &str, run: &db::Run, pane: &str, expect_token: &str, before: &crate::herdr::PaneRead, after: Option<&crate::herdr::PaneRead>, fresh: Option<&str>, checks: (bool, bool)) {
     let now_run = db::active_run(app.db(), &run.bot_id).await.ok().flatten();
     let draft_matches = fresh.is_some_and(|d| same_draft(expect_token, &run.id, pane, d));
@@ -310,7 +308,7 @@ pub async fn clear(
     if !now.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d)) {
         return Err(refusal("draft_changed", run, true, &bot.kind, now.as_deref()));
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("draft_before_clear_key", &bot.id).await;
     let (fresh_state, fresh, fresh_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     if fresh_state == BoxState::Unready {
@@ -327,7 +325,7 @@ pub async fn clear(
         tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "herdr refused the key that clears the composer; not typing");
         return Err(refusal("draft_uncleared", run, false, &bot.kind, now.as_deref()));
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("draft_after_clear_key", &bot.id).await;
     tokio::time::sleep(std::time::Duration::from_millis(CLEAR_SETTLE_MS)).await;
     match read_draft(client, &pane, &bot.kind).await {
@@ -425,7 +423,7 @@ async fn confirm(
 ) -> anyhow::Result<(Delivered, Option<String>)> {
     let mut pressed_again = false;
     for _ in 0..SUBMIT_CHECKS {
-        #[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+        #[cfg(not(feature = "test-hooks"))]
         tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let screen = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
         match same_session(app, &run.id, proof).await {
@@ -689,7 +687,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
         let fresh_read = read_draft(&client, &pane, &bot.kind).await.ok();
         let fresh = fresh_read.as_ref().and_then(|(_, d, _)| d.clone());
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         draft_changed_diag(app, "pre-key-read", &bot.kind, &run, &pane, expect_token, &authorized_snapshot, fresh_read.as_ref().map(|(_, _, s)| s), fresh.as_deref(), (false, true)).await;
         return Err(SubmitDraftError::NoKeySent(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref())));
     };
@@ -703,7 +701,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     };
     let checkpoint = proof_checkpoint(&proof, offset);
 
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("draft_before_turn_tx", bot_id).await;
 
     let turn_id = db::ulid();
@@ -750,7 +748,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, refusal).await;
     }
 
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("draft_before_enter", bot_id).await;
     let (final_state, fresh, final_snapshot) = match read_draft(&client, &pane, &bot.kind).await {
         Ok(snapshot) => snapshot,
@@ -767,14 +765,14 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_authority = planned_authority_matches(app, &run, Some(&proof)).await;
     if !same_composer || !same_authority {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         draft_changed_diag(app, "final-check", &bot.kind, &run, &pane, expect_token, &authorized_snapshot, Some(&final_snapshot), fresh.as_deref(), (same_composer, same_authority)).await;
         let changed = refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref());
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, changed).await;
     }
     let res = match client.pane_send_keys(&pane, Submit::Enter.keys()).await {
         Ok(()) => {
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("draft_after_enter", bot_id).await;
             confirm(app, &client, &run, &bot, &pane, &proof, offset, &draft).await
         }
@@ -829,11 +827,11 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now: None })
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 #[path = "composer_draft_tests.rs"]
 mod tests;
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

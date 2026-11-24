@@ -118,7 +118,7 @@ pub async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &
         Ok(None) => {}
         Err(e) => return Some(unverified(bot, &e)),
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("quota_hold_after_lookup", &bot.id).await;
     let host = match db::bot_host(app.db(), &bot.id).await {
         Ok(h) => h,
@@ -277,7 +277,7 @@ pub async fn backfill_once(app: &impl QuotaHoldContext, host: &str) {
 const BACKFILL_RETRY: Duration = Duration::from_secs(30);
 
 fn retry_backfill(app: &impl QuotaHoldContext, host: &str) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let (app, host) = (app.clone(), host.to_string());
@@ -361,14 +361,14 @@ pub fn recently_held(bot_id: &str) -> bool {
         .is_some_and(|t| t.elapsed() <= RECHECK_MAX + Duration::from_secs(60))
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn forget_held(bot_id: &str) {
     if let Ok(mut m) = held_at().lock() {
         m.remove(bot_id);
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -401,7 +401,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

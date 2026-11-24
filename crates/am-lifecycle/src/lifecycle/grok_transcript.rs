@@ -387,7 +387,7 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
             let conv = db::conversation_id(app.db(), &bot.id).await?;
             let mut tx = db::begin_write(app.db()).await?;
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
-            #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(any(test, feature = "test-hooks"))]
             super::race_point::hit("grok_transcript_after_replay_status_read", turn_id).await;
             if status == "in_flight" {
                 turn_controller::set_status_on(&mut tx, turn_id, "in_flight", "completed", "grok chat_history.jsonl").await?;
@@ -448,7 +448,7 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                         .bind(&t.id)
                         .fetch_all(&mut *tx)
                         .await?;
-                #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+                #[cfg(any(test, feature = "test-hooks"))]
                 super::race_point::hit("grok_transcript_after_reply_read", &t.id).await;
                 match replies.first() {
                     None => added.push(insert_message_tx(&mut tx, &conv, Some(&t.id), "assistant", reply, "transcript", false, None).await?),
@@ -568,7 +568,7 @@ pub async fn settle_in_flight(app: &impl GrokTranscriptContext, bot: &db::Bot, r
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

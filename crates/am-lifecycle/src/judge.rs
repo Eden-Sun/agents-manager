@@ -360,7 +360,7 @@ struct Answer {
 
 /// 網頁「環境設定」貼進來的 key：寫到 `key_file`，權限 600（目錄 700）。先寫暫存檔再 rename，半截的檔不會被讀到。
 /// key 只落在這個檔裡——不進 config.toml、DB、log，也不會從任何 API 回出去。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn write_key(path: &str, key: &str) -> Result<()> {
     stage_key(path, key)?.publish()
 }
@@ -616,7 +616,7 @@ fn looks_random(s: &str) -> bool {
     digits >= 4 && letters >= 4 && !s.contains("__") && s.matches('_').count() + s.matches('-').count() < 4
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
     pub const CLEAR_WINDOW_HOURS: i64 = super::CLEAR_WINDOW_HOURS;
     pub const REDACTED: &str = super::REDACTED;
@@ -628,7 +628,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod source_mark_tests {
     use super::*;
 

@@ -26,7 +26,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " ", env!("AM_BUILD
 
 /// 讀 `--version` 的那一行 → `(完整 sha 或 unknown, 是否髒樹)`；沒有 sha（舊 binary 只印名字與版本）或格式不對是 `None`。
 /// 腳本讀的是同一個形狀（最後一個空白分隔的欄位）。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub fn parse_version_line(line: &str) -> Option<(String, bool)> {
     let mut fields = line.split_whitespace();
     let _name = fields.next()?;
@@ -124,7 +124,7 @@ pub fn last_deploy() -> serde_json::Value {
     serde_json::json!({"sha": BUILD_SHA, "sha_full": BUILD_SHA_FULL, "dirty": BUILD_DIRTY, "at": DEPLOYED_AT.get().cloned().unwrap_or_else(started_at)})
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

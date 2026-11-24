@@ -646,7 +646,7 @@ pub async fn retire(pool: &SqlitePool, project_id: &str, session_id: &str) -> Re
     Ok(row)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

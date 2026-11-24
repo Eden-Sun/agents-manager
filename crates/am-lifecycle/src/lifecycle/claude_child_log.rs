@@ -392,13 +392,13 @@ pub async fn pending_tail_for_session(
     Ok(split_output(&out).map(|(_, body)| body))
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     pub use super::{parse_exchanges, is_human_prompt_row, record_runtime, parse_runtime, RuntimeSeen, LOG_MARK};
-    #[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+    #[cfg(not(feature = "test-hooks"))]
     pub(crate) use super::{parse_exchanges, is_human_prompt_row, record_runtime, parse_runtime, RuntimeSeen, LOG_MARK};
     pub const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
     pub fn split_output(out: &str) -> Option<(String, String)> { super::split_output(out) }

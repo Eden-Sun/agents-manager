@@ -256,7 +256,7 @@ async fn row(p: &SqlitePool, crid: &str) -> String {
     crate::supervisor::store::insert_assignment(p, None, "bot1", crid, "x", &[], None, true).await.unwrap().id
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

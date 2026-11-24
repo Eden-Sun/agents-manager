@@ -5,7 +5,7 @@
 //! The model understands and decides. The daemon persists, retries, watches and switches.
 
 /// #1862 D：crate-only 測試用的窄環境（取代 daemon `App`／`testing`）。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 pub(crate) mod test_env;
 
 pub mod api;
@@ -56,7 +56,7 @@ pub fn new_token() -> String {
     (0..32).map(|_| std::char::from_digit(rng.gen_range(0..16), 16).unwrap()).collect()
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod notify_crid_tests {
     use super::inbox_notify_crid;
 

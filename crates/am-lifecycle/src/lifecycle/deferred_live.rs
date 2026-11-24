@@ -119,7 +119,7 @@ pub fn is_deferred(bot_id: &str) -> bool {
     pending().lock().unwrap_or_else(|e| e.into_inner()).pending.contains_key(bot_id)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 fn take(bot_id: &str) -> Option<PendingLive> {
     pending().lock().unwrap_or_else(|e| e.into_inner()).pending.remove(bot_id)
 }
@@ -188,7 +188,7 @@ pub async fn apply_deferred_once(
     Some(outcome)
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod retain_tests {
     use super::*;
 
@@ -204,7 +204,7 @@ mod retain_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

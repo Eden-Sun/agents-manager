@@ -174,7 +174,7 @@ pub trait ConfigProjection {
         T: Send + 'a;
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     /// supervisor 的 production 程式碼（不含 `#[cfg(test)]` 的項目）不再直接呼叫其他 feature 的函式：這些呼叫只准出現在
     /// `app_ports_p6.rs`。純值型別／純函式（`quota::Bucket`、`lifecycle::LcError`…）不在此限，它們是之後搬進
@@ -297,6 +297,6 @@ mod tests {
             assert!(adapter.contains(pat), "{pat} 應該在 app_ports_p6.rs");
         }
         assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
-        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"daemon-test-harness\"))]\n#[tokio::test]\nasync fn t() {\n    let x = 1;\n}\nfn c() {}\n") == vec![false, true, true, true, true, true, false]);
+        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"some-feature\"))]\n#[tokio::test]\nasync fn t() {\n    let x = 1;\n}\nfn c() {}\n") == vec![false, true, true, true, true, true, false]);
     }
 }

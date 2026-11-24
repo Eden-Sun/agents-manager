@@ -1,7 +1,5 @@
 //! Delivering a prompt: the turn row, the pane write, and the queued path.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 use super::send_now::ports::AttachConnPort;
 
@@ -30,7 +28,7 @@ pub async fn publish_prompt_message(app: &(impl crate::capabilities::Db + crate:
 pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("mark_delivery_before_claim", turn_id).await;
 
     let mut tx = app.db().begin().await?;
@@ -191,7 +189,7 @@ fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabi
 }
 
 fn restamp_retry_delay(attempt: usize) -> std::time::Duration {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return std::time::Duration::from_millis(20);
     }
     const SECS: [u64; 5] = [2, 5, 15, 30, 60];
@@ -225,9 +223,9 @@ macro_rules! unretracted_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 unretracted_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 unretracted_type!(pub(super),);
 
 impl Unretracted {
@@ -257,9 +255,9 @@ macro_rules! retraction_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 retraction_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 retraction_type!(pub(super),);
 
 /// Remove a turn and its user message that never reached the agent. They were committed before the
@@ -381,7 +379,7 @@ pub async fn prompt(app: &impl LcHost, bot_id: &str, text: &str, client_request_
 
 /// `prompt` with images (`attach.rs`): the agent gets paths on its host; the timeline renders
 /// thumbnails from `messages.attachments_json`.
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn prompt_with(
     app: &impl LcHost,
     bot_id: &str,
@@ -773,7 +771,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                 ));
             }
             if crate::tui_prompts::is_auto_mode_offer(&screen) {
-                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+                #[cfg(feature = "test-hooks")]
                 super::race_point::hit("claude_auto_mode_before_answer", &bot.id).await;
                 let latest = read_guard_screen(client, pane, run, "pane_unreadable").await?;
                 if crate::tui_prompts::is_auto_mode_offer(&latest) {
@@ -828,7 +826,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
     }
     if bot.kind == "grok" && crate::tui_prompts::is_grok_trust_dialog(&screen) {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("grok_trust_before_host", &bot.id).await;
             let authority = async {
                 let host = db::bot_host(app.db(), &bot.id).await?;
@@ -853,7 +851,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                     tracing::warn!(bot = %bot.name, host, cwd, warning = %warning, "could not record grok folder trust");
                 }
             }
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             super::race_point::hit("grok_trust_before_answer", &bot.id).await;
             let latest = read_guard_screen(client, pane, run, "pane_unreadable").await?;
             if crate::tui_prompts::is_grok_trust_dialog(&latest) {
@@ -862,7 +860,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                     pane_guard_retry(run, "pane_guard_failed")
                 })?;
                 tokio::time::sleep(Duration::from_millis(1200)).await;
-                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+                #[cfg(feature = "test-hooks")]
                 super::race_point::hit("grok_trust_after_answer", &bot.id).await;
                 let still = read_guard_screen(client, pane, run, "pane_unreadable").await?;
                 if crate::tui_prompts::is_grok_trust_dialog(&still) {
@@ -938,7 +936,7 @@ pub async fn prompt_expect_run(
 ///
 /// 不合資格（不是 claude、CLI 比 2.1.275 舊、版本還不知道）時**不插隊**：照原本的路走，忙的話一樣
 /// 回 409，只是 body 多帶 `send_now_refused` 說清楚為什麼沒插隊。API 走 [`prompt_from_api`]；這支是測試用的捷徑。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn prompt_send_now(
     app: &impl LcHost,
     bot_id: &str,
@@ -997,7 +995,7 @@ async fn prompt_inner(
         super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &out.message_id, &out.turn_id, text).await;
         return Ok(out);
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
     let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
     if let Some(token) = share_token {
@@ -1047,9 +1045,9 @@ macro_rules! gated_types {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 gated_types!(pub,);
-#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 gated_types!(,);
 
 /// `prompt_inner` 分三段、各段被呼叫端裝箱（#1461／#1465 的 1 MiB stack 守門）：整段寫在一個 async fn 裡時，debug 建置下
@@ -1268,7 +1266,7 @@ async fn prompt_commit_and_deliver_body(
     ready: Ready,
 ) -> LcResult<PromptOut> {
     let Ready { bot, conv, files, deliver, run, client, plan, interrupted, send_now, send_now_active } = ready;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("prompt_before_turn_commit", bot_id).await;
 
     let turn_id = db::ulid();
@@ -1355,7 +1353,7 @@ async fn prompt_commit_and_deliver_body(
 
     super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
 
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     super::race_point::hit("prompt_before_typing", bot_id).await;
 
     let res = match interrupted.as_ref() {
@@ -1454,7 +1452,7 @@ async fn send_now_fell_through(
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod prompt_tests {
     use super::*;
     /// 上游 0.169.1 的審核框：派送被擋下、回可重試的 `codex_hook_review_pending`，不按任何鍵（不會被當成 composer 的草稿）。
@@ -1485,7 +1483,7 @@ pub async fn check_same_text(app: &impl crate::capabilities::Db, turn: &db::Turn
 
 /// #1461／#1465 守門：`prompt_inner` 拆段之後，段與段之間傳的 `Ready` 要維持小型值（只放資料列與 client，不放中間 future）。
 /// 真正的棧餘裕由 daemon 的 `*_fits_in_a_one_mib_stack` 守：握手那一拍（`prompt_control_plane`）就在 `the_plain_bot_gate_path_…` 裡。
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod stack_shape_tests {
     #[test]
     fn the_prompt_stage_hand_off_stays_small() {
@@ -1495,7 +1493,7 @@ mod stack_shape_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

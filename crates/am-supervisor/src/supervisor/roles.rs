@@ -840,7 +840,7 @@ pub fn wake_reason(events: &[super::store::InboxEvent]) -> String {
     kinds.iter().map(|(k, n)| if *n > 1 { format!("{k}×{n}") } else { k.clone() }).collect::<Vec<_>>().join(", ")
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;

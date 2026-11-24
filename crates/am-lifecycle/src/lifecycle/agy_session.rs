@@ -211,7 +211,7 @@ pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabili
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;

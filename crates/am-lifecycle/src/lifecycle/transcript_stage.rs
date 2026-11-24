@@ -210,7 +210,7 @@ fn copy_bound_dir(src: &std::fs::File, dest: &std::fs::File) -> std::io::Result<
 }
 
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     use std::ffi::OsStr;

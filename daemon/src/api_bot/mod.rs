@@ -27,7 +27,7 @@ mod journal_failure_tests;
 mod wrap_up_tests;
 #[cfg(test)]
 mod debug_redaction_tests;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod completion_tests;
 pub(crate) mod prompt;
 pub(crate) mod registry;
@@ -38,32 +38,32 @@ mod native_start;
 mod native_prompt;
 
 mod receipt;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod receipt_tests;
 
 mod startup_recovery;
 mod startup_history;
 mod startup_retention;
 mod startup_abandonment;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod startup_recovery_tests;
 
 pub(crate) mod startup_gate;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod startup_gate_tests;
 
 mod retention;
 pub(crate) use retention::{spawn_retention_ticker, schedule_retention_after_delete};
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod retention_tests;
 
 pub(crate) mod sweeper;
 pub(crate) use sweeper::spawn_sweeper;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod sweeper_tests;
 
 mod explicit_retirement;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod explicit_retirement_tests;
 #[cfg(test)]
 mod provider_seam_tests;

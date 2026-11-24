@@ -176,7 +176,7 @@ pub(crate) async fn on_identity(pool: &SqlitePool, run: &crate::db::Run, session
     Ok(())
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -251,7 +251,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod database_tests {
     use super::*;
     use crate::db;

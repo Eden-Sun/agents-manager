@@ -3,12 +3,12 @@ use crate::lifecycle::api_bot_port::{ApiNativePromptError as E, ApiTurnKey};
 use crate::lifecycle::PromptOut;
 use std::{future::Future, sync::Arc};
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 fn pending_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 pub(super) fn arm_pending_lost_ack_for_test(crid: &str) { assert!(pending_lost_acks().lock().unwrap().insert(crid.to_owned())); }
 
 pub(super) fn prompt<'a>(
@@ -149,14 +149,14 @@ async fn prompt_body_inner(
     }
     if app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| E::Unconfirmed)?; return Err(E::Unconfirmed); }
     let mut committed = tx.commit().await.is_ok();
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     if committed && pending_lost_acks().lock().unwrap().remove(crid) { committed = false; }
     if !committed {
         let _ = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id JOIN messages m ON m.turn_id=t.id AND m.conversation_id=c.id WHERE t.id=? AND t.run_id=? AND t.client_request_id=? AND c.bot_id=? AND m.id=? AND m.role='user' AND m.content=?)")
             .bind(&turn).bind(&run).bind(crid).bind(bot).bind(&message).bind(text).fetch_one(&app.db).await;
         return Err(E::Unconfirmed);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(test)]
     crate::race_point::hit("api_native_prompt_after_pending_commit", crid).await;
     if !matches!(app.window_held().await, Ok(None)) || app.shutdown.is_cancelled() { return Err(E::Unconfirmed); }
     let key = ApiTurnKey { bot_id: bot.to_owned(), run_id: run, turn_id: turn.clone() };

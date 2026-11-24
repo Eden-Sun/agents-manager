@@ -286,7 +286,7 @@ fn legacy_data_dir_workspace(data_dir: &Path, p: &Path) -> Option<PathBuf> {
     Some(p.to_path_buf())
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

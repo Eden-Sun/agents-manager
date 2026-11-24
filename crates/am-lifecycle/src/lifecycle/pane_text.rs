@@ -123,7 +123,7 @@ pub fn invisible_review_notice(screen: &str) -> bool {
     screen.lines().any(|l| l.contains("invisible character") && l.contains("review and press Enter to send"))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     /// 每一類都照 2.1.278 的 `jn()`：零寬、雙向控制、tag 字元、變體選擇符、BOM、C0／C1 控制字元都拿掉。

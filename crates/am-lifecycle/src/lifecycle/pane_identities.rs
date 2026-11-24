@@ -44,7 +44,7 @@ fn token_ok(s: &str, bad: &[char]) -> bool {
     !s.is_empty() && s.chars().all(|c| !c.is_control() && !bad.contains(&c))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

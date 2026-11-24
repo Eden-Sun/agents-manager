@@ -135,7 +135,7 @@ pub async fn arm(app: &impl ResumeNudgeContext, bot_id: &str, run_id: &str) {
 
 /// 測試裡不排：測試直接叫 [`check`]。
 fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, turn_id: &str) {
-    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return;
     }
     let app = (*app).clone();
@@ -215,7 +215,7 @@ pub async fn check(app: &impl ResumeNudgeContext, bot_id: &str) -> bool {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod pure_tests {
     use super::*;
 

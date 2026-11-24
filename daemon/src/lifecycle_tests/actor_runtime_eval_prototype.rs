@@ -1,7 +1,7 @@
 //! Issue #77 探索用的原型：在 `1a2aa019`／`77e64b35`／`12208eda` 把 lifecycle 收斂成「宣告式
 //! 轉移表 + DB trigger／CAS」之後，per-bot actor runtime 值不值得做。
 //!
-//! **整個檔案只在 `cargo test` 底下編**（`lifecycle/mod.rs` 用 `#[cfg(all(test, feature = "daemon-test-harness"))] mod
+//! **整個檔案只在 `cargo test` 底下編**（`lifecycle/mod.rs` 用 `#[cfg(test)] mod
 //! actor_runtime_eval_prototype;` 掛進來，跟 issue #81 的 `native_transport_prototype.rs`
 //! 同一個做法），不會出現在 `cargo build`／正式二進位裡。完整分析、逐題回答見
 //! `docs/ACTOR-RUNTIME-EVAL.md`；這裡只放能跑、能轉紅、把敘述釘進程式碼的那一小塊。
@@ -54,7 +54,7 @@ impl ToyBotActor {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

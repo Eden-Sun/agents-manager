@@ -1771,7 +1771,7 @@ where
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::{self, File, FileTimes, OpenOptions};

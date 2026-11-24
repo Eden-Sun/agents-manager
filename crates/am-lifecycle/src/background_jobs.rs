@@ -173,7 +173,7 @@ fn codex_terminals(line: &str) -> Option<u32> {
     })
 }
 
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub fn get(app: &impl crate::background_jobs::JobCounts, run_id: &str) -> u32 {
     known(app, run_id).unwrap_or(0)
 }
@@ -300,7 +300,7 @@ pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSna
     v
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
     pub fn now_ms() -> i64 {
         super::now_ms()
@@ -311,7 +311,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod tests {
     use super::*;
 
@@ -398,7 +398,7 @@ pub trait JobCounts: Send + Sync {
     fn background_jobs(&self) -> &crate::background_jobs::Counts;
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod stuck_notice_tests {
     use super::*;
 
@@ -451,7 +451,7 @@ mod stuck_notice_tests {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod claude_2_1_329_footer_background_tests {
     use super::*;
 

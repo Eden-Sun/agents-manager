@@ -40,7 +40,7 @@ fn same_sentence(draft: &str, expect: &str) -> bool {
     text == expect.trim()
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod same_sentence_tests {
     use super::same_sentence;
 
@@ -186,7 +186,7 @@ pub async fn accept(
             return Err(err);
         }
     }
-    #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(any(test, feature = "test-hooks"))]
     super::race_point::hit("suggestion_before_tab", bot_id).await;
 
     if let Err(e) = client.pane_send_keys(&pane, &["tab"]).await {

@@ -4,7 +4,7 @@
 //! `PortalEnv`，以及 `Db`／`DataDir`／`Cfg`）。資料庫是真的暫存 SQLite（`db::open_with(path, [share::store migration])`，與正式啟動同一份共用 schema 加上分享自己的 migration）；
 //! 設定是真的 `ConfigStore`；主機登記是真的 `HostManager`（本機 herdr socket 指向不存在的路徑，碰本機 herdr 會明確失敗）。
 //! 沒有設定的外部服務**不會預設成功**：`remind_bot`、`send_share_message`、`share_status` 一律回明確的失敗（或 panic 並寫明原因），
-//! 要驗這些流程的測試留在 daemon（`daemon-test-harness`）。
+//! 要驗這些流程的測試留在 daemon。
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};

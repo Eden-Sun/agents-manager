@@ -191,7 +191,7 @@ fn sits_on_empty_composer(below: &[&str]) -> bool {
         .is_some_and(|rest| matches!(rest.as_str(), "❯" | "›" | ">"))
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod mode_row_tests {
     use super::*;
 
@@ -252,7 +252,7 @@ pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
     None
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod survey_composer_shape_tests {
     use super::*;
 
@@ -1132,7 +1132,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
         return false;
     }
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::race_point::hit("survey_before_first_key", &run.id).await;
     let was_current = survey_target_is_current(app, &target).await;
     let final_read = if was_current { read_actionable_survey(&target, Some(&read)).await } else { None };
@@ -1147,7 +1147,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
         tracing::warn!(run = %run.id, error = %e, reason = SURVEY_SEND_FAILED, "問卷送 0 失敗");
         return false;
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::race_point::hit("survey_after_zero", &run.id).await;
     tokio::time::sleep(SETTLE).await;
     let mut attempted_fingerprint = fingerprint;
@@ -1159,7 +1159,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
                 SurveyFingerprintState { fingerprint: second_fingerprint, attempt_complete: false },
             );
             attempted_fingerprint = second_fingerprint;
-            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+            #[cfg(feature = "test-hooks")]
             crate::race_point::hit("survey_before_enter", &run.id).await;
             let still_current = survey_target_is_current(app, &target).await;
             let final_read = if still_current {
@@ -1183,7 +1183,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
 }
 
 /// 測試共用的真畫面／抄錄畫面（`lifecycle::prompt` 的整合測試也用）。
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod screens {
     /// 2026-09-22 build child 停在這裡的畫面（巡檢抄錄的原文，選項與提示逐字；框線照 2.1.278 的樣子）。
     pub const AUTO_MODE: &str = "\
@@ -1305,7 +1305,7 @@ pub mod screens {
 "#;
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_seams {
     pub const SURVEY_KEY_NOT_TAKEN: &str = super::SURVEY_KEY_NOT_TAKEN;
     pub fn survey_fingerprint_state(fingerprint: u64, attempt_complete: bool) -> super::SurveyFingerprintState {
@@ -1313,7 +1313,7 @@ pub mod test_seams {
     }
 }
 
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod tests {
     #[derive(Default)]
     struct FakeRunPaneReader {
@@ -2162,8 +2162,8 @@ pub trait SurveyFingerprints: Send + Sync {
     fn survey_fingerprints(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, SurveyFingerprintState>>;
 }
 
-/// [`screen_has_answerable_prompt`] 的單元測試：兩種測試設定（有沒有 `daemon-test-harness`）都跑。
-#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
+/// [`screen_has_answerable_prompt`] 的單元測試。
+#[cfg(all(test, not(feature = "test-hooks")))]
 mod answerable_prompt_tests {
     use super::screen_has_answerable_prompt as has;
 

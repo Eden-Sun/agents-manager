@@ -1,7 +1,5 @@
 //! Keystrokes, text and slash commands sent straight at a live pane.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use crate::state::App;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -116,7 +114,7 @@ pub async fn send_keys(app: &(impl crate::capabilities::BotLocks + crate::capabi
 /// `POST /api/bots/:id/text` — 把（多行）文字打進 pane，選擇性按 Enter。`\n` 不是鍵名，所以不走
 /// `send_keys`；Enter 另用 `pane.send_keys`（`send_text` 裡的 `\n` 是貼上換行）。不擋
 /// `agent_status`：用途就是回合中「併送」。
-#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(feature = "test-hooks")]
 pub async fn send_text(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, text: &str, enter: bool, expect_run_id: Option<String>) -> LcResult<()> {
     send_text_recorded(app, bot_id, text, enter, expect_run_id, false).await.map(|_| ())
 }
@@ -725,7 +723,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
         .await
         .map_err(up)?;
     tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1200))).await;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::lifecycle::race_point::hit("slash_after_enter_before_read", pane_id).await;
     let screen = client
         .pane_read(pane_id, "visible", 60)
@@ -735,7 +733,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     if !crate::tui_prompts::is_switch_model_dialog(&screen) {
         return Ok(());
     }
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::lifecycle::race_point::hit("slash_confirm_before_answer", pane_id).await;
     let latest = client
         .pane_read(pane_id, "visible", 60)
@@ -752,7 +750,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     );
     client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
     tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1000))).await;
-    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    #[cfg(feature = "test-hooks")]
     crate::lifecycle::race_point::hit("slash_after_answer_before_read", pane_id).await;
     let screen = client
         .pane_read(pane_id, "visible", 60)
@@ -806,7 +804,7 @@ async fn wait_for_composer_settled(
         std::time::Instant::now() + std::time::Duration::from_millis(SLASH_SETTLE_MAX_MS);
     let mut prev: Option<String> = None;
     loop {
-        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        #[cfg(feature = "test-hooks")]
         crate::lifecycle::race_point::hit("slash_before_settle_read", pane_id).await;
         let screen = client
             .pane_read(pane_id, "visible", 60)
@@ -1033,7 +1031,7 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod compact_tests {
     use super::compact_slash_command;
     #[test]
@@ -1047,7 +1045,7 @@ mod compact_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod live_slash_tests {
     use super::{agy_effort_matches_screen, agy_model_matches_screen, composer_settled, grok_model_from_screen, live_slash_command};
     /// 窄 pane 把現在的框底拆成兩行時，不能退回對話裡引用的完整舊框。
@@ -1148,7 +1146,7 @@ mod live_slash_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(test)]
 mod login_slash_tests {
     use super::{live_gate, login_slash_command, slash_gate, LiveApplyGuard, LiveApplyMatch, live_apply_window_match, SlashBlocked};
     use crate::db;
@@ -1289,7 +1287,7 @@ mod login_slash_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

@@ -693,18 +693,15 @@ impl HistorySource for Arc<StubSource> {
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     fn bind(host: &str, home: Option<&str>, thread: &str) -> Binding {
         Binding { host: host.into(), codex_home: home.map(PathBuf::from), thread_id: thread.into() }
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     fn conn(src: &Arc<StubSource>, b: &Binding) -> StubConn {
         StubConn { src: src.clone(), binding: b.clone() }
     }
 
     /// 真實 app-server 的 `thread/items/list` 回應形狀（2026-10-01 對 codex 0.159.3 實測）。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_real_items_response_shape_is_parsed() {
         let r = json!({"data": [
@@ -725,7 +722,6 @@ mod tests {
     }
 
     /// 多段 text 輸入接起來等於我們送的那句也算；跟別人的不能混。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_split_user_message_matches_only_when_it_concatenates_to_the_prompt() {
         let item = Item { turn_id: "t".into(), item_id: "u".into(), kind: ItemKind::User(vec!["ab".into(), "cd".into()]) };
@@ -735,7 +731,6 @@ mod tests {
     }
 
     /// 增量讀：基準之後的新東西由舊到新；空 thread 的基準是 None。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn items_since_reads_only_what_is_after_the_baseline() {
         let src = StubSource::new();
@@ -759,7 +754,6 @@ mod tests {
     }
 
     /// 基準不在歷史裡（被截、投影停住）＝錯誤，不是「沒有新東西」。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn a_missing_baseline_is_an_error_not_an_empty_answer() {
         let src = StubSource::new();
@@ -773,7 +767,6 @@ mod tests {
         assert!(items_since(&mut c, Some("u1")).await.is_err());
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_reply_is_the_final_answer_of_our_own_turn() {
         let it = |turn: &str, id: &str, kind| Item { turn_id: turn.into(), item_id: id.into(), kind };
@@ -796,7 +789,6 @@ mod tests {
     /// `tt` 是窄的假環境：真的暫存 SQLite（共用 schema，`db::open_with(path, &[])`）＋ [`CodexHistoryHost`] 的最小實作。
     /// 沒有設定的能力不會預設成功：`source()` 在測試自己 `codex_history.set(..)` 之前是 `None`（絕不會是真的 `AppServerSource`，
     /// 所以 crate-only 測試不可能起真的 codex）；`codex_program()` 是一個不存在的路徑，真要被執行就明確失敗。
-    #[cfg(not(feature = "daemon-test-harness"))]
     mod tt {
         use super::*;
         use sqlx::SqlitePool;
@@ -888,7 +880,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     /// 寫一支假腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: &std::path::Path, body: &str) {
         tt::write_exec(path, format!("#!/bin/sh\n{body}"))
@@ -896,7 +887,6 @@ mod tests {
 
     /// 真的 app-server 的 JSON-RPC 往返：用一支假的 `codex`（shell script）驗證 initialize／initialized、
     /// 略過 notification、error 轉成 `HistoryError::Rpc`、`CODEX_HOME` 帶進子行程。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_app_server_conn_speaks_jsonrpc_over_stdio() {
         let dir = crate::test_dirs::track(std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid())));
@@ -924,7 +914,6 @@ done
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[cfg(not(feature = "daemon-test-harness"))]
     async fn codex_bot_and_run(env: &tt::Env, session: Option<&str>) -> (db::Bot, db::Run) {
         let app = &env.app;
         let bot_id = db::ulid();
@@ -945,7 +934,6 @@ done
 
     /// 綁定：thread id 來自 run 的 durable `native_session_id`（daemon 重啟後同一個值），`CODEX_HOME` 來自 bot 的 env；
     /// 沒有 session、沒開、不是 codex、source 不支援那台主機，都不給 binding（不從「最近一條 thread」猜）。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_binding_is_strict_and_survives_a_daemon_restart() {
         let env = tt::env().await;
@@ -977,7 +965,6 @@ done
     }
 
     /// 遠端主機：binding 帶 host、沒有本機的 `CODEX_HOME`；只認本機的 source 不會被拿去讀遠端。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn a_remote_host_has_its_own_binding_and_a_local_only_source_declines_it() {
         let env = tt::env().await;
@@ -1001,7 +988,6 @@ done
     }
 
     /// 回覆補撈：thread 歷史裡我們那則之後、同一個 turn 的 final_answer；歷史讀不到／還沒回完＝`None`，不編。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_exact_reply_comes_from_our_own_turn_only() {
         let env = tt::env().await;
@@ -1029,7 +1015,6 @@ done
     }
 
     /// 中斷證據：只有 turn.status 明說 interrupted 才是 true；其餘（跑完、還在跑、找不到、RPC error）都是「沒有證據」。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn interruption_is_only_ever_positive_evidence() {
         let env = tt::env().await;
@@ -1053,7 +1038,6 @@ done
     }
 
     /// 計數：structured-hit／rollout-fallback／screen-fallback 各記各的。
-    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_evidence_sources_are_counted_separately() {
         let before = counts();
