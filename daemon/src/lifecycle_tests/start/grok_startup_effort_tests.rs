@@ -1,4 +1,4 @@
-use super::start_bot;
+use crate::lifecycle::start::start_bot;
 use crate::capabilities::Db;
 use crate::db;
 use crate::testing as tt;

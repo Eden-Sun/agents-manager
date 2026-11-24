@@ -1,6 +1,9 @@
 //! #145：跨過 `agent.start` 之後，run 狀態寫不進去就不能回「啟動成功」，也不能留下一顆永遠卡住的 run。
-use super::super::run_state as rs;
-use super::*;
+use crate::lifecycle::run_state as rs;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::start::*;
+use crate::lifecycle::start::test_seams::*;
 use crate::capabilities::Db;
 use crate::testing as tt;
 
@@ -59,7 +62,7 @@ async fn a_restart_whose_new_run_cannot_be_recorded_running_still_flushes_the_qu
     let run = db::active_run(app.db(), &bot.id).await.unwrap().expect("新 run 停在 starting");
     assert_eq!((body["run_id"].as_str(), run.state.as_str()), (Some(run.id.as_str()), "starting"));
     assert_eq!(rs::turn_status(&app, &queued).await, "queued", "重啟中：不當孤兒撤");
-    assert!(super::super::start_send::watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
+    assert!(crate::lifecycle::start_send::watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
 }
 
 /// 驗收 3：start 失敗、pane 收掉了，`exited` 卻也寫不進去——不能留一顆永遠擋住下一次 start 的 `starting`。
@@ -98,7 +101,7 @@ async fn a_start_does_not_bring_back_a_run_another_path_already_ended() {
     let app = env.app.clone();
     let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
     let (app2, bot2) = (app.clone(), bot.id.clone());
-    super::super::race_point::arm("start_before_running", &bot.id, move || async move {
+    crate::lifecycle::race_point::arm("start_before_running", &bot.id, move || async move {
         let run = db::active_run(app2.db(), &bot2).await.unwrap().unwrap();
         mark_run_exited(&app2, &run.id, "pane exited").await;
     });

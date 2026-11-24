@@ -1,4 +1,7 @@
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::start::*;
+use crate::lifecycle::start::test_seams::*;
 use crate::capabilities::Db;
 use crate::testing as tt;
 
@@ -65,7 +68,7 @@ async fn a_restart_that_cannot_start_again_is_not_recorded_as_a_user_stop() {
 /// `restart_state_uncommitted`（帶著 start 的錯）、排 `Relabel` 重試；DB 恢復後成 `exited`，探針報 `bot_stopped`。
 #[tokio::test]
 async fn a_restart_that_cannot_relabel_its_old_run_says_so_and_retries() {
-    use super::super::run_state as rs;
+    use crate::lifecycle::run_state as rs;
     let env = tt::env().await;
     let app = env.app.clone();
     let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;

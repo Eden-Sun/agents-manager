@@ -1,5 +1,8 @@
 //! `restart_child_in_pane` when the agent will not leave (review 2026-09-12 #1).
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::start::*;
+use crate::lifecycle::start::test_seams::*;
 use crate::capabilities::Db;
 use crate::testing as tt;
 
@@ -117,7 +120,7 @@ async fn a_queued_dispatch_survives_a_sweep_in_the_middle_of_a_child_restart() {
 
     let swept = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (app2, swept2) = (app.clone(), swept.clone());
-    super::super::race_point::arm("child_restart_between_runs", &kid, move || async move {
+    crate::lifecycle::race_point::arm("child_restart_between_runs", &kid, move || async move {
         revoke_all_orphaned_queued_turns(&app2).await;
         swept2.store(true, std::sync::atomic::Ordering::SeqCst);
     });

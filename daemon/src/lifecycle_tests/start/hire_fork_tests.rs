@@ -1,4 +1,4 @@
-use super::{pending_fork, start_bot_with, StartOpts};
+use crate::lifecycle::start::{pending_fork, start_bot_with, StartOpts};
 use crate::capabilities::Db;
 use crate::db;
 use crate::testing::{claude_bot, env, Env};

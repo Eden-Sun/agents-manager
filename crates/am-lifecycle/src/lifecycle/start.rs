@@ -2419,40 +2419,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     Ok(run_id)
 }
 
-/// Is this run's pane open and its agent listed? A failed RPC counts as alive: ending a live bot
-/// over a hiccup is the worse mistake.
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/resume_args_tests.rs"]
-mod resume_args_tests;
-
-/// GH #83: an explicit identity confirmed logged out must fail closed, not fall back to the host's
-/// default account.
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/identity_login_gate_tests.rs"]
-mod identity_login_gate_tests;
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/child_restart_tests.rs"]
-mod child_restart_tests;
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/tab_tests.rs"]
-mod tab_tests;
-
-/// 一鍵重啟的鎖內閒置確認（review2 quota #5 的最後一段空檔）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/idle_restart_tests.rs"]
-mod idle_restart_tests;
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/run_state_commit_tests.rs"]
-mod run_state_commit_tests;
-
-/// grok 啟動不准送 `/effort`（會持久化 `default_reasoning_effort`）。等級只在 argv。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/grok_startup_effort_tests.rs"]
-mod grok_startup_effort_tests;
-
 /// Continue a credential-rotation restart while the caller holds the bot lock.
 pub async fn resume_credential_rotation_locked(app: &impl StartContext, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -2480,16 +2446,6 @@ pub async fn resume_restart_locked(app: &impl StartContext, bot_id: &str, opts: 
     started
 }
 
-/// 2026-10-04 使用者：「接回之後不需要再提示原本的失敗」。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/retire_context_lost_tests.rs"]
-mod retire_context_lost_tests;
-
-/// agy 的 resume：`--conversation=<id>` 單一 argv，不用 `-c`；接不回要在聊天室看得見（本機、單一身份的第一版）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/agy_resume_tests.rs"]
-mod agy_resume_tests;
-
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "start_tests/account_file_tests.rs"]
 mod account_file_tests;
@@ -2498,11 +2454,6 @@ mod account_file_tests;
 #[cfg(test)]
 #[path = "start_tests/specialist_section_tests.rs"]
 mod specialist_section_tests;
-
-/// C 期（`agm hire --fork-from`）：新 member 第一次啟動用 `codex fork <來源 session>`，之後重啟走它自己的 session，不再分岔。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "start_tests/hire_fork_tests.rs"]
-mod hire_fork_tests;
 
 /// argv 裡每個 `--add-dir <dir>`／`--add-dir=<dir>` 的目錄（claude 2.1.326 起每個都要信任，見 `start_inner`）。
 fn add_dir_args(args: &[String]) -> Vec<&str> {
@@ -2536,4 +2487,29 @@ pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
     use super::*;
     pub async fn record_daemon_url_injected(pool: &sqlx::SqlitePool, run_id: &str, env: &Value) -> LcResult<()> { super::record_daemon_url_injected(pool, run_id, env).await }
+    pub fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> { super::resume_args_by_kind(kind, session_id) }
+    pub async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> { super::stage_cross_identity_transcript_remote(app, bot, host, transcript).await }
+    pub fn remote_stage_script(old_projects: &str, new_projects: &str, cwd_key: &str, fname: &str, stem: Option<&str>) -> String { super::remote_stage_script(old_projects, new_projects, cwd_key, fname, stem) }
+    pub fn parse_stage_output(out: &str) -> Result<(), &'static str> { super::parse_stage_output(out) }
+    pub async fn unsettled_fork(app: &impl Db, bot_id: &str) -> Option<(String, String)> { super::unsettled_fork(app, bot_id).await }
+    pub async fn acquire_run_pane(client: &crate::herdr::HerdrClient, workspace_id: &str, cwd: &str, label: &str, env: &Value, fresh_root: Option<(crate::herdr::PaneInfo, &str)>) -> anyhow::Result<crate::herdr::PaneInfo> { super::acquire_run_pane(client, workspace_id, cwd, label, env, fresh_root).await }
+    pub fn has_profile_arg<'a>(args: impl IntoIterator<Item = &'a String>) -> bool { super::has_profile_arg(args) }
+    pub async fn codex_home_dir(app: &impl HostsAccess, project: &db::Project, env: &Value) -> Option<String> { super::codex_home_dir(app, project, env).await }
+    pub async fn fork_identity_note(pool: &sqlx::SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> { super::fork_identity_note(pool, bot_id).await }
+    pub fn claude_fresh_session_id(args: &[String]) -> Option<String> { super::claude_fresh_session_id(args) }
+    pub fn codex_instant_interrupt_args(flag_on: bool, restricted: bool) -> Vec<String> { super::codex_instant_interrupt_args(flag_on, restricted) }
+    pub enum StagedPersona { NotNeeded, Staged(String), KeptInline(String), Failed, FailedWithReason(String) }
+    impl From<super::StagedPersona> for StagedPersona {
+        fn from(p: super::StagedPersona) -> Self {
+            match p {
+                super::StagedPersona::NotNeeded => Self::NotNeeded,
+                super::StagedPersona::Staged(s) => Self::Staged(s),
+                super::StagedPersona::KeptInline(s) => Self::KeptInline(s),
+                super::StagedPersona::Failed => Self::Failed,
+                super::StagedPersona::FailedWithReason(s) => Self::FailedWithReason(s),
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_persona(app: &impl HostsAccess, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, env: &Value, agent: &str, agent_md: Option<&str>, identity_args: &[String], fork_note: Option<&str>) -> StagedPersona { super::stage_persona(app, bot, project, shim_dir, env, agent, agent_md, identity_args, fork_note).await.into() }
 }

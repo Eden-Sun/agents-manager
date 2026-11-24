@@ -1,4 +1,7 @@
-use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts, CONTEXT_LOST_PREFIX};
+use crate::lifecycle::start::{native_resume_plan, fork_args_by_kind, restart_bot_with, start_bot, start_bot_with, StartOpts, CONTEXT_LOST_PREFIX};
+use crate::lifecycle::start::test_seams::*;
+use crate::lifecycle::stop::stop_bot;
+use crate::lifecycle_tests::prelude::*;
 use crate::capabilities::Db;
 use crate::db;
 use crate::testing::{claude_bot, env, scratch_dir, Env};
@@ -35,14 +38,14 @@ fn provider_resume_arguments_are_exact() {
 async fn an_explicit_session_overrides_the_recorded_one() {
     let e = env().await;
     let bot = claude_bot(&e.app, &e.project_id, "rescued").await;
-    let plan = super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap();
+    let plan = native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap();
     assert_eq!(plan.0, "246fcf93-real");
     assert!(plan.1.iter().any(|a| a == "246fcf93-real") && plan.1.iter().any(|a| a == "--resume"), "{:?}", plan.1);
     sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, started_at, ended_at, native_session_id)
                  VALUES (?,?,'exited','idle','ws-1','p-old',?,?, '01a0b8c6-wrong')")
         .bind(db::ulid()).bind(&bot.id).bind(db::now()).bind(db::now()).execute(e.app.db()).await.unwrap();
-    assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap().0, "246fcf93-real");
-    assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap().unwrap().0, "01a0b8c6-wrong");
+    assert_eq!(native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap().0, "246fcf93-real");
+    assert_eq!(native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap().unwrap().0, "01a0b8c6-wrong");
 }
 
 /// Continuation is opt-in: only `resume_native` gets `--resume <id>`.
@@ -256,10 +259,10 @@ async fn codex_start_carries_instant_interrupt_only_with_the_canary_on_and_recor
 /// 受限的分享 bot 不帶這個參數（參數由籠子決定），記 0；旗標關也是空。
 #[test]
 fn the_instant_interrupt_args_follow_the_flag_and_skip_restricted_bots() {
-    assert_eq!(super::codex_instant_interrupt_args(true, false), vec!["-c", "features.instant_interrupt=true"]);
-    assert!(super::codex_instant_interrupt_args(true, true).is_empty());
-    assert!(super::codex_instant_interrupt_args(false, false).is_empty());
-    assert!(super::codex_instant_interrupt_args(false, true).is_empty());
+    assert_eq!(codex_instant_interrupt_args(true, false), vec!["-c", "features.instant_interrupt=true"]);
+    assert!(codex_instant_interrupt_args(true, true).is_empty());
+    assert!(codex_instant_interrupt_args(false, false).is_empty());
+    assert!(codex_instant_interrupt_args(false, true).is_empty());
 }
 
 #[tokio::test]
@@ -486,10 +489,10 @@ async fn a_corrupt_codex_profile_refuses_start_with_a_safe_actionable_system_mes
 #[test]
 fn a_profile_flag_is_recognised_in_every_spelling() {
     let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    assert!(super::has_profile_arg(&v(&["--yolo", "-p", "x"])));
-    assert!(super::has_profile_arg(&v(&["--profile", "x"])));
-    assert!(super::has_profile_arg(&v(&["--profile=x"])));
-    assert!(!super::has_profile_arg(&v(&["--yolo", "-c", "tui.show_tooltips=false", "--model", "gpt-6.1-sol"])));
+    assert!(has_profile_arg(&v(&["--yolo", "-p", "x"])));
+    assert!(has_profile_arg(&v(&["--profile", "x"])));
+    assert!(has_profile_arg(&v(&["--profile=x"])));
+    assert!(!has_profile_arg(&v(&["--yolo", "-c", "tui.show_tooltips=false", "--model", "gpt-6.1-sol"])));
 }
 
 /// 寫不進 bot 目錄（沒有 shim_dir）時，claude／codex／grok 都回 `Failed`，呼叫端據此 fail closed，
@@ -502,21 +505,21 @@ async fn a_claude_persona_that_cannot_be_staged_fails_closed() {
     let no_env = serde_json::json!({});
     let stage = |b: db::Bot| {
         let (app, project, no_env) = (e.app.clone(), project.clone(), no_env.clone());
-        async move { super::stage_persona(&app, &b, &project, None, &no_env, "x", None, &[], None).await }
+        async move { stage_persona(&app, &b, &project, None, &no_env, "x", None, &[], None).await }
     };
-    assert!(matches!(stage(bot.clone()).await, super::StagedPersona::Failed), "claude without a bot dir");
+    assert!(matches!(stage(bot.clone()).await, StagedPersona::Failed), "claude without a bot dir");
     let mut grok = bot.clone();
     grok.kind = "grok".into();
-    assert!(matches!(stage(grok).await, super::StagedPersona::Failed), "grok without a bot dir");
+    assert!(matches!(stage(grok).await, StagedPersona::Failed), "grok without a bot dir");
     let mut agy = bot.clone();
     agy.kind = "agy".into();
-    assert!(matches!(stage(agy).await, super::StagedPersona::NotNeeded), "agy has no persona argv");
+    assert!(matches!(stage(agy).await, StagedPersona::NotNeeded), "agy has no persona argv");
     let mut codex = bot;
     codex.kind = "codex".into();
     let mut own = codex.clone();
     own.args_json = r#"["--profile","mine"]"#.into();
-    assert!(matches!(stage(own).await, super::StagedPersona::KeptInline(_)));
-    let home = super::codex_home_dir(&e.app, &project, &no_env).await.unwrap();
+    assert!(matches!(stage(own).await, StagedPersona::KeptInline(_)));
+    let home = codex_home_dir(&e.app, &project, &no_env).await.unwrap();
     assert!(home.ends_with("/.codex") && home.starts_with(crate::home::dir().unwrap().to_str().unwrap()), "{home}");
 }
 
@@ -678,7 +681,7 @@ fn agy_resume_is_one_conversation_argv_and_fork_is_unsupported() {
     for bad in ["", "  ", "a b", "x;rm -rf /", "../etc", &"a".repeat(65)] {
         assert_eq!(resume_args_by_kind("agy", bad), Err("no_session_id"), "{bad:?}");
     }
-    assert_eq!(super::fork_args_by_kind("agy", id), Err("unsupported_kind"));
+    assert_eq!(fork_args_by_kind("agy", id), Err("unsupported_kind"));
 }
 
 /// codex 0.160.0 的 resume 會恢復上次存的權限，除非明確覆寫（issue #778）：auto_approve 0／1 ×
@@ -720,7 +723,7 @@ async fn codex_resume_and_fork_pin_permissions_to_auto_approve() {
 
 #[test]
 fn permission_args_follow_auto_approve() {
-    use super::super::setup::permission_args;
+    use crate::lifecycle::setup::permission_args;
     assert_eq!(permission_args("codex", true), vec!["--yolo"]);
     assert_eq!(permission_args("codex", false), vec!["-c", "sandbox_mode=\"workspace-write\""]);
     assert_eq!(permission_args("claude", true), vec!["--dangerously-skip-permissions"]);
@@ -941,13 +944,13 @@ async fn fork_note_is_staged_for_all_three_provider_paths() {
     let env = serde_json::json!({"CODEX_HOME": home.to_string_lossy()});
     for kind in ["claude", "grok", "codex"] {
         let mut b = bot.clone(); b.kind = kind.into();
-        let result = super::stage_persona(&e.app, &b, &project, Some(shim.to_str().unwrap()), &env, "new-agent", None, &[], Some("FORK-REMINDER-2043")).await;
-        let super::StagedPersona::Staged(reference) = result else { panic!("{kind} staging failed") };
+        let result = stage_persona(&e.app, &b, &project, Some(shim.to_str().unwrap()), &env, "new-agent", None, &[], Some("FORK-REMINDER-2043")).await;
+        let StagedPersona::Staged(reference) = result else { panic!("{kind} staging failed") };
         let file = if kind == "codex" { home.join(format!("{reference}.config.toml")) } else { std::path::PathBuf::from(&reference) };
         let contents = std::fs::read_to_string(file).unwrap();
         assert!(contents.contains("FORK-REMINDER-2043"), "{kind}");
         assert!(contents.contains("new-agent"), "{kind}");
-        let args = super::super::setup::persona_args(&b, "new-agent", None, Some(&reference));
+        let args = crate::lifecycle::setup::persona_args(&b, "new-agent", None, Some(&reference));
         assert!(args.iter().any(|a| a.contains(&reference)), "{kind}: {args:?}");
     }
 }
@@ -969,10 +972,10 @@ async fn fork_identity_note_uses_source_and_its_children_only() {
         target_bot_id: target.id.clone(), session_id: "old-session".into(), name: target.name.clone(),
         state: "started".into(), run_id: None, start_error: None,
     }).await.unwrap();
-    let note = super::fork_identity_note(e.app.db(), &target.id).await.unwrap().unwrap();
+    let note = fork_identity_note(e.app.db(), &target.id).await.unwrap().unwrap();
     for text in ["old-bot", "old-agent", "old-agent-child", "$AM_AGENT_NAME", "herdr agent list"] { assert!(note.contains(text), "{note}"); }
-    assert!(super::fork_identity_note(e.app.db(), &src.id).await.unwrap().is_none());
-    assert!(super::fork_identity_note(e.app.db(), &child.id).await.unwrap().is_none());
+    assert!(fork_identity_note(e.app.db(), &src.id).await.unwrap().is_none());
+    assert!(fork_identity_note(e.app.db(), &child.id).await.unwrap().is_none());
 }
 
 /// #1761：剛 fork 就換身份重啟，第一代還沒回報 session（遠端 hook 晚到）：接回原對話時改從 fork 的來源再分一次，
@@ -1035,7 +1038,7 @@ async fn a_fork_restarted_before_its_session_is_known_forks_again_from_the_sourc
     assert!(!notes.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "不是接不回：{notes:?}");
 
     sqlx::query("UPDATE runs SET native_session_id='sid-fork' WHERE id=?").bind(&first_gen).execute(e.app.db()).await.unwrap();
-    assert!(crate::lifecycle::start::unsettled_fork(&e.app, &fork.id).await.is_none(), "記到自己的 session 就不再從來源重分");
+    assert!(crate::lifecycle::start::test_seams::unsettled_fork(&e.app, &fork.id).await.is_none(), "記到自己的 session 就不再從來源重分");
 }
 
 /// #1168：fork 只接來源 bot 自己的對話檔。兩顆 bot 的 run 用同一個 sid（不同檔）、時間先後任意：
@@ -1465,7 +1468,7 @@ mod cross_identity_transcript_tests {
 mod remote_cross_identity_transcript_tests {
     use super::*;
     use crate::lifecycle::native_resume_plan;
-    use crate::lifecycle::start::{parse_stage_output, remote_stage_script, stage_cross_identity_transcript_remote};
+    use crate::lifecycle::start::test_seams::{parse_stage_output, remote_stage_script, stage_cross_identity_transcript_remote};
     use std::time::Duration;
 
     /// `remote_stage_script` 只是拼字串，真正的守衛（`[ -f ... ]`／`mkdir -p ... ||`／
@@ -2379,12 +2382,12 @@ async fn exclude_dynamic_system_prompt_is_carried_once_on_the_resume_path() {
 
 #[test]
 fn fresh_session_id_is_a_valid_uuid_and_yields_to_explicit_session_flags() {
-    let id = super::claude_fresh_session_id(&[]).unwrap();
+    let id = claude_fresh_session_id(&[]).unwrap();
     let parts: Vec<&str> = id.split('-').collect();
     assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12]);
     assert!(parts[2].starts_with('7') && "89ab".contains(&parts[3][..1]));
-    assert_ne!(id, super::claude_fresh_session_id(&[]).unwrap());
+    assert_ne!(id, claude_fresh_session_id(&[]).unwrap());
     for flag in ["--resume", "-c", "--session-id=x", "--fork-session"] {
-        assert!(super::claude_fresh_session_id(&[flag.to_string()]).is_none(), "{flag}");
+        assert!(claude_fresh_session_id(&[flag.to_string()]).is_none(), "{flag}");
     }
 }

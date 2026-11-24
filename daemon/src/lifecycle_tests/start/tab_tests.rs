@@ -1,6 +1,9 @@
 //! One bot, one tab (and the retrofit). The mock herdr keeps real tab/pane bookkeeping but,
 //! unlike herdr 0.8.2, does not reap empty tabs — so these see whether the daemon tidies up itself.
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::start::*;
+use crate::lifecycle::start::test_seams::*;
 use crate::capabilities::Db;
 use crate::testing as tt;
 
