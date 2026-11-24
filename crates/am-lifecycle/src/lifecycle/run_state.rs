@@ -227,8 +227,8 @@ pub fn scheduled(run_id: &str) -> Vec<Settle> {
 
 /// 測試用的故障注入：之後把 `runs.state` 寫成 `state` 的 UPDATE 一律失敗（像 SQLite 的 I/O／busy 錯誤），
 /// 直到 [`accept_run_state`] 拿掉。不影響其他欄位與其他目標狀態的寫入。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn refuse_run_state(app: &Arc<App>, state: &str) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn refuse_run_state(app: &impl Db, state: &str) {
     sqlx::query(&format!(
         "CREATE TRIGGER refuse_run_state_{state} BEFORE UPDATE OF state ON runs WHEN NEW.state = '{state}'
          BEGIN SELECT RAISE(ABORT, 'injected: cannot write runs.state = {state}'); END"
@@ -239,8 +239,8 @@ pub async fn refuse_run_state(app: &Arc<App>, state: &str) {
 }
 
 /// 測試用：DB 恢復。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn accept_run_state(app: &Arc<App>, state: &str) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn accept_run_state(app: &impl Db, state: &str) {
     sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(app.db()).await.unwrap();
 }
 
@@ -261,8 +261,8 @@ pub async fn bot_stopped_reported(app: &Arc<App>, bot_id: &str) -> bool {
 
 /// 測試用的故障注入（#156）：之後改這一筆回合 `status` 的 UPDATE 一律失敗，直到 [`accept_turn_close`]。
 /// 只擋這一筆：同一顆 bot 其他回合（排著的那些）照常寫得進去。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn refuse_turn_close(app: &Arc<App>, turn_id: &str) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn refuse_turn_close(app: &impl Db, turn_id: &str) {
     sqlx::query(&format!(
         "CREATE TRIGGER refuse_turn_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{turn_id}'
          BEGIN SELECT RAISE(ABORT, 'injected: cannot write turns.status'); END"
@@ -273,8 +273,8 @@ pub async fn refuse_turn_close(app: &Arc<App>, turn_id: &str) {
 }
 
 /// 測試用：DB 恢復。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn accept_turn_close(app: &Arc<App>) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn accept_turn_close(app: &impl Db) {
     sqlx::query("DROP TRIGGER refuse_turn_close").execute(app.db()).await.unwrap();
 }
 
@@ -301,8 +301,8 @@ pub async fn turn_status(app: &impl Db, turn_id: &str) -> String {
 }
 
 /// 測試用：這筆回合底下補了幾則系統說明（收掉、撤掉時各補一則）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn system_notes(app: &Arc<App>, turn_id: &str) -> i64 {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn system_notes(app: &impl Db, turn_id: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 

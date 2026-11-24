@@ -779,8 +779,8 @@ pub async fn purge_bot_dir(
 
 
 /// [`interrupt_turn`] 不綁哪一筆（測試用；API 走 `interrupt_turn`）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn interrupt_bot(app: &impl StopContext, bot_id: &str) -> LcResult<()> {
     interrupt_turn(app, bot_id, None).await
 }
 
