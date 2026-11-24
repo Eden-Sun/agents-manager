@@ -79,6 +79,43 @@ describe('expertSections pure functions', () => {
     assert.equal(canReorderInExpertMode({ role: 'executor' }, { role: null }), true, '空角色併入執行者區')
     assert.equal(canReorderInExpertMode({ role: 'executor' }, { role: null, scheduled: true }), false)
   })
+
+  test('roleToExpertSection: shared overrides every role', () => {
+    assert.equal(roleToExpertSection(null, false, true), 'shared')
+    assert.equal(roleToExpertSection('specialist', false, true), 'shared')
+    assert.equal(roleToExpertSection('executor', false, true), 'shared')
+    assert.equal(roleToExpertSection('scheduler', false, true), 'shared')
+    assert.equal(roleToExpertSection('manager', false, true), 'shared')
+  })
+
+  test('groupExpertSections: shared bots (restricted and trusted) form their own section after executor', () => {
+    const bots: (Pick<Bot, 'id'> & Partial<Bot>)[] = [
+      { id: 'ai-cc', role: null, share_profile: 'restricted' },
+      { id: 'exec', role: 'executor', share_profile: null },
+      { id: 'helper', role: 'specialist', share_profile: 'trusted' },
+      { id: 'sched', role: 'scheduler', share_profile: null },
+    ]
+    const secs = groupExpertSections(bots)
+    assert.deepEqual(secs.map((s) => [s.role, s.title, s.abbr, s.items.map((b) => b.id)]), [
+      ['executor', '執行者', 'Wkr', ['exec']],
+      ['shared', '分享用', '', ['ai-cc', 'helper']],
+      ['scheduler', '排程專用', '', ['sched']],
+    ])
+  })
+
+  test('groupExpertSections: no shared bots means no shared section', () => {
+    const secs = groupExpertSections([{ id: 'e', role: 'executor', share_profile: null }])
+    assert.deepEqual(secs.map((s) => s.role), ['executor'])
+  })
+
+  test('canReorderInExpertMode: shared bots reorder only among shared bots', () => {
+    const shared = { role: null, share_profile: 'restricted' as const }
+    const sharedTrusted = { role: 'executor' as const, share_profile: 'trusted' as const }
+    assert.equal(canReorderInExpertMode(shared, sharedTrusted), true)
+    assert.equal(canReorderInExpertMode(shared, { role: 'executor' }), false)
+    assert.equal(canReorderInExpertMode({ role: 'specialist' }, shared), false)
+    assert.equal(canReorderInExpertMode({ role: 'executor' }, shared), false)
+  })
 })
 
 test('段落標題帶英文縮寫：Mgr／Spc／Adv／Wkr（2026-11-07 使用者）', () => {

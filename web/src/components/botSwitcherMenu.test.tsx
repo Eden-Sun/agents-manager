@@ -28,3 +28,15 @@ test('專家模式：副管理者在管理者之後，且帶副標示', () => {
   assert.equal((html.match(/bot-deputy-tag/g) ?? []).length, 1)
   assert.match(html, /副管理者.*120/)
 })
+
+test('專家模式：分享 bot 歸「分享用」分段，排在執行者之後，沒有段縮寫', () => {
+  const expert = { ...project, mode: 'expert' } as Project
+  const members = [
+    { ...bots[0], role: 'executor', share_profile: null },
+    { ...bots[1], role: null, share_profile: 'restricted' },
+  ] as Bot[]
+  const html = renderToStaticMarkup(<BotSwitcherMenu groups={[{ project: expert, bots: members }]} onPick={() => {}} />)
+  assert.ok(html.indexOf('執行者') < html.indexOf('分享用'))
+  assert.ok(html.indexOf('分享用') < html.indexOf('two'))
+  assert.ok(html.indexOf('one') < html.indexOf('分享用'))
+})

@@ -425,7 +425,7 @@ function BotRowImpl({
             {}
             {isExpertProject && !compact && bot.role_pending ? <ExpertRoleTag role={bot.role} rolePending /> : null}
             {}
-            {isExpertProject && !compact && !bot.parent_bot_id && !bot.role && !bot.scheduled ? <UnsetRoleBadge botId={botId} /> : null}
+            {isExpertProject && !compact && !bot.parent_bot_id && !bot.role && !bot.scheduled && !bot.share_profile ? <UnsetRoleBadge botId={botId} /> : null}
             {}
             {isExpertProject && compact && bot.parent_bot_id && bot.role ? <ExpertRoleTag role={bot.role} /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}

@@ -364,6 +364,7 @@ export default {
   '{ok} 顆已更新，{fail} 顆沒成功': '{ok} updated, {fail} failed',
   '這顆 Bot 還沒有角色：點了選角色': 'This bot has no role yet — click to pick one',
   '排程專用': 'Scheduler',
+  '分享用': 'Shared',
   '管': 'Mgr',
   '顧': 'Adv',
   '執': 'Wkr',

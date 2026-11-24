@@ -1,7 +1,7 @@
 import type { Bot } from '../api/types'
 import { t } from './i18n'
 
-export type ExpertRole = 'manager' | 'specialist' | 'advisor' | 'executor' | 'scheduler'
+export type ExpertRole = 'manager' | 'specialist' | 'advisor' | 'executor' | 'shared' | 'scheduler'
 
 export interface ExpertSection<T extends { role?: Bot['role'] }> {
   role: ExpertRole
@@ -11,15 +11,16 @@ export interface ExpertSection<T extends { role?: Bot['role'] }> {
   items: T[]
 }
 
-export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'scheduler'] as const
+export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'shared', 'scheduler'] as const
 
-const ROLE_ABBR: Record<ExpertRole, string> = { manager: 'Mgr', specialist: 'Spc', advisor: 'Adv', executor: 'Wkr', scheduler: '' }
+const ROLE_ABBR: Record<ExpertRole, string> = { manager: 'Mgr', specialist: 'Spc', advisor: 'Adv', executor: 'Wkr', shared: '', scheduler: '' }
 
 export function roleAbbr(role: ExpertRole): string {
   return ROLE_ABBR[role]
 }
 
-export function roleToExpertSection(role: Bot['role'], scheduled = false): ExpertRole {
+export function roleToExpertSection(role: Bot['role'], scheduled = false, shared = false): ExpertRole {
+  if (shared) return 'shared'
   if (role === 'manager') return 'manager'
   if (role === 'specialist') return 'specialist'
   if (role === 'advisor') return 'advisor'
@@ -42,15 +43,17 @@ export function roleTitle(role: Bot['role'] | ExpertRole): string {
   if (role === 'advisor') return t('顧問')
   if (role === 'executor') return t('執行者')
   if (role === 'scheduler') return t('排程專用')
+  if (role === 'shared') return t('分享用')
   return ''
 }
 
-export function groupExpertSections<T extends { id: string; role?: Bot['role']; scheduled?: boolean }>(items: readonly T[], deputyBotId?: string | null): ExpertSection<T>[] {
+export function groupExpertSections<T extends { id: string; role?: Bot['role']; scheduled?: boolean; share_profile?: Bot['share_profile'] }>(items: readonly T[], deputyBotId?: string | null): ExpertSection<T>[] {
   const buckets: Record<ExpertRole, T[]> = {
     manager: [],
     specialist: [],
     advisor: [],
     executor: [],
+    shared: [],
     scheduler: [],
   }
 
@@ -60,7 +63,7 @@ export function groupExpertSections<T extends { id: string; role?: Bot['role']; 
       deputy = item
       continue
     }
-    const bucket = roleToExpertSection(item.role, item.scheduled)
+    const bucket = roleToExpertSection(item.role, item.scheduled, Boolean(item.share_profile))
     buckets[bucket].push(item)
   }
   if (deputy) buckets.manager.push(deputy)
@@ -82,6 +85,9 @@ export function groupExpertSections<T extends { id: string; role?: Bot['role']; 
   return sections
 }
 
-export function canReorderInExpertMode(source: { role?: Bot['role']; scheduled?: boolean }, target: { role?: Bot['role']; scheduled?: boolean }): boolean {
-  return roleToExpertSection(source.role, source.scheduled) === roleToExpertSection(target.role, target.scheduled)
+export function canReorderInExpertMode(
+  source: { role?: Bot['role']; scheduled?: boolean; share_profile?: Bot['share_profile'] },
+  target: { role?: Bot['role']; scheduled?: boolean; share_profile?: Bot['share_profile'] },
+): boolean {
+  return roleToExpertSection(source.role, source.scheduled, Boolean(source.share_profile)) === roleToExpertSection(target.role, target.scheduled, Boolean(target.share_profile))
 }
