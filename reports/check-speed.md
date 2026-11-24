@@ -134,3 +134,18 @@ check.sh 守衛 `session_production_code_reaches_other_features_only_through_por
 (a) 牆鐘中位數由 81.04 秒到 69.73 秒（約 −14%），daemon lib test 由 75.40 秒到 64.09 秒（約 −15%）：daemon 測試執行檔不再重編一份 lifecycle 原始碼。撤前第二筆偏高，兩筆樣本只能看出方向。(b) 由 24.97 秒到 23.23 秒，在雜訊範圍內；crate-only 路徑本來就不經過 daemon，撤掛載不影響它。改 am-lifecycle 後跑 daemon 測試仍要整個重編 daemon（依賴鏈），只改 lifecycle 時用 `cargo test -p am-lifecycle` 約 23 秒即可得到 crate 內的回饋。
 
 撤後改 daemon 一行仍要約 64 秒的 daemon lib test，時間在 daemon 自己的程式碼與測試（約 6,160 條）。要再下降，需要把 daemon 的熱區或測試繼續拆出去，不是 lifecycle 掛載的問題。
+
+### r7 的情境 (a)
+
+r7（8 核、15 GiB，當時不在建置主機設定裡）直接以 ssh 在同一個目錄、同一份 target 建置：撤前 `e65c5dc72^`、撤後 `e65c5dc72` 的原始碼依序以 rsync `--checksum` 同步進來（含本機 `web/dist`），各冷編一次，再改 `daemon/src/webpush.rs` 一行，`cargo test -p agents-managerd --no-run --timings` 兩次。1 分鐘負載 ≤ 6 才取樣，不經 shim 與遠端同步，所以牆鐘比本機少了同步與排隊。
+
+| 樣本 | 牆鐘秒 | daemon lib test 秒 | daemon lib 秒 |
+| --- | ---: | ---: | ---: |
+| 撤前冷編 | 448.74 | 377.41 | 136.93 |
+| 撤前 1 | 53.52 | 52.69 | 17.84 |
+| 撤前 2 | 52.65 | 49.39 | 15.19 |
+| 撤後冷編 | 379.06 | 363.44 | 87.03 |
+| 撤後 1 | 42.39 | 41.64 | 16.00 |
+| 撤後 2 | 40.05 | 39.41 | 12.06 |
+
+牆鐘中位數 53.09 秒到 41.22 秒（約 −22%），daemon lib test 51.04 秒到 40.53 秒（約 −21%），方向與本機一致，r7 兩組樣本的差距較穩定。
