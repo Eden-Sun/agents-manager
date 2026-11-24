@@ -245,7 +245,7 @@ async fn a_remote_install_writes_the_dispatcher_and_merges_only_our_keys_into_th
     std::fs::write(&settings, json!({"trustedWorkspaces": ["/work/a"], "toolPermission": "request-review"}).to_string()).unwrap();
     let (conn, _host) = remote_conn(&env, &home).await;
 
-    assert!(install_remote(&conn, None).await.unwrap(), "第一次要寫");
+    assert!(install_remote(&conn, None, None).await.unwrap(), "第一次要寫");
     let dispatcher = home.join(ROOT).join(cfg::DISPATCH_SH);
     assert_eq!(std::fs::metadata(&dispatcher).unwrap().permissions().mode() & 0o777, 0o700);
     assert_eq!(std::fs::read_to_string(&dispatcher).unwrap(), dispatch_sh(ROOT, None));
@@ -262,7 +262,7 @@ async fn a_remote_install_writes_the_dispatcher_and_merges_only_our_keys_into_th
     assert_eq!(s["statusLine"]["command"], format!("{} state", sh_quote(&dispatcher.to_string_lossy())));
     assert_eq!(s["statusLine"]["stack_with_default"], true);
 
-    assert!(!install_remote(&conn, None).await.unwrap(), "已經對了：不重寫");
+    assert!(!install_remote(&conn, None, None).await.unwrap(), "已經對了：不重寫");
 }
 
 #[tokio::test]
@@ -270,7 +270,7 @@ async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_an
     let env = tt::env().await;
     let home = tt::scratch_dir("am-agy-remote-fresh");
     let (conn, _) = remote_conn(&env, &home).await;
-    assert!(install_remote(&conn, None).await.unwrap());
+    assert!(install_remote(&conn, None, None).await.unwrap());
     let hooks = home.join(".gemini/config/hooks.json");
     assert_eq!(std::fs::metadata(&hooks).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(read_json(&hooks)["agents-manager"]["Stop"].is_array());
@@ -281,7 +281,7 @@ async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_an
     let mine = json!({"statusLine": {"type": "command", "command": "/home/u/mine-status.sh"}});
     std::fs::write(&settings, mine.to_string()).unwrap();
     let (conn, _) = remote_conn(&env, &home).await;
-    install_remote(&conn, None).await.unwrap();
+    install_remote(&conn, None, None).await.unwrap();
     assert_eq!(read_json(&settings), mine, "使用者的 statusLine 一個字不改");
     assert!(home.join(".gemini/config/hooks.json").is_file());
 
@@ -290,7 +290,7 @@ async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_an
     std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
     std::fs::write(&hooks, "{ not json").unwrap();
     let (conn, _) = remote_conn(&env, &home).await;
-    let err = install_remote(&conn, None).await.unwrap_err();
+    let err = install_remote(&conn, None, None).await.unwrap_err();
     assert!(format!("{err:#}").contains("not valid JSON"), "{err:#}");
     assert_eq!(std::fs::read_to_string(&hooks).unwrap(), "{ not json");
 }
@@ -300,8 +300,8 @@ async fn an_isolated_instance_gets_its_own_dispatcher_and_hook_name() {
     let env = tt::env().await;
     let home = tt::scratch_dir("am-agy-remote-iso");
     let (conn, _) = remote_conn(&env, &home).await;
-    install_remote(&conn, None).await.unwrap();
-    install_remote(&conn, Some("iso")).await.unwrap();
+    install_remote(&conn, None, None).await.unwrap();
+    install_remote(&conn, Some("iso"), None).await.unwrap();
     let h = read_json(&home.join(".gemini/config/hooks.json"));
     assert!(h["agents-manager"].is_object() && h["agents-manager-iso"].is_object(), "各實例一個具名 hook：{h}");
     let iso = home.join(ROOT).join("instances/iso").join(cfg::DISPATCH_SH);
@@ -357,4 +357,17 @@ fn starting_on_a_host_without_agy_points_at_the_install_prompt() {
     assert!(crate::kind_probe::verdict("mac_builder", "agy", None).is_ok());
     assert!(crate::kind_probe::verdict("mac_builder", "agy", Some("/Users/me/.local/bin/agy".into())).is_ok());
     assert!(crate::kind_probe::verdict(crate::config::LOCAL_HOST, "agy", Some(String::new())).unwrap_err().starts_with("本機尚未安裝 agy"));
+}
+
+#[tokio::test]
+async fn an_identity_home_gets_its_own_hooks_while_the_dispatcher_stays_in_the_real_home() {
+    let env = tt::env().await;
+    let home = tt::scratch_dir("am-agy-remote-identity-real");
+    let shadow = tt::scratch_dir("am-agy-remote-identity-shadow");
+    let (conn, _host) = remote_conn(&env, &home).await;
+    assert!(install_remote(&conn, None, Some(&shadow.to_string_lossy())).await.unwrap());
+    assert!(home.join(ROOT).join(cfg::DISPATCH_SH).exists());
+    assert!(shadow.join(".gemini/config/hooks.json").exists());
+    assert!(shadow.join(".gemini/antigravity-cli/settings.json").exists());
+    assert!(!home.join(".gemini/config/hooks.json").exists());
 }

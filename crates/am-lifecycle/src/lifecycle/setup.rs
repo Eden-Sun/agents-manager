@@ -861,7 +861,7 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                 vec![]
             }
             "agy" => {
-                if let Err(e) = crate::agy_remote::install_remote(&conn, app.instance().as_deref()).await {
+                if let Err(e) = crate::agy_remote::install_remote(&conn, app.instance().as_deref(), env.get("HOME").and_then(|v| v.as_str())).await {
                     tracing::warn!(bot = %bot.name, host = %project.host, error = %format!("{e:#}"), "could not install the remote agy hooks; the bot starts without them");
                 }
                 vec![]

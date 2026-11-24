@@ -127,3 +127,32 @@ async fn statusline_task_count_and_agent_state_hold_the_turn_then_release_when_i
     assert!(try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
     assert_eq!(turn_status(&app, &a).await, "completed_fallback");
 }
+
+fn quota_screen() -> String {
+    format!("⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in\n1h5m40s.\nError ID: aaae52fd-1\n{RULE}\n>\n{RULE}\n? for shortcuts   auto · Gemini 4 Carbon · high\n")
+}
+
+#[tokio::test]
+async fn an_agy_quota_banner_closes_the_turn_as_a_limit_hit_even_while_hooks_are_quiet_or_busy() {
+    let f = fixture().await;
+    let app = f.env.app.clone();
+    let a = a_turn(&app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    stop(&f, false).await;
+    f.env.herdr.set_screen(&format!("pane-{}", f.bot_id), &quota_screen());
+    assert!(try_fallback(&app, &f.run_id, Some(&a)).await.unwrap(), "撞限橫幅就收，不再輪詢");
+    assert_eq!(turn_status(&app, &a).await, "failed");
+    let hit = app.quotas.lock().await.values().filter_map(|q| q.limit_hit.clone()).next();
+    let hit = hit.expect("記了 quota limit_hit");
+    assert!(hit.message.contains("Individual quota reached") && hit.until.is_some(), "{hit:?}");
+    assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
+}
+
+#[tokio::test]
+async fn an_agy_idle_screen_without_a_quota_banner_is_unchanged() {
+    let f = fixture().await;
+    let app = f.env.app.clone();
+    let a = a_turn(&app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    assert!(try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
+    assert_eq!(turn_status(&app, &a).await, "completed_fallback");
+    assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()));
+}

@@ -145,10 +145,11 @@ fn write_dispatcher_script(path: &str, text: &str) -> String {
 
 /// bot 啟動（遠端）：裝／修 dispatcher 與兩個設定檔，回「有沒有改到東西」。失敗由呼叫端記 warn、bot 照常啟動
 /// （少的只是 hook 回報，畫面判讀還在——跟本機一樣）。
-pub async fn install_remote(conn: &HostConn, instance: Option<&str>) -> Result<bool> {
-    let home = conn.home().await?;
+pub async fn install_remote(conn: &HostConn, instance: Option<&str>, identity_home: Option<&str>) -> Result<bool> {
+    let real_home = conn.home().await?;
+    let home = identity_home.map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| real_home.clone(), str::to_owned);
     let root = crate::hosts::remote_root_for(instance);
-    let dispatcher = format!("{home}/{root}/{}", cfg::DISPATCH_SH);
+    let dispatcher = format!("{real_home}/{root}/{}", cfg::DISPATCH_SH);
     let text = dispatch_sh(&root, instance);
     let out = conn.ssh_exec(&write_dispatcher_script(&dispatcher, &text)).await?;
     if !out.contains("AM_AGY_DISPATCH_OK") {

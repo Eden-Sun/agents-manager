@@ -222,6 +222,11 @@ fn is_chrome(s: &str) -> bool {
         || lifecycle::is_activity_shape(s)
         || s.contains("Update installed")
         || is_token_count(s)
+        || is_agy_chrome(s)
+}
+
+fn is_agy_chrome(s: &str) -> bool {
+    s == ">" || s.starts_with("Error ID:") || s.contains("? for shortcuts")
 }
 
 fn is_token_count(s: &str) -> bool {

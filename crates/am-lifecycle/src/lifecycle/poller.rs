@@ -1701,15 +1701,21 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
 
-    if pane_still_busy(&read.text) {
+    let agy_hit = if bot.kind == "agy" {
+        crate::turn_error::api_error_line(&read.text).filter(|l| crate::turn_error::is_quota_exhaustion(l))
+    } else {
+        None
+    };
+
+    if agy_hit.is_none() && pane_still_busy(&read.text) {
         tracing::debug!(run_id, "pane still shows a spinner; not completing the turn from it");
         return Ok(false);
     }
-    if bot.kind == "agy" && super::agy_busy::should_hold(&run.id, &turn.id, &read.text) {
+    if agy_hit.is_none() && bot.kind == "agy" && super::agy_busy::should_hold(&run.id, &turn.id, &read.text) {
         tracing::debug!(run_id, "agy is not fully idle; not completing the turn from the pane");
         return Ok(false);
     }
-    let agy_reply = if bot.kind == "agy" {
+    let agy_reply = if bot.kind == "agy" && agy_hit.is_none() {
         match agy_transcript_outcome(app, &run, &turn).await {
             AgyNative::Reply(reply) => Some(reply),
             AgyNative::Ongoing => {
@@ -1727,13 +1733,13 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     } else {
         None
     };
-    if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
+    if agy_hit.is_none() && (crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some()) {
         tracing::debug!(run_id, "pane is waiting at a numbered menu; not completing the turn from it");
         return Ok(false);
     }
     let fresh_probe = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
     let probe = extract_reply(&bot.kind, &fresh_probe).or_else(|| clean_screen(&bot.kind, &fresh_probe)).unwrap_or_default();
-    if is_tool_progress(&probe) {
+    if agy_hit.is_none() && is_tool_progress(&probe) {
         tracing::debug!(run_id, "pane is still mid-tool-call; not completing the turn from it");
         return Ok(false);
     }
@@ -1751,7 +1757,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         };
         super::limit_banner::fallback_hit(run_id, &read.text, limits(&fresh), limits(&read.text))
     } else {
-        None
+        agy_hit
     };
 
     let compact_turn = if bot.kind == "codex" && codex_hit.is_none() {
@@ -1943,7 +1949,12 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             screen: read.text.clone(),
         })
         .await;
-        if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await {
+        let marked = if bot.kind == "agy" {
+            crate::turn_error::mark_agy_limit_hit(app, &bot, &hit).await
+        } else {
+            crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await
+        };
+        if let Err(e) = marked {
             tracing::warn!(turn = %turn.id, error = %e, "codex limit hit owed; it holds this bot until it is recorded");
         }
         emit_turn(app, &turn.id).await;
