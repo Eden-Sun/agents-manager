@@ -114,6 +114,14 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
     Some(dialog)
 }
 
+pub fn shortcuts_help_open(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(3)..].iter().any(|l| {
+        let n = norm(l);
+        n.starts_with("keyboard:") && n.contains("esc close")
+    })
+}
+
 /// 一行是不是輸入框的上下框線（整行都是 `─`，至少 20 格）。
 fn is_rule(line: &str) -> bool {
     let t = crate::composer_parse::strip_ansi(line);
@@ -192,6 +200,14 @@ mod tests {
    No, exit
 ";
     const PERMISSION: &str = "\n ⚡ Run this command?\n\n   git status\n   Reason: check the tree\n\n > Allow once\n   Deny\n";
+    #[test]
+    fn shortcuts_help_is_told_from_the_composer() {
+        let help = " Keyboard Shortcuts\n > /   Open slash commands\n  [1-14 of 27 items]\n Keyboard: ↑/↓ Navigate  ←/→ Switch View  esc Close\n";
+        assert!(shortcuts_help_open(help));
+        assert!(!shortcuts_help_open("──────\n>\n──────\n ? for shortcuts      Gemini 4 Neon · high\n"));
+        assert!(!shortcuts_help_open("Keyboard: ↑/↓ Navigate  esc Close\nmore\nmore\nmore\nmore\n"));
+    }
+
     const MAIN: &str = "\
  Antigravity CLI 1.2.16
  Gemini 3.1 Pro (Low)

@@ -813,6 +813,30 @@ pub(super) fn typed_tail(text: &str) -> usize {
     super::poller::COMPOSER_TAIL + (text.matches('\n').count() + 1).min(300)
 }
 
+const BRACKETED_PASTE_OPEN: &str = "\x1b[200~";
+const BRACKETED_PASTE_CLOSE: &str = "\x1b[201~";
+
+/// agy 空輸入列的第一個 `?` 會被當成「開快捷鍵說明」而不進輸入列；用 bracketed paste 包住那一個字元，其餘照舊直送，原文一字不改。
+pub(super) fn send_pieces(kind: &str, text: &str) -> Vec<String> {
+    match text.strip_prefix('?') {
+        Some(rest) if kind == "agy" => {
+            let mut pieces = vec![format!("{BRACKETED_PASTE_OPEN}?{BRACKETED_PASTE_CLOSE}")];
+            if !rest.is_empty() {
+                pieces.push(rest.to_string());
+            }
+            pieces
+        }
+        _ => vec![text.to_string()],
+    }
+}
+
+async fn send_typed(client: &HerdrClient, pane: &str, kind: &str, text: &str) -> anyhow::Result<()> {
+    for piece in send_pieces(kind, text) {
+        client.pane_send_text(pane, &piece).await?;
+    }
+    Ok(())
+}
+
 /// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
 pub async fn type_text(
     app: &impl LcHost,
@@ -864,13 +888,22 @@ pub async fn type_text(
             return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
         }
     };
+    if bot.kind == "agy" && crate::agy_screen::shortcuts_help_open(&before) {
+        client.pane_send_keys(&pane, &["esc"]).await?;
+        return Ok(Typing::Done(Delivered::NotAttempted { reason: "shortcuts_help_open", retry: true }));
+    }
     if let Err(not) = composer_ready(app, run, &bot.kind, &before).await {
         return Ok(Typing::Done(not));
     }
 
-    client.pane_send_text(&pane, text).await?;
+    send_typed(client, &pane, &bot.kind, text).await?;
     tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
     let mut seen = read().await?;
+    if bot.kind == "agy" && crate::agy_screen::shortcuts_help_open(&seen) {
+        client.pane_send_keys(&pane, &["esc"]).await?;
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+        return Ok(Typing::Done(Delivered::NotAttempted { reason: "shortcuts_help_open", retry: true }));
+    }
     if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&seen).is_some() {
         if super::claude_resume_menu::accept_on(app, run, client).await.is_err() {
             return Ok(Typing::Done(Delivered::Unproven(super::claude_resume_menu::PENDING)));
@@ -887,7 +920,7 @@ pub async fn type_text(
     }
     if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
-        client.pane_send_text(&pane, text).await?;
+        send_typed(client, &pane, &bot.kind, text).await?;
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
         if box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty {
@@ -1197,6 +1230,18 @@ mod plain_warn_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agy_leading_question_mark_is_pasted_alone_and_the_text_is_unchanged() {
+        let joined = |k: &str, t: &str| super::send_pieces(k, t).concat();
+        assert_eq!(super::send_pieces("agy", "?"), vec!["\x1b[200~?\x1b[201~".to_string()]);
+        let p = super::send_pieces("agy", "?abc\ndef");
+        assert_eq!(p, vec!["\x1b[200~?\x1b[201~".to_string(), "abc\ndef".to_string()]);
+        assert_eq!(super::send_pieces("agy", "abc?"), vec!["abc?".to_string()]);
+        assert_eq!(super::send_pieces("claude", "?abc"), vec!["?abc".to_string()]);
+        assert_eq!(super::send_pieces("codex", "?"), vec!["?".to_string()]);
+        assert_eq!(joined("claude", "?x"), "?x");
+    }
+
     /// 送後核對的補按規則（`may_press_retry_submit`）：只有「完整比對仍是自己的草稿、沒有送達證據、還沒補按過」才補一次。
     const LONG_SCREEN: &str = include_str!("fixtures/codex-synthetic-long-draft.txt");
     const LONG_TEXT: &str = include_str!("fixtures/codex-synthetic-long-draft.expected.txt");
