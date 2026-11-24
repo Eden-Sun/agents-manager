@@ -48,6 +48,17 @@ macro_rules! test_visible_struct {
     };
 }
 
+macro_rules! test_visible_item {
+    ($visibility:vis, $(#[$attribute:meta])* $keyword:ident $($item:tt)+) => {
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+        $(#[$attribute])*
+        pub $keyword $($item)+
+        #[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+        $(#[$attribute])*
+        $visibility $keyword $($item)+
+    };
+}
+
 pub mod messages;
 pub mod relay_watch;
 pub mod dead_panes;
@@ -146,7 +157,7 @@ pub mod native_transport_prototype;
 pub use crate::race_point;
 /// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
 /// #188：子 agent 不能走 stop + start；夾具（一顆有真 mock pane 的子 agent）給批次重啟的測試共用。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub mod restart_kind_tests;
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a

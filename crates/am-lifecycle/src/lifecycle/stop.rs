@@ -507,7 +507,8 @@ pub async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, 
     admit_idle_stop_with_notice(db, run_id, bot_id, allow_queued, None).await
 }
 
-pub(crate) async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool, idle_at: Option<&str>) -> Result<super::run_state::Moved, sqlx::Error> {
+test_visible_item! { pub(crate),
+async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool, idle_at: Option<&str>) -> Result<super::run_state::Moved, sqlx::Error> {
     let queued = if allow_queued {
         ""
     } else {
@@ -531,6 +532,7 @@ pub(crate) async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &
     if let Some(idle) = idle_at { q = q.bind(idle); }
     let r = q.execute(db).await?;
     Ok(if r.rows_affected() == 0 { super::run_state::Moved::Lost } else { super::run_state::Moved::Applied })
+}
 }
 
 /// `stopping → stopped`。CAS 輸了而且是被不拿 bot 鎖的 pane-exit 事件收成 `exited`（多半是 stop 自己關的 pane

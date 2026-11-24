@@ -279,8 +279,8 @@ pub async fn accept_turn_close(app: &Arc<App>) {
 }
 
 /// 測試用：這顆 bot 的對話裡放一筆回合；`in_flight` 的掛在 `run_id` 底下。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, status: &str) -> String {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn a_turn(app: &impl Db, bot_id: &str, run_id: Option<&str>, status: &str) -> String {
     let conv = db::conversation_id(app.db(), bot_id).await.unwrap();
     let id = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web',?,'ok','派工',?)")
@@ -295,8 +295,8 @@ pub async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, status: 
     id
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn turn_status(app: &Arc<App>, turn_id: &str) -> String {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn turn_status(app: &impl Db, turn_id: &str) -> String {
     sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 

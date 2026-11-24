@@ -170,12 +170,15 @@ fn pending_runs() -> &'static std::sync::Mutex<PendingRuns> {
     T.get_or_init(Default::default)
 }
 
+test_visible_item! { pub(crate),
 #[derive(Default)]
-pub(crate) struct GiveUps(std::collections::HashMap<(String, &'static str), std::time::Instant>);
+struct GiveUps(std::collections::HashMap<(String, &'static str), std::time::Instant>);
+}
 
 impl GiveUps {
     /// 這個 run 的這個原因是不是第一次（順手記下來）。`now` 由呼叫端給，測試不必真的等。
-    pub(crate) fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
+    test_visible_item! { pub(crate),
+    fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
         let key = (run_id.to_string(), reason);
         if let Some(at) = self.0.get(&key).copied() {
             if now.saturating_duration_since(at) <= GIVE_UP_TTL {
@@ -191,11 +194,14 @@ impl GiveUps {
         self.0.insert(key, now);
         true
     }
+    }
 }
 
-pub(crate) fn gave_up() -> &'static std::sync::Mutex<GiveUps> {
+test_visible_item! { pub(crate),
+fn gave_up() -> &'static std::sync::Mutex<GiveUps> {
     static T: std::sync::OnceLock<std::sync::Mutex<GiveUps>> = std::sync::OnceLock::new();
     T.get_or_init(Default::default)
+}
 }
 
 /// 放棄自動確認：同一個原因每個 run 只寫一次 WARN，然後回 `PENDING`（呼叫端據此重試）。

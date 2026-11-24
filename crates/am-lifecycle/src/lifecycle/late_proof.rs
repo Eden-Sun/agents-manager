@@ -600,7 +600,8 @@ pub fn arm_after_owed_write(app: &(impl LcHost + Clone + 'static), run_id: &str,
 
 /// 欠帳補寫成 unknown 後，從 durable 列接回同一回合的基準。`Ok(false)`＝列不在或回合還不是 unknown，什麼都不做。
 /// 用注入的時間判斷列還有沒有效（測試不靠牆鐘）。
-pub(crate) async fn restore_owed_from_durable_at(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, now: &str) -> anyhow::Result<bool> {
+test_visible_item! { pub(crate),
+async fn restore_owed_from_durable_at(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, now: &str) -> anyhow::Result<bool> {
     match load_pending_for_owed(app.db(), run_id, turn_id, now).await? {
         Some(p) => {
             arm_pending(app, run_id, bot_id, turn_id, p);
@@ -608,6 +609,7 @@ pub(crate) async fn restore_owed_from_durable_at(app: &impl LcHost, run_id: &str
         }
         None => Ok(false),
     }
+}
 }
 
 async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &str, now: &str) -> anyhow::Result<Option<Pending>> {
@@ -660,7 +662,8 @@ fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: 
 
 /// 開一條背景 watcher，登記在 `background_tasks` 內：關機時取消，不會活到 60 次觀察跑完。
 /// 取消時 durable 列還在，下次開機照樣接回（測試也能直接呼叫，驗它跟關機屏障的關係）。
-pub(crate) fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
+test_visible_item! { pub(crate),
+fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
     let app = (*app).clone();
     let shutdown = app.shutdown().clone();
     let tasks = app.background_tasks().clone();
@@ -671,6 +674,7 @@ pub(crate) fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             _ = watch(&app, &run_id, &bot_id, &turn_id, &p, CHECKS, CHECK_EVERY) => {}
         }
     });
+}
 }
 
 #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
