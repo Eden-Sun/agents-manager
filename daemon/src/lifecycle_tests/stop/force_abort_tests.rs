@@ -128,7 +128,7 @@ async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
     let live = f.env.herdr.live.clone();
-    crate::lifecycle::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-a").unwrap();
         pane.composer = vec!["user draft B".into()];
@@ -148,7 +148,7 @@ async fn a_force_abort_rechecks_the_composer_before_clearing_it() {
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
     let live = f.env.herdr.live.clone();
-    crate::lifecycle::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-a").unwrap();
         pane.composer = vec!["user draft B".into()];
@@ -167,7 +167,7 @@ async fn a_force_abort_rejects_a_frame_position_change_with_the_same_composer_te
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
     let live = f.env.herdr.live.clone();
-    crate::lifecycle::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-a").unwrap();
         pane.revision = pane.revision.max(1) + 1;
@@ -200,7 +200,7 @@ async fn a_force_abort_does_not_clear_after_its_run_and_pane_are_replaced() {
     let bot_id = f.bot_id.clone();
     let old_run = f.run_id.clone();
     let live = f.env.herdr.live.clone();
-    crate::lifecycle::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
             .bind(old_run)
             .execute(&app.db)
@@ -237,7 +237,7 @@ async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
         .unwrap();
     let app = f.env.app.clone();
     let run_id = f.run_id.clone();
-    crate::lifecycle::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET native_session_id='session-B' WHERE id=?")
             .bind(run_id)
             .execute(&app.db)
@@ -300,7 +300,7 @@ async fn nr1913_zero_revision_abort_rejects_changed_screen_with_same_prompt() {
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
     let live = f.env.herdr.live.clone();
-    crate::lifecycle::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+    crate::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         live.lock().unwrap().get_mut("pane-a").unwrap().transcript.push("new output".into());
     });
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();

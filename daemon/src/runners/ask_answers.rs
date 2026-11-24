@@ -382,7 +382,7 @@ mod tests {
         let race_app = app.clone();
         let race_turn = turn.clone();
         let race_status = status.to_string();
-        crate::lifecycle::race_point::arm("hook_before_complete_cas", &turn, move || async move {
+        crate::race_point::arm("hook_before_complete_cas", &turn, move || async move {
             sqlx::query(
                 "UPDATE turns SET status=?, native_session_id='session-1480', native_turn_id='turn-1480', completed_at=? WHERE id=?",
             )

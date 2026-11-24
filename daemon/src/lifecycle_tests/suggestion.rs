@@ -214,7 +214,7 @@ mod tests {
     async fn a_box_that_holds_something_else_after_tab_is_left_alone() {
         let f = idle(Some(SUGGESTION)).await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("suggestion_before_tab", &f.bot_id, move || async move {
+        crate::race_point::arm("suggestion_before_tab", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             let p = live.get_mut("pane-s").unwrap();
             p.suggestion = None;
@@ -235,7 +235,7 @@ mod tests {
     async fn when_enter_is_refused_after_tab_the_accepted_text_is_cleared_again() {
         let f = idle(Some(SUGGESTION)).await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             live.get_mut("pane-s").unwrap().transcript.push("new output before Enter".into());
         });
@@ -253,7 +253,7 @@ mod tests {
     async fn the_restore_never_clears_text_that_is_not_the_accepted_suggestion() {
         let f = idle(Some(SUGGESTION)).await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             let p = live.get_mut("pane-s").unwrap();
             p.composer = vec!["別人剛打的字".into()];
@@ -277,7 +277,7 @@ mod tests {
         let f = idle(Some(SUGGESTION)).await;
         crate::prompt_suggestion::set(&f.run_id, Some(SUGGESTION.into()));
         let app = f.env.app.clone();
-        crate::lifecycle::race_point::arm("draft_before_turn_tx", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_turn_tx", &f.bot_id, move || async move {
             sqlx::query("CREATE TRIGGER fault_turns BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'transient db error'); END")
                 .execute(&app.db)
                 .await

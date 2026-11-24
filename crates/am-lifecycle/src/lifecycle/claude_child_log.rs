@@ -79,12 +79,14 @@ pub(crate) fn user_prompt_raw(v: &Value) -> Option<String> {
 }
 
 /// 一行 `user` 是不是人打的一問；是就回使用者當初送出的字（`<pasted_content>` 拆開後）。中斷標記、空白、CLI 回音、compact 摘要都不是。
-pub(crate) fn is_human_prompt_row(v: &Value) -> Option<String> {
+test_visible_item! { pub(crate),
+fn is_human_prompt_row(v: &Value) -> Option<String> {
     let raw = user_prompt_raw(v)?;
     if raw.trim().is_empty() || is_interrupt_marker(&raw) {
         return None;
     }
     Some(crate::pasted_content::original(&raw).into_owned())
+}
 }
 
 pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
@@ -190,13 +192,16 @@ fn parts_text_lossy(content: &Value) -> Option<String> {
 }
 
 /// 對話檔裡最新一則 assistant 行回報的 model／effort（各自取最新的一個）。
+test_visible_item! { pub(crate),
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeSeen {
+struct RuntimeSeen {
     pub model: Option<String>,
     pub effort: Option<String>,
 }
+}
 
-pub(crate) fn parse_runtime(text: &str) -> RuntimeSeen {
+test_visible_item! { pub(crate),
+fn parse_runtime(text: &str) -> RuntimeSeen {
     let mut seen = RuntimeSeen::default();
     for line in text.lines().rev() {
         if seen.model.is_some() && seen.effort.is_some() {
@@ -224,6 +229,7 @@ pub(crate) fn parse_runtime(text: &str) -> RuntimeSeen {
     }
     seen
 }
+}
 
 /// `claude-sonnet-5-5` 與別名 `sonnet` 算同一家族（別名由 server 決定指到哪一版，不是分歧；帶 `[1m]` context 變體亦同）。
 fn same_family_alias(alias: &str, id: &str) -> bool {
@@ -241,7 +247,8 @@ fn same_family_alias(alias: &str, id: &str) -> bool {
 /// child（`managed_by = 'child'`）的 `bots.model`／`effort` 跟著這次真的變了的欄位走（跟 claude 畫面巡邏、grok、codex 一樣）：
 /// 不然 CLI 裡切過之後 runtime 與設定永遠分歧、常駐 ⟳，按下去還用舊設定重開（issue #938）。
 /// 只跟「這一輪 runtime 變了的」欄位，不拿 bots 逐次比對——網頁改了 child 設定、還沒套用時會被蓋回去。
-pub(crate) async fn record_runtime(
+test_visible_item! { pub(crate),
+async fn record_runtime(
     app: &(impl crate::capabilities::Db + crate::capabilities::BotStatusEmit + crate::capabilities::Emit),
     bot: &db::Bot,
     run: &db::Run,
@@ -279,6 +286,7 @@ pub(crate) async fn record_runtime(
         Ok(_) => {}
         Err(e) => tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not record the claude runtime from its transcript, retrying next read"),
     }
+}
 }
 
 fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String {
@@ -388,9 +396,12 @@ pub async fn pending_tail_for_session(
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    pub use super::{parse_exchanges, is_human_prompt_row, record_runtime, parse_runtime, RuntimeSeen, LOG_MARK};
+    #[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
     pub(crate) use super::{parse_exchanges, is_human_prompt_row, record_runtime, parse_runtime, RuntimeSeen, LOG_MARK};
-    pub(crate) const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
-    pub(crate) fn split_output(out: &str) -> Option<(String, String)> { super::split_output(out) }
-    pub(crate) fn within_projects(path: &str, roots: &[String]) -> bool { super::within_projects(path, roots) }
-    pub(crate) fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String { super::read_script_tail_with_recorded(roots, sid, max, recorded) }
+    pub const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
+    pub fn split_output(out: &str) -> Option<(String, String)> { super::split_output(out) }
+    pub fn within_projects(path: &str, roots: &[String]) -> bool { super::within_projects(path, roots) }
+    pub fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String { super::read_script_tail_with_recorded(roots, sid, max, recorded) }
 }

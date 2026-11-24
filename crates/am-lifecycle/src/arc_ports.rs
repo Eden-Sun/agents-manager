@@ -768,7 +768,6 @@ mod arc_port_53_startservices {
             client: &crate::herdr::HerdrClient,
         ) -> impl Future<Output = std::result::Result<(), String>> + Send { <T as crate::lifecycle::s6_ports::StartServices>::apply_grok_startup_effort(self.as_ref(), bot, run_id, pane_id, client) }
         fn flush_once_running(&self, bot_id: &str, run_id: &str) { <T as crate::lifecycle::s6_ports::StartServices>::flush_once_running(self.as_ref(), bot_id, run_id) }
-        #[cfg(test)]
         fn spawn_adopted_capture(&self, run_id: &str, bot_id: &str) { <T as crate::lifecycle::s6_ports::StartServices>::spawn_adopted_capture(self.as_ref(), run_id, bot_id) }
         fn watch_pane_on_session(&self, host: &str, session: &str, pane: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::StartServices>::watch_pane_on_session(self.as_ref(), host, session, pane) }
         fn session_connected_with_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = bool> + Send { <T as crate::lifecycle::s6_ports::StartServices>::session_connected_with_host_fence(self.as_ref(), fence, session) }

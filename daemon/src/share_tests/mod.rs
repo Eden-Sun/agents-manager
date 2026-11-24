@@ -95,10 +95,10 @@ async fn concurrent_quota_uploads(app: Arc<App>, bot_id: String, token: String, 
         bytes.clone(),
     );
     let second_waiting = second_at_lock.clone();
-    crate::lifecycle::race_point::arm("share_upload_before_authority_lock", &format!("{bot_id}:second.txt"), move || async move {
+    crate::race_point::arm("share_upload_before_authority_lock", &format!("{bot_id}:second.txt"), move || async move {
         second_waiting.notify_one();
     });
-    crate::lifecycle::race_point::arm("share_upload_after_authority_lock", &bot_id, move || async move {
+    crate::race_point::arm("share_upload_after_authority_lock", &bot_id, move || async move {
         tokio::spawn(async move {
             let status = client().post(url2).query(&[("name", "second.txt")]).body(body2).send().await.unwrap().status().as_u16();
             *slot.lock().await = Some(status);
@@ -1315,7 +1315,7 @@ async fn share_downloads_and_listings_do_not_hold_the_bot_lock_during_io() {
     let probe = || {
         let free = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (app, free_hook, bot) = (e.app.clone(), free.clone(), b.id.clone());
-        crate::lifecycle::race_point::arm("share_io_after_authority_released", &b.id, move || async move {
+        crate::race_point::arm("share_io_after_authority_released", &b.id, move || async move {
             let lock = app.bot_mutex(&bot).await;
             let got = lock.try_lock().is_ok();
             free_hook.store(got, std::sync::atomic::Ordering::SeqCst);
@@ -1345,7 +1345,7 @@ async fn share_file_listings_run_one_at_a_time_per_share() {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
     let release = Arc::new(tokio::sync::Notify::new());
     let r2 = release.clone();
-    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+    crate::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
         let _ = entered_tx.send(());
         r2.notified().await;
     });
@@ -1370,7 +1370,7 @@ async fn a_queued_share_listing_rechecks_the_token_after_its_turn() {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
     let release = Arc::new(tokio::sync::Notify::new());
     let r2 = release.clone();
-    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+    crate::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
         let _ = entered_tx.send(());
         r2.notified().await;
     });
@@ -1397,7 +1397,7 @@ async fn share_file_listing_waiters_are_capped_and_rejected_at_once() {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
     let release = Arc::new(tokio::sync::Notify::new());
     let r2 = release.clone();
-    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+    crate::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
         let _ = entered_tx.send(());
         r2.notified().await;
     });
@@ -1895,7 +1895,7 @@ async fn an_upload_admitted_before_rotation_is_rejected_after_rotation() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (entered_hook, release_hook) = (entered.clone(), release.clone());
-    crate::lifecycle::race_point::arm("share_upload_after_bot_for", &b.id, move || async move {
+    crate::race_point::arm("share_upload_after_bot_for", &b.id, move || async move {
         entered_hook.notify_one();
         release_hook.notified().await;
     });
@@ -1922,7 +1922,7 @@ async fn a_message_admitted_before_disable_is_not_committed_after_disable() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (entered_hook, release_hook) = (entered.clone(), release.clone());
-    crate::lifecycle::race_point::arm("share_send_after_bot_for", &b.id, move || async move {
+    crate::race_point::arm("share_send_after_bot_for", &b.id, move || async move {
         entered_hook.notify_one();
         release_hook.notified().await;
     });
@@ -2075,7 +2075,7 @@ async fn enabling_share_after_the_bot_was_deleted_fails_the_live_check() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (entered_hook, release_hook) = (entered.clone(), release.clone());
-    crate::lifecycle::race_point::arm("share_admin_before_lock", &b.id, move || async move {
+    crate::race_point::arm("share_admin_before_lock", &b.id, move || async move {
         entered_hook.notify_one();
         release_hook.notified().await;
     });
@@ -2102,7 +2102,7 @@ async fn rotating_share_after_the_bot_was_deleted_fails_the_live_check() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (entered_hook, release_hook) = (entered.clone(), release.clone());
-    crate::lifecycle::race_point::arm("share_admin_before_lock", &b.id, move || async move {
+    crate::race_point::arm("share_admin_before_lock", &b.id, move || async move {
         entered_hook.notify_one();
         release_hook.notified().await;
     });

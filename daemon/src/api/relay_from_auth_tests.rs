@@ -219,7 +219,7 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
     }
     assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
     let live = f.e.herdr.live.clone();
-    crate::lifecycle::race_point::arm("draft_before_enter", &f.target, move || async move {
+    crate::race_point::arm("draft_before_enter", &f.target, move || async move {
         live.lock().unwrap().get_mut("pane-relay").unwrap().composer = vec!["未確認的新草稿".into()];
     });
     let err = call(false, true, Some(&token), None).await.expect_err("changed snapshot");

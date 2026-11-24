@@ -319,7 +319,7 @@ async fn r2_changed_expiry_or_restore_invalidates_candidate_fence() {
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let enter_hook = entered.clone(); let release_hook = release.clone();
-        crate::lifecycle::race_point::arm("api_retention_before_tx", &unique_run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+        crate::race_point::arm("api_retention_before_tx", &unique_run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
         let app = env.app.clone();
         let scan = tokio::spawn(async move { retention::scan_once(&app).await });
         tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await.unwrap();
@@ -417,7 +417,7 @@ async fn r2_project_route_cleans_child_adopted_after_snapshot() {
         Ok(())
     }).await.unwrap();
     let pool = env.app.db.clone(); let project_id = env.project_id.clone();
-    crate::lifecycle::race_point::arm("delete_after_intent", &env.project_id, move || async move {
+    crate::race_point::arm("delete_after_intent", &env.project_id, move || async move {
         sqlx::query("UPDATE bots SET project_id=? WHERE id='r2-bot'").bind(project_id).execute(&pool).await.unwrap();
     });
     let response = crate::api::delete_project_http(State(env.app.clone()), Path(env.project_id.clone()), Query(crate::api::DeleteQuery::default())).await.unwrap();

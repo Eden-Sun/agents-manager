@@ -283,7 +283,7 @@ mod tests {
         let token = first.lease_token.clone().unwrap();
         let next_app = app.clone();
         let next_id = next_approval.clone();
-        crate::lifecycle::race_point::arm("lease_release_after_mark", &token, move || async move {
+        crate::race_point::arm("lease_release_after_mark", &token, move || async move {
             let replacement = store::acquire_lease(
                 &next_app.db,
                 "rebuild",
@@ -318,7 +318,7 @@ mod tests {
         let app = &e.app;
         let other_fired = Arc::new(AtomicBool::new(false));
         let flag = other_fired.clone();
-        crate::lifecycle::race_point::arm("lease_release_after_mark", "someone-elses-token", move || async move {
+        crate::race_point::arm("lease_release_after_mark", "someone-elses-token", move || async move {
             flag.store(true, Ordering::SeqCst);
         });
 
@@ -333,7 +333,7 @@ mod tests {
         let (fence2, token2) = (second["lease"]["fence"].as_i64().unwrap(), second["lease_token"].as_str().unwrap().to_string());
         let own_fired = Arc::new(AtomicBool::new(false));
         let flag = own_fired.clone();
-        crate::lifecycle::race_point::arm("lease_release_after_mark", &token2, move || async move {
+        crate::race_point::arm("lease_release_after_mark", &token2, move || async move {
             flag.store(true, Ordering::SeqCst);
         });
         assert!(release(app, "rebuild", "ops", fence2, store::LeaseProof::Token(&token2)).await.unwrap());

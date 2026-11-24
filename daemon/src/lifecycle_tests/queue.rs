@@ -20,7 +20,7 @@ mod run_exit_race_tests {
         sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
 
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+        crate::race_point::arm("mark_run_exited_after_read", &run, move || async move {
             sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
         mark_run_exited(&app, &run, "pane exited").await;
@@ -57,7 +57,7 @@ mod run_exit_race_tests {
 
         let raced = tt::fake_run(&app, &bot.id).await;
         let (app2, raced2) = (app.clone(), raced.clone());
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &raced, move || async move {
+        crate::race_point::arm("mark_run_exited_after_read", &raced, move || async move {
             sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&raced2).execute(app2.db()).await.unwrap();
         });
         assert_eq!(mark_run_exited_proved(&app, &raced, "pane exited").await, (RunExit::AlreadyEnded, None));
@@ -65,7 +65,7 @@ mod run_exit_race_tests {
 
         let flipped = tt::fake_run(&app, &bot.id).await;
         let (app3, flipped2) = (app.clone(), flipped.clone());
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &flipped, move || async move {
+        crate::race_point::arm("mark_run_exited_after_read", &flipped, move || async move {
             sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&flipped2).execute(app3.db()).await.unwrap();
         });
         let (exit, proof) = mark_run_exited_proved(&app, &flipped, "pane exited").await;
@@ -114,14 +114,14 @@ mod run_exit_race_tests {
         let run = tt::fake_run(&app, &bot.id).await;
         let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
 
         rs::refuse_run_state(&app, "exited").await;
         assert_eq!(mark_run_exited(&app, &run, "pane exited").await, RunExit::NotRecorded, "跟「別的路徑先收了」分得開");
         assert_eq!(run_state(&app, &run).await, "running", "寫不進去就還是 running");
         assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "run 還沒結束，in-flight 不能先被收成 failed");
         assert_eq!(rs::turn_status(&app, &queued).await, "queued", "run 還沒結束，排著的不能先被撤");
-        assert!(rs::watched(&app, &watcher).await, "watcher 不能先拆");
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await, "watcher 不能先拆");
         assert_eq!(rs::scheduled(&run), vec![rs::Settle::Reconcile { stuck: "running".into() }], "排了對帳重試，不是只留一行 warning");
 
         rs::accept_run_state(&app, "exited").await;
@@ -130,7 +130,7 @@ mod run_exit_race_tests {
         assert_eq!(rs::turn_status(&app, &in_flight).await, "failed");
         assert_eq!(rs::turn_status(&app, &queued).await, "failed");
         assert_eq!((rs::system_notes(&app, &in_flight).await, rs::system_notes(&app, &queued).await), (1, 1), "各收一次");
-        assert!(!rs::watched(&app, &watcher).await);
+        assert!(!crate::lifecycle_tests::support::watched(&app, &watcher).await);
     }
 
     /// #198 同類：run 結束時讀不到它的主機，不拿 `local` 頂替去拆 watcher——本機剛好同名 session、同 pane id 的那顆
@@ -150,7 +150,7 @@ mod run_exit_race_tests {
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(app.db()).await.unwrap();
         mark_run_exited(&app, &run, "pane exited").await;
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
-        assert!(rs::watched(&app, &local).await, "本機那顆的 watcher 不是這個 run 的");
+        assert!(crate::lifecycle_tests::support::watched(&app, &local).await, "本機那顆的 watcher 不是這個 run 的");
     }
 
     /// #156：`exited` 記下了，in-flight 那一筆卻收不成。pane 已經沒了（這不是我們能不做的事），所以不回
@@ -163,7 +163,7 @@ mod run_exit_race_tests {
         let run = tt::fake_run(&app, &bot.id).await;
         let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         rs::refuse_turn_close(&app, &in_flight).await;
 
         let exit = mark_run_exited(&app, &run, "pane exited").await;
@@ -172,7 +172,7 @@ mod run_exit_race_tests {
         assert_eq!(run_state(&app, &run).await, "exited");
         assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "寫不進去就是還沒收");
         assert_eq!(rs::turn_status(&app, &queued).await, "failed", "run 結束了，排著的照撤");
-        assert!(!rs::watched(&app, &watcher).await);
+        assert!(!crate::lifecycle_tests::support::watched(&app, &watcher).await);
 
         rs::accept_turn_close(&app).await;
         crate::lifecycle::interruption::settle_locked(&app, &bot.id, crate::lifecycle::interruption::Evidence::Nothing).await.unwrap();
@@ -191,10 +191,10 @@ mod run_exit_race_tests {
         let run = tt::fake_run(&app, &bot.id).await;
         let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+        crate::race_point::arm("mark_run_exited_after_read", &run, move || async move {
             sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
 
@@ -202,7 +202,7 @@ mod run_exit_race_tests {
         assert_eq!(run_state(&app, &run).await, "stopped");
         assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "不是這條路的收尾");
         assert_eq!(rs::turn_status(&app, &queued).await, "queued");
-        assert!(rs::watched(&app, &watcher).await);
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await);
         assert!(rs::scheduled(&run).is_empty(), "CAS 輸了不是寫入失敗，不排重試");
     }
 }
@@ -585,7 +585,7 @@ mod flush_queue_tests {
             forget_queue_retry_timer(&f.bot_id);
             if why == "讀不到交辦" {
                 let app2 = app.clone();
-                crate::lifecycle::race_point::arm("review_before_revoke", &a, move || async move { break_assignment_reads(&app2).await });
+                crate::race_point::arm("review_before_revoke", &a, move || async move { break_assignment_reads(&app2).await });
             } else {
                 sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
                     .execute(app.db())
@@ -776,7 +776,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let a = queued_assignment(&f).await;
         let (app2, a2) = (app.clone(), a.clone());
-        crate::lifecycle::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+        crate::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
             sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a2).execute(app2.db()).await.unwrap();
         });
 
@@ -1657,7 +1657,7 @@ mod flush_queue_tests {
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         sqlx::query("UPDATE turns SET prompt_text = '給舊 run 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), f.run_id.clone());
-        crate::lifecycle::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+        crate::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
 
@@ -1683,7 +1683,7 @@ mod flush_queue_tests {
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         sqlx::query("UPDATE turns SET prompt_text = '窗口開了還打字' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), f.run_id.clone());
-        crate::lifecycle::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+        crate::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
             let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
                 .await
@@ -1719,7 +1719,7 @@ mod flush_queue_tests {
                 .await
                 .unwrap();
             let (app2, run2) = (app.clone(), f.run_id.clone());
-            crate::lifecycle::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+            crate::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
                 sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
                 let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
                     .await
@@ -1776,7 +1776,7 @@ mod flush_queue_tests {
             .await
             .unwrap();
         let (app2, run2) = (app.clone(), f.run_id.clone());
-        crate::lifecycle::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+        crate::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
             let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
                 .await
@@ -1862,7 +1862,7 @@ mod flush_queue_tests {
         let mut events = app.subscribe();
         forget_queue_retry_timer(&f.bot_id);
         let (app2, turn2) = (app.clone(), f.turn_id.clone());
-        crate::lifecycle::race_point::arm("defer_before_return", &f.turn_id, move || async move {
+        crate::race_point::arm("defer_before_return", &f.turn_id, move || async move {
             crate::lifecycle::turn_controller::fail(app2.db(), &turn2, crate::lifecycle::turn_controller::DeliveryOnFail::Keep, "run ended")
                 .await
                 .unwrap();

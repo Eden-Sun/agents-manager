@@ -221,7 +221,7 @@ mod tests {
         let app = b.env.app.clone();
         let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let (old, run, next) = (b.turn.clone(), b.run.clone(), next.to_string());
-        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+        crate::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
             sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&old).execute(app.db()).await.unwrap();
             sqlx::query(
                 "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(crate::lifecycle::turn_controller::claim_queued(&mut conn, &turn, &b.run).await.unwrap(), crate::lifecycle::turn_controller::Outcome::Applied);
         drop(conn);
         let (queued_turn, db_app) = (turn.clone(), app.clone());
-        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+        crate::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
             sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&queued_turn).execute(db_app.db()).await.unwrap();
         });
 
@@ -318,7 +318,7 @@ mod tests {
 
         let (prompt_at_typing_tx, prompt_at_typing_rx) = tokio::sync::oneshot::channel();
         let (resume_prompt_tx, resume_prompt_rx) = tokio::sync::oneshot::channel();
-        crate::lifecycle::race_point::arm("prompt_before_typing", &bot.id, move || async move {
+        crate::race_point::arm("prompt_before_typing", &bot.id, move || async move {
             let _ = prompt_at_typing_tx.send(());
             let _ = resume_prompt_rx.await;
         });
@@ -337,7 +337,7 @@ mod tests {
 
         let (interrupt_at_arrival_tx, interrupt_at_arrival_rx) = tokio::sync::oneshot::channel();
         let (resume_interrupt_tx, resume_interrupt_rx) = tokio::sync::oneshot::channel();
-        crate::lifecycle::race_point::arm("interrupt_after_arrival", &bot.id, move || async move {
+        crate::race_point::arm("interrupt_after_arrival", &bot.id, move || async move {
             let _ = interrupt_at_arrival_tx.send(());
             let _ = resume_interrupt_rx.await;
         });
@@ -364,12 +364,12 @@ mod tests {
         let restore_app = app.clone();
         let restore_table = table;
         let bot_id = b.bot.id.clone();
-        crate::lifecycle::race_point::arm("interrupt_after_arrival", &bot_id, move || async move {
+        crate::race_point::arm("interrupt_after_arrival", &bot_id, move || async move {
             tt::make_table_readable(&restore_app, restore_table).await;
         });
 
         let result = interrupt_bot(&app, &b.bot.id).await;
-        crate::lifecycle::race_point::hit("interrupt_after_arrival", &b.bot.id).await;
+        crate::race_point::hit("interrupt_after_arrival", &b.bot.id).await;
         let err = result.expect_err("unreadable arrival state must produce a retryable error before Esc");
         let LcError::Unavailable(body) = err else { panic!("the arrival snapshot needs an explicit 503: {err:?}") };
         assert_eq!(body["error"], "interrupt_state_unavailable", "{body}");
@@ -393,7 +393,7 @@ mod tests {
         let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let (run, ext, db_app) = (b.run.clone(), db::ulid(), app.clone());
         let ext_id = ext.clone();
-        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+        crate::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
             sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
                 .bind(&ext_id)
                 .bind(&conv)

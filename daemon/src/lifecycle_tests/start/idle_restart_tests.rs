@@ -84,13 +84,13 @@ async fn a_restart_that_cannot_relabel_its_old_run_says_so_and_retries() {
     let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
     assert_eq!(state, "stopped");
     assert_eq!(rs::scheduled(&run_id), vec![rs::Settle::Relabel { from: "stopped", to: "exited" }], "排了改標的重試");
-    assert!(!rs::bot_stopped_reported(&app, &bot_id).await, "前提：留著 stopped，探針以為是故意停的");
+    assert!(!crate::lifecycle_tests::support::bot_stopped_reported(&app, &bot_id).await, "前提：留著 stopped，探針以為是故意停的");
 
     rs::accept_run_state(&app, "exited").await;
     assert!(rs::settle_once(&app, &run_id, &rs::Settle::Relabel { from: "stopped", to: "exited" }).await);
     let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
     assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
-    assert!(rs::bot_stopped_reported(&app, &bot_id).await, "autostart 的 bot 沒在跑：探針報出來");
+    assert!(crate::lifecycle_tests::support::bot_stopped_reported(&app, &bot_id).await, "autostart 的 bot 沒在跑：探針報出來");
 }
 
 /// 排到它的那一刻還閒著、拿到鎖時已經在跑：不送 ctrl+c、run 原封不動。

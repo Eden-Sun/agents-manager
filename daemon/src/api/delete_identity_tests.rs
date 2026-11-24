@@ -147,7 +147,7 @@ async fn a_bot_created_while_its_identity_is_deleted_is_refused() {
         .await
         .unwrap();
     let (a2, pid) = (app.clone(), env.project_id.clone());
-    crate::lifecycle::race_point::arm("create_bot_after_identity_check", &env.project_id, move || async move {
+    crate::race_point::arm("create_bot_after_identity_check", &env.project_id, move || async move {
         delete_identity(State(a2.clone()), Path("racer".into()), Query(IdentityHostQuery { host: None }))
             .await
             .expect("沒有 bot 在用，刪得掉");
@@ -177,7 +177,7 @@ async fn an_identity_taken_by_a_bot_while_it_is_being_deleted_survives() {
         .await
         .unwrap();
     let (a2, pid) = (app.clone(), env.project_id.clone());
-    crate::lifecycle::race_point::arm("delete_identity_after_check", "racer2", move || async move {
+    crate::race_point::arm("delete_identity_after_check", "racer2", move || async move {
         let body = json!({"name": "early", "kind": "codex", "identity": "racer2"});
         create_bot(State(a2.clone()), Path(pid), Json(serde_json::from_value(body).unwrap())).await.expect("身份還在：建得起來");
     });
@@ -282,7 +282,7 @@ async fn identity_delete_waits_for_an_in_flight_create_and_then_sees_its_referen
     let app = env.app.clone();
     let blocked_while_admitted = Arc::new(std::sync::Mutex::new(None::<(bool, tokio::task::JoinHandle<()>)>));
     let slot = blocked_while_admitted.clone();
-    crate::lifecycle::race_point::arm("create_bot_after_identity_admit", &env.project_id, move || async move {
+    crate::race_point::arm("create_bot_after_identity_admit", &env.project_id, move || async move {
         let t = tokio::spawn(async { drop(crate::identity_fence::exclusive(LOCAL_HOST, "claude", "cc1").await) });
         settle().await;
         *slot.lock().unwrap() = Some((!t.is_finished(), t));

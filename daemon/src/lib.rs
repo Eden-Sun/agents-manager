@@ -23,13 +23,6 @@ pub mod codex_reset;
 pub mod schedules;
 pub use am_base::config;
 pub use am_lifecycle::{ask_answers, child_done, codex_history, daemon_notice, handoff};
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/arc_ports.rs"]
-mod am_lifecycle_arc_ports;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/ports_impl.rs"]
-mod am_lifecycle_ports_impl;
-#[cfg(not(test))]
 pub use am_lifecycle::{
     background_jobs,
     blocked_reason,
@@ -49,48 +42,6 @@ pub use am_lifecycle::{
 pub use am_supervisor::{build_info, relay_auth, supervisor};
 #[cfg(test)]
 mod lifecycle_tests;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/background_jobs.rs"]
-pub mod background_jobs;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/blocked_reason.rs"]
-pub mod blocked_reason;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/child_alerts.rs"]
-pub mod child_alerts;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/compaction.rs"]
-pub mod compaction;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/codex_live.rs"]
-pub mod codex_live;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/codex_model_migration.rs"]
-pub mod codex_model_migration;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/default_session.rs"]
-pub mod default_session;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/dangerous_rm.rs"]
-pub mod dangerous_rm;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/events.rs"]
-pub mod events;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/hookrecv.rs"]
-pub mod hookrecv;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/judge.rs"]
-pub mod judge;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/lifecycle/mod.rs"]
-pub mod lifecycle;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/tui_prompts.rs"]
-pub mod tui_prompts;
-#[cfg(test)]
-#[path = "../../crates/am-lifecycle/src/turn_error.rs"]
-pub mod turn_error;
 pub use am_base::identity_fence;
 pub use am_base::{
     agent_relay,

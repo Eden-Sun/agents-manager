@@ -352,7 +352,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
             }
         }
     } else { false };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("codex_follow_before_runtime_write", run_id).await;
     let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
         .bind(&seen.model)

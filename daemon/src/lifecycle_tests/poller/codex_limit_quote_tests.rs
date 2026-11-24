@@ -2,6 +2,7 @@
 //! 額度標用盡；codex 有 `status_line_says_headroom`（狀態列顯示還有餘裕就當舊橫幅），這裡驗它擋不擋得住。
 use crate::lifecycle_tests::prelude::*;
 use crate::lifecycle::*;
+use crate::app_ports_p4obs;
 use crate::lifecycle::poller::*;
 use crate::lifecycle::poller::test_seams::*;
 

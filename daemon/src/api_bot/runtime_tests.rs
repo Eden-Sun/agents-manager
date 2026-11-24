@@ -203,14 +203,14 @@ async fn native_runner_waits_for_durable_delivery_acceptance() {
     crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
     let pending_reached = Arc::new(Notify::new()); let pending_release = Arc::new(Notify::new());
     let a = pending_reached.clone(); let b = pending_release.clone();
-    crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
     let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
     let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, pending_reached.notified()).await.unwrap();
     let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
     let before_reached = Arc::new(Notify::new()); let before_release = Arc::new(Notify::new());
     let a = before_reached.clone(); let b = before_release.clone();
-    crate::lifecycle::race_point::arm("api_native_before_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_before_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
     pending_release.notify_one();
     tokio::time::timeout(DEADLOCK_TIMEOUT, before_reached.notified()).await.unwrap();
     let before: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
@@ -218,7 +218,7 @@ async fn native_runner_waits_for_durable_delivery_acceptance() {
     let controls = env.app.api_bot_runtime.control_count_for_test();
     let after_reached = Arc::new(Notify::new()); let after_release = Arc::new(Notify::new());
     let a = after_reached.clone(); let b = after_release.clone();
-    crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
     before_release.notify_one();
     tokio::time::timeout(DEADLOCK_TIMEOUT, after_reached.notified()).await.unwrap();
     let committed: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
@@ -294,7 +294,7 @@ async fn native_fresh_start_holds_lifecycle_lock_until_new_run_is_created() {
     let target = ApiFreshTarget { session_id: session.clone(), generation };
     let committed = Arc::new(Notify::new()); let finish_first = Arc::new(Notify::new());
     let a = committed.clone(); let b = finish_first.clone();
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", &session, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_fresh_after_commit", &session, move || async move { a.notify_one(); b.notified().await; });
     let app = env.app.clone(); let id = bot.clone(); let first_target = ApiFreshTarget { session_id:session.clone(), generation };
     let first_start = tokio::spawn(async move { app.api_native_start(&id, ApiNativeStartMode::Fresh(first_target)).await });
     let reached = tokio::time::timeout(DEADLOCK_TIMEOUT, committed.notified()).await;
@@ -396,14 +396,14 @@ async fn native_shutdown_after_delivery_commit_never_releases_runner() {
     crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
     let pending = Arc::new(Notify::new()); let pending_release = Arc::new(Notify::new());
     let a = pending.clone(); let b = pending_release.clone();
-    crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
     let app = env.app.clone(); let id = bot.clone(); let request = crid.clone();
     let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &id, "fixture", &request).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, pending.notified()).await.unwrap();
     let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
     let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let a = reached.clone(); let b = release.clone();
-    crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
     pending_release.notify_one();
     tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
     env.app.shutdown.cancel(); release.notify_one();
@@ -427,7 +427,7 @@ async fn native_delivery_real_commit_synthetic_lost_ack_never_releases_runner() 
     let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
     let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let a = reached.clone(); let b = release.clone();
-    crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
     let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
     let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
@@ -506,14 +506,14 @@ async fn native_maintenance_and_delivery_acceptance_are_serialized() {
     assert!(crate::supervisor::store::release_lease(&env.app.db, "restart", "fixture", lease.fence).await.unwrap());
     let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let a = reached.clone(); let b = release.clone();
-    crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
     let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
     let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
     let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
     let after_reached = Arc::new(Notify::new()); let after_release = Arc::new(Notify::new());
     let a = after_reached.clone(); let b = after_release.clone();
-    crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
     let pending_lease = crate::supervisor::store::acquire_lease(&env.app.db, "restart", "fixture", None, None, &until, true, None, &json!({})).await.unwrap();
     release.notify_one();
     tokio::time::timeout(DEADLOCK_TIMEOUT, after_reached.notified()).await.unwrap();
@@ -736,7 +736,7 @@ async fn native_delivery_cas_fault_cancels_and_joins_without_release() {
     sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let run=crate::lifecycle::start_bot(&env.app,&bot).await.unwrap();
     let reached=Arc::new(Notify::new()); let release=Arc::new(Notify::new()); let a=reached.clone(); let b=release.clone();
-    crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit",&crid,move || async move { a.notify_one(); b.notified().await; });
+    crate::race_point::arm("api_native_prompt_after_pending_commit",&crid,move || async move { a.notify_one(); b.notified().await; });
     let app=env.app.clone(); let task_bot=bot.clone(); let task_crid=crid.clone();
     let task=tokio::spawn(async move { crate::lifecycle::prompt(&app,&task_bot,"fixture",&task_crid).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT,reached.notified()).await.unwrap();
@@ -1436,7 +1436,7 @@ async fn fresh_applied_receipt_waits_for_actual_owner_exit() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1470,7 +1470,7 @@ async fn fresh_waits_for_stop_true_join_and_owner_before_deletion() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1506,7 +1506,7 @@ async fn fresh_dropped_caller_keeps_spawn_blocked_until_commit_owner_finishes() 
     let mut deps = env.app.api_bot_runtime.test_dependencies().unwrap(); deps.tools = Arc::new(CountingTools(tool_calls.clone())); env.app.api_bot_runtime.set_test_dependencies(deps);
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_after_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone(); let task_session = session.clone();
     let caller = tokio::spawn(async move { app.api_explicit_retire("r2-bot", &ApiFreshTarget { session_id: task_session, generation: 1 }).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1532,7 +1532,7 @@ async fn fresh_quarantine_recovers_only_after_restart_startup_proof() {
     sqlx::query("UPDATE api_bot_sessions SET id=? WHERE id='r2-session'").bind(&session).execute(&env.app.db).await.unwrap();
     let now = crate::db::now();
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,'r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&session).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", &session, || async move { panic!("synthetic owner panic"); });
+    crate::race_point::arm("api_fresh_after_commit", &session, || async move { panic!("synthetic owner panic"); });
     let target = ApiFreshTarget { session_id: session, generation: 1 };
     assert!(matches!(env.app.api_explicit_retire("r2-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
     assert!(env.app.api_bot_runtime.inner.explicit_quarantine.lock().unwrap().contains_key("r2-bot"));
@@ -1555,7 +1555,7 @@ async fn fresh_does_not_clear_a_replaced_operation_token() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,'r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&session).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_before_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_before_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone(); let task_session = session.clone();
     let task = tokio::spawn(async move { app.api_explicit_retire("r2-bot", &ApiFreshTarget { session_id: task_session, generation: 1 }).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1599,7 +1599,7 @@ async fn fresh_shutdown_before_commit_rolls_back_and_keeps_marker() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,'r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&session).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_before_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_before_commit", &session, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone(); let task_session = session.clone();
     let task = tokio::spawn(async move { app.api_explicit_retire("r2-bot", &ApiFreshTarget { session_id: task_session, generation: 1 }).await });
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1655,7 +1655,7 @@ async fn fresh_commit_readback_fault_quarantines_only_target_bot() {
     let successor = SessionCursor { identity: super::super::adapter::AdapterIdentity { session_id: "readback-successor".into(), bot_id: "r2-bot".into(), run_id: "successor-run".into(), turn_id: "successor-turn".into(), generation: 2 }, revision: 1 };
     let successor_for_hook = successor.clone(); let hook_app = env.app.clone();
     let pool = env.app.db.clone();
-    crate::lifecycle::race_point::arm("api_fresh_before_readback", "fresh-readback", move || async move {
+    crate::race_point::arm("api_fresh_before_readback", "fresh-readback", move || async move {
         sqlx::query("ALTER TABLE api_bot_sessions RENAME TO fresh_unavailable_sessions").execute(&pool).await.unwrap();
         hook_app.api_bot_runtime.inner.sessions.lock().unwrap().insert("r2-bot".into(), successor_for_hook);
     });
@@ -1687,7 +1687,7 @@ async fn fresh_panicked_owner_keeps_quarantine() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES('fresh-panic','r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let (endpoint, shutdown, server) = fake_server(Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new())).await;
     enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", "fresh-panic", || async move { panic!("synthetic owner panic"); });
+    crate::race_point::arm("api_fresh_after_commit", "fresh-panic", || async move { panic!("synthetic owner panic"); });
     let target = ApiFreshTarget { session_id: "fresh-panic".into(), generation: 1 };
     assert!(matches!(env.app.api_explicit_retire("r2-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
     assert!(env.app.api_bot_runtime.inner.explicit_quarantine.lock().unwrap().contains_key("r2-bot"));
@@ -1711,7 +1711,7 @@ async fn fresh_memory_cas_mismatch_quarantines_only_affected_bot() {
     enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", &session_id, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_after_commit", &session_id, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone(); let task_session = session_id.clone();
     let job = tokio::spawn(async move {
         let target = ApiFreshTarget { session_id: task_session, generation: 1 };
@@ -1744,7 +1744,7 @@ async fn r2_cleanup_waits_for_actual_owner_exit() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let entered_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1772,7 +1772,7 @@ async fn r2_owner_exit_panic_shutdown_and_identity_fence() {
         let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
         let entered_hook = entered.clone(); let release_hook = release.clone();
         let point = if mode == "aba" { "api_same_run_proof_before_cas" } else { "api_same_run_owner_before_exit" };
-        crate::lifecycle::race_point::arm(point, &run, move || async move {
+        crate::race_point::arm(point, &run, move || async move {
             entered_hook.notify_one(); release_hook.notified().await;
             if mode == "panic" { panic!("synthetic owner panic"); }
         });
@@ -1841,7 +1841,7 @@ async fn r2_scanner_serializes_cross_run_spawn_and_stop() {
         sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,state,created_at,processed_at) VALUES(?,?,?,?,1,1,'failed','applied',?,?)").bind(&session).bind(&bot).bind(&old_run).bind(&old_turn).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
         let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
         let entered_hook = entered.clone(); let release_hook = release.clone();
-        crate::lifecycle::race_point::arm("api_retention_before_tx", &old_run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+        crate::race_point::arm("api_retention_before_tx", &old_run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
         let scan_app = env.app.clone();
         let scan = tokio::spawn(async move { super::super::retention::scan_once(&scan_app).await });
         tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1892,7 +1892,7 @@ async fn r2_stop_transaction_blocks_actual_scanner_until_commit() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,state,created_at,processed_at) VALUES(?,?,?,?,1,1,'failed','applied',?,?)").bind(&session).bind(&bot).bind(&old_run).bind(&old_turn).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let entered_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_begin_stop_before_commit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_begin_stop_before_commit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
     let key_for_test_bot = bot.clone();
     let key = ApiRunKey { bot_id: bot, run_id: run };
     let app = env.app.clone();
@@ -1922,7 +1922,7 @@ async fn r2_spawn_holds_bot_gate_until_runner_is_installed() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_run_spawn_after_owner_writes", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_run_spawn_after_owner_writes", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     let spawn_app = env.app.clone(); let spawn_key = clone_turn_key(&key);
     let spawn = tokio::spawn(async move { spawn_app.api_turn_spawn(&spawn_key).await });
@@ -1953,7 +1953,7 @@ async fn r2_cancel_true_join_allows_scanner_to_observe_live_owner() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -1984,7 +1984,7 @@ async fn r2_shutdown_timeout_retains_live_registry_and_control() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_run_runner_before_entry", &run, move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -2036,7 +2036,7 @@ async fn same_run_shutdown_prevents_finalized_proof_on_both_owner_boundaries() {
         insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
         let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
         let entered_hook = entered.clone(); let release_hook = release.clone();
-        crate::lifecycle::race_point::arm(point, &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+        crate::race_point::arm(point, &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
         let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
         env.app.api_turn_spawn(&key).await.unwrap();
         tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -2058,7 +2058,7 @@ async fn same_run_owner_panic_never_publishes_finalized_proof() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
     let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let reached_hook = reached.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; panic!("synthetic owner failure"); });
+    crate::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; panic!("synthetic owner failure"); });
     let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
@@ -2112,7 +2112,7 @@ async fn same_run_control_aba_after_rebind_stays_busy_without_replay() {
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let entered_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_same_run_before_control_cas", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_same_run_before_control_cas", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
     let next = ApiTurnKey { bot_id: bot, run_id: run, turn_id: second };
     let task_app = env.app.clone(); let task_key = clone_turn_key(&next);
     let task = tokio::spawn(async move { task_app.api_turn_spawn(&task_key).await });
@@ -2197,11 +2197,11 @@ async fn same_run_stop_handover_case(point: &'static str) {
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let reached_hook = reached.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm(point, &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm(point, &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; });
     let next = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: second };
     let runner_reached = Arc::new(Notify::new()); let runner_release = Arc::new(Notify::new());
     let runner_reached_hook = runner_reached.clone(); let runner_release_hook = runner_release.clone();
-    crate::lifecycle::race_point::arm("api_run_runner_before_entry", &run, move || async move { runner_reached_hook.notify_one(); runner_release_hook.notified().await; });
+    crate::race_point::arm("api_run_runner_before_entry", &run, move || async move { runner_reached_hook.notify_one(); runner_release_hook.notified().await; });
     let spawn_app = env.app.clone();
     let next_spawn = clone_turn_key(&next);
     let spawn = tokio::spawn(async move { spawn_app.api_turn_spawn(&next_spawn).await });
@@ -2236,7 +2236,7 @@ async fn same_run_joined_owner_must_exit_before_next_admission() {
     insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture first").await;
     let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
     let entered_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
     let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first.clone() };
     env.app.api_turn_spawn(&key).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
@@ -2630,7 +2630,7 @@ async fn idle_stop_proof_drains_pre_cas_admission_before_joining_live_runner() {
     let release_owner_writes = Arc::new(Notify::new());
     let owner_writes_complete_hook = owner_writes_complete.clone();
     let release_owner_writes_hook = release_owner_writes.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_spawn_after_owner_writes",
         &run_id,
         move || async move {
@@ -2642,7 +2642,7 @@ async fn idle_stop_proof_drains_pre_cas_admission_before_joining_live_runner() {
     let release_registry = Arc::new(Notify::new());
     let registry_installed_hook = registry_installed.clone();
     let release_registry_hook = release_registry.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_spawn_after_registry",
         &run_id,
         move || async move {
@@ -2782,7 +2782,7 @@ async fn idle_stop_proof_drains_spawn_paused_after_owner_writes_before_registry(
     let release_owner_writes = Arc::new(Notify::new());
     let owner_writes_complete_hook = owner_writes_complete.clone();
     let release_owner_writes_hook = release_owner_writes.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_spawn_after_owner_writes",
         &run_id,
         move || async move {
@@ -2794,7 +2794,7 @@ async fn idle_stop_proof_drains_spawn_paused_after_owner_writes_before_registry(
     let release_registry = Arc::new(Notify::new());
     let registry_installed_hook = registry_installed.clone();
     let release_registry_hook = release_registry.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_spawn_after_registry",
         &run_id,
         move || async move {
@@ -2806,7 +2806,7 @@ async fn idle_stop_proof_drains_spawn_paused_after_owner_writes_before_registry(
     let release_runner = Arc::new(Notify::new());
     let runner_entered_hook = runner_entered.clone();
     let release_runner_hook = release_runner.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_runner_before_entry",
         &run_id,
         move || async move {
@@ -2842,7 +2842,7 @@ async fn idle_stop_proof_drains_spawn_paused_after_owner_writes_before_registry(
 
     let stop_at_admission = Arc::new(Notify::new());
     let stop_at_admission_hook = stop_at_admission.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_stop_before_admission",
         &run_id,
         move || async move {
@@ -2988,7 +2988,7 @@ async fn idle_lifecycle_stop_cas_first_rejects_spawn_and_holds_lock_through_comm
     let release_admission = Arc::new(Notify::new());
     let before_admission_hook = before_admission.clone();
     let release_admission_hook = release_admission.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_run_stop_before_admission",
         &run_id,
         move || async move {
@@ -3000,7 +3000,7 @@ async fn idle_lifecycle_stop_cas_first_rejects_spawn_and_holds_lock_through_comm
     let release_commit = Arc::new(Notify::new());
     let proof_succeeded_hook = proof_succeeded.clone();
     let release_commit_hook = release_commit.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_stop_proof_before_recover",
         &run_id,
         move || async move {
@@ -4719,7 +4719,7 @@ async fn backoff_fixture_with_proof_fault(mode: BackoffProofFault) -> BackoffFix
             .await
             .unwrap();
         let pool = env.app.db.clone();
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "api_completion_ack_lost",
             &run,
             move || async move {
@@ -4742,7 +4742,7 @@ async fn backoff_fixture_with_proof_fault(mode: BackoffProofFault) -> BackoffFix
     let release_backoff = Arc::new(Notify::new());
     let reached = at_backoff.clone();
     let release = release_backoff.clone();
-    crate::lifecycle::race_point::arm("api_completion_backoff", &run, move || async move {
+    crate::race_point::arm("api_completion_backoff", &run, move || async move {
         reached.notify_one();
         release.notified().await;
     });

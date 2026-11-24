@@ -67,7 +67,7 @@ async fn a_host_pass_that_cannot_enumerate_bots_retries_until_the_spool_is_drain
     let staging = spool.with_extension("jsonl.replaying");
     let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
     let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
-    crate::lifecycle::race_point::arm("spool_claimed", &bot.id, move || async move {
+    crate::race_point::arm("spool_claimed", &bot.id, move || async move {
         let _ = paused_tx.send(());
         let _ = go_rx.await;
     });

@@ -36,9 +36,9 @@ enum Accepted {
 }
 
 /// `POST /bots/{id}/prompt` 帶 `start_if_stopped`。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn prompt_starting(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -251,8 +251,8 @@ fn spawn_start(app: &impl LcHost, bot_id: &str, mark: Starting) {
 }
 
 /// 替還在等的那一則啟動 bot（已經有人在起就不疊）。正式路徑都在背景（[`kick`]），測試直接等它做完。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub async fn start_for_waiting(app: &impl LcHost, bot_id: &str) {
     if let Some(mark) = Starting::begin(bot_id) {
         start_with(app, bot_id, mark).await;
     }

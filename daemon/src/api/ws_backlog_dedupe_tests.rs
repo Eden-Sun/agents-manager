@@ -21,7 +21,7 @@ async fn an_event_emitted_between_subscribe_and_backlog_is_sent_once() {
     let since = env.app.current_seq();
 
     let app2 = env.app.clone();
-    crate::lifecycle::race_point::arm("ws_subscribed", &env.app.data_dir.display().to_string(), move || async move {
+    crate::race_point::arm("ws_subscribed", &env.app.data_dir.display().to_string(), move || async move {
         app2.emit("bot_changed", json!({"mark": "in_window"})).await;
     });
 

@@ -301,7 +301,7 @@ async fn a_project_deleted_after_the_child_restore_check_still_blocks_the_restor
         .unwrap();
 
     let (a, project) = (app.clone(), e.project_id.clone());
-    crate::lifecycle::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
+    crate::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
         sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
             .bind(db::now())
             .bind(project)
@@ -329,7 +329,7 @@ async fn a_parent_deleted_after_the_child_restore_check_still_blocks_the_restore
         .unwrap();
 
     let (a, parent_id) = (app.clone(), parent.clone());
-    crate::lifecycle::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
+    crate::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
             .bind(db::now())
             .bind(parent_id)
@@ -406,7 +406,7 @@ async fn a_restore_waits_for_the_delete_that_holds_the_bot_lock() {
     in_config(&e, &[(&id, "alfa")]).await;
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let (a, oid, o2) = (app.clone(), id.clone(), outcome.clone());
-    crate::lifecycle::race_point::arm("delete_bot_after_decided", &id, move || async move {
+    crate::race_point::arm("delete_bot_after_decided", &id, move || async move {
         let r = tokio::time::timeout(std::time::Duration::from_millis(300), restore_bot(State(a), Path(oid))).await;
         *o2.lock().unwrap() = Some(r.is_ok());
     });
@@ -481,7 +481,7 @@ async fn a_child_adopted_after_the_snapshot_is_soft_deleted_with_the_project() {
     let late = db::ulid();
     {
         let (app, pid, late) = (app.clone(), e.project_id.clone(), late.clone());
-        crate::lifecycle::race_point::arm("delete_after_intent", &e.project_id, move || async move {
+        crate::race_point::arm("delete_after_intent", &e.project_id, move || async move {
             sqlx::query(
                 "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
                      VALUES (?,?,'late-kid','claude','[]',0,1,'tok','child',?,?)",
@@ -510,7 +510,7 @@ async fn a_child_adopted_before_the_locks_are_taken_joins_the_snapshot() {
     let early = db::ulid();
     {
         let (app, pid, early) = (app.clone(), e.project_id.clone(), early.clone());
-        crate::lifecycle::race_point::arm("delete_project_before_lock", &e.project_id, move || async move {
+        crate::race_point::arm("delete_project_before_lock", &e.project_id, move || async move {
             sqlx::query(
                 "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
                      VALUES (?,?,'early-kid','claude','[]',0,1,'tok','child',?,?)",
@@ -538,7 +538,7 @@ async fn a_child_adopted_before_the_locks_are_taken_joins_the_snapshot() {
 async fn die_in_delete(e: &crate::testing::Env, key: &str, point: &'static str, project: bool) {
     let reached = Arc::new(tokio::sync::Notify::new());
     let r2 = reached.clone();
-    crate::lifecycle::race_point::arm(point, key, move || async move {
+    crate::race_point::arm(point, key, move || async move {
         r2.notify_one();
         std::future::pending::<()>().await
     });
@@ -713,7 +713,7 @@ async fn a_bot_delete_whose_handler_is_dropped_after_the_decision_still_finishes
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (r2, go) = (reached.clone(), release.clone());
-    crate::lifecycle::race_point::arm("delete_bot_after_decided", &parent, move || async move {
+    crate::race_point::arm("delete_bot_after_decided", &parent, move || async move {
         r2.notify_one();
         go.notified().await;
     });
@@ -735,7 +735,7 @@ async fn a_project_delete_whose_handler_is_dropped_after_the_decision_still_fini
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (r2, go) = (reached.clone(), release.clone());
-    crate::lifecycle::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
+    crate::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
         r2.notify_one();
         go.notified().await;
     });
@@ -759,7 +759,7 @@ async fn a_restart_whose_handler_is_dropped_between_stop_and_start_still_finishe
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (r2, go) = (reached.clone(), release.clone());
-    crate::lifecycle::race_point::arm("restart_after_stop", &bot.id, move || async move {
+    crate::race_point::arm("restart_after_stop", &bot.id, move || async move {
         r2.notify_one();
         go.notified().await;
     });
@@ -786,7 +786,7 @@ async fn a_start_whose_handler_is_dropped_while_the_agent_comes_up_still_records
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (r2, go) = (reached.clone(), release.clone());
-    crate::lifecycle::race_point::arm("start_before_running", &bot.id, move || async move {
+    crate::race_point::arm("start_before_running", &bot.id, move || async move {
         r2.notify_one();
         go.notified().await;
     });
@@ -810,7 +810,7 @@ async fn a_stop_whose_handler_is_dropped_before_the_stopped_record_still_records
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (r2, go) = (reached.clone(), release.clone());
-    crate::lifecycle::race_point::arm("stop_before_stopped", &bot.id, move || async move {
+    crate::race_point::arm("stop_before_stopped", &bot.id, move || async move {
         r2.notify_one();
         go.notified().await;
     });
@@ -1050,7 +1050,7 @@ async fn a_remote_project_delete_never_purges_local_dirs_when_the_host_cannot_be
     assert!(dir.exists());
 
     let a = app.clone();
-    crate::lifecycle::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
+    crate::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
         crate::testing::make_table_unreadable(&a, "projects").await
     });
     let _ = delete_project(State(app.clone()), Path(e.project_id.clone())).await;
@@ -1095,7 +1095,7 @@ async fn a_failed_stop_that_cannot_read_the_run_keeps_the_dir() {
     let run = a_running_run(&app, &id).await;
     let dir = runtime_dir(&app, &id);
     let a = app.clone();
-    crate::lifecycle::race_point::arm("delete_bot_after_decided", &id, move || async move {
+    crate::race_point::arm("delete_bot_after_decided", &id, move || async move {
         crate::testing::make_table_unreadable(&a, "runs").await
     });
 
@@ -1183,7 +1183,7 @@ async fn a_stop_whose_result_cannot_be_read_back_keeps_the_dir() {
     crate::testing::fake_run(&app, &id).await;
     let dir = runtime_dir(&app, &id);
     let a = app.clone();
-    crate::lifecycle::race_point::arm("delete_stop_before_proof", &id, move || async move {
+    crate::race_point::arm("delete_stop_before_proof", &id, move || async move {
         crate::testing::make_table_unreadable(&a, "runs").await
     });
 

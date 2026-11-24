@@ -4,7 +4,7 @@
 
     async fn settle_skip(env: &tt::Env, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
         let db = DbContext::new(env.app.db.clone());
-        let events = crate::lifecycle::app_ports_p4::AppEventSink::new(&env.app);
+        let events = crate::app_ports_p4::AppEventSink::new(&env.app);
         settle_skip_with(&db, &events, bot, run, now).await;
     }
 
@@ -770,7 +770,7 @@
 
     async fn sweep(env: &tt::Env, turns: &FakeTurns, notes: &FakeNotes, now: chrono::DateTime<chrono::Utc>) {
         let db = DbContext::new(env.app.db.clone());
-        let events = crate::lifecycle::app_ports_p4::AppEventSink::new(&env.app);
+        let events = crate::app_ports_p4::AppEventSink::new(&env.app);
         sweep_with(&db, turns, notes, &events, &FixedClock(now), &tokio_util::sync::CancellationToken::new()).await;
     }
 

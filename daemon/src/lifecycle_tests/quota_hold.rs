@@ -393,7 +393,7 @@ mod tests {
         assert!(crate::quota::seed_limit_hit(&app, LOCAL_HOST, "claude:cc-a", &later(2), "You've hit your session limit", Some("five_hour".into())).await);
         rename(&app, "projects", "projects_unreadable").await;
         let app2 = app.clone();
-        crate::lifecycle::race_point::arm("quota_hold_after_lookup", &q.bot.id, move || async move {
+        crate::race_point::arm("quota_hold_after_lookup", &q.bot.id, move || async move {
             rename(&app2, "projects_unreadable", "projects").await;
         });
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "照擋");

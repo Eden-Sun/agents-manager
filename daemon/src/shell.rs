@@ -132,7 +132,7 @@ pub async fn open(app: &(impl crate::api::shell::HostShellOpenLocks + crate::api
         return Err(LcError::conflict("too_many_shells", json!({"host": host, "max": MAX_PER_HOST})));
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("host_shell_after_quota_check", &format!("{host}@{:p}", app.host_shells())).await;
+    crate::race_point::hit("host_shell_after_quota_check", &format!("{host}@{:p}", app.host_shells())).await;
     let cwd = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => c.to_string(),
         None => default_cwd(app, host).await?,
@@ -620,7 +620,7 @@ mod tests {
         let second_done = Arc::new(tokio::sync::Notify::new());
         let (result_slot, done) = (second_result.clone(), second_done.clone());
         let second_app = app.clone();
-        crate::lifecycle::race_point::arm("host_shell_after_quota_check", &format!("local@{:p}", &app.host_shells), move || async move {
+        crate::race_point::arm("host_shell_after_quota_check", &format!("local@{:p}", &app.host_shells), move || async move {
             tokio::spawn(async move {
                 let result = open(&second_app, "local", Some("/tmp")).await;
                 *result_slot.lock().await = Some(result);

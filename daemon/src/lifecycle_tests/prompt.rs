@@ -314,7 +314,7 @@ mod prompt_tests {
             .bind(&f.run_id).execute(&app.db).await.unwrap();
         let changing_app = app.clone();
         let run_id = f.run_id.clone();
-        crate::lifecycle::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+        crate::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET agent_name='renamed' WHERE id=?")
                 .bind(&run_id).execute(&changing_app.db).await.unwrap();
         });
@@ -330,7 +330,7 @@ mod prompt_tests {
         let app = f.env.app.clone();
         let changing_app = app.clone();
         let run_id = f.run_id.clone();
-        crate::lifecycle::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+        crate::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET native_session_id='replacement-session' WHERE id=?")
                 .bind(&run_id).execute(&changing_app.db).await.unwrap();
         });
@@ -350,7 +350,7 @@ mod prompt_tests {
         let app = f.env.app.clone();
         let app_for_exit = app.clone();
         let exiting_run = f.run_id.clone();
-        crate::lifecycle::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+        crate::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
             assert_eq!(mark_run_exited(&app_for_exit, &exiting_run, "pane exited").await, RunExit::Recorded);
         });
 
@@ -382,7 +382,7 @@ mod prompt_tests {
         let app_for_exit = f.env.app.clone();
         let exiting_run = f.run_id.clone();
         let conversation = f.conv.clone();
-        crate::lifecycle::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
+        crate::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE conversation_id=? AND client_request_id='exit-after-admission'")
                 .bind(&conversation).fetch_one(&app_for_exit.db).await.unwrap();
             assert_eq!(status, "in_flight", "the prompt transaction committed before run exit");
@@ -1075,7 +1075,7 @@ mod prompt_tests {
         sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
         f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::AUTO_MODE);
         let fail = f.env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("claude_auto_mode_before_answer", &f.bot_id, move || async move {
+        crate::race_point::arm("claude_auto_mode_before_answer", &f.bot_id, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
         let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
@@ -1193,7 +1193,7 @@ mod prompt_tests {
         sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
         f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::AUTO_MODE);
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("claude_auto_mode_before_answer", &f.bot_id, move || async move {
+        crate::race_point::arm("claude_auto_mode_before_answer", &f.bot_id, move || async move {
             screens.lock().unwrap().insert("pane-prompt-test".into(), "Claude Code\n❯\n".into());
         });
         let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
@@ -1221,7 +1221,7 @@ mod prompt_tests {
             .unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
+        crate::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
             screens.lock().unwrap().insert("pane-prompt-test".into(), "Grok Build 1.0.34\n❯\n".into());
         });
         let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
@@ -1250,7 +1250,7 @@ mod prompt_tests {
             .unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
+        crate::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
             screens.lock().unwrap().insert(
                 "pane-prompt-test".into(),
                 "⏺ Printed example:\nDo you trust the contents of this directory?\nYes, proceed\nNo, quit\nGrok Build 1.0.46\n".into(),
@@ -1279,7 +1279,7 @@ mod prompt_tests {
             .unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
         let fail = f.env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("grok_trust_after_answer", &f.bot_id, move || async move {
+        crate::race_point::arm("grok_trust_after_answer", &f.bot_id, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
         let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
@@ -1321,7 +1321,7 @@ mod prompt_tests {
         let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
 
         let app2 = app.clone();
-        crate::lifecycle::race_point::arm("grok_trust_before_host", &f.bot_id, move || async move {
+        crate::race_point::arm("grok_trust_before_host", &f.bot_id, move || async move {
             crate::testing::make_table_unreadable(&app2, "projects").await;
         });
         let err = pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err();
@@ -1465,7 +1465,7 @@ mod prompt_tests {
         sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "Claude Code\n❯\n");
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             screens.lock().unwrap().insert(
                 "pane-prompt-test".into(),
                 "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n".into(),
@@ -1487,7 +1487,7 @@ mod prompt_tests {
         sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n");
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             screens.lock().unwrap().insert(
                 "pane-prompt-test".into(),
                 include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.159.3-security-setup-banner.txt").into(),
@@ -1517,7 +1517,7 @@ mod prompt_tests {
             .replace("\\x1b", "\u{1b}");
         assert_eq!(crate::composer_parse::box_state("codex", &queued_screen), crate::composer_parse::BoxState::Empty);
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             screens.lock().unwrap().insert("pane-prompt-test".into(), queued_screen);
         });
 
@@ -1535,7 +1535,7 @@ mod prompt_tests {
         sqlx::query("UPDATE runs SET resume_session_id='session-2170' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
         f.env.herdr.set_screen("pane-prompt-test", "• PONG\n\n› \n\n  GPT-6.2-Sol default · /tmp/x\n");
         let screens = f.env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             screens.lock().unwrap().insert(
                 "pane-prompt-test".into(),
                 "• PONG\n\n› UNSENT-DRAFT-2170\n\n  GPT-6.2-Sol default · /tmp/x\n".into(),
@@ -1557,7 +1557,7 @@ mod prompt_tests {
         let calls = f.env.herdr.calls.clone();
         let guard_reads_before = Arc::new(std::sync::Mutex::new(None));
         let reads_before = guard_reads_before.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             let counts = {
                 let calls = calls.lock().unwrap();
                 (
@@ -1656,7 +1656,7 @@ mod prompt_tests {
         let run_id = f.run_id.clone();
         let a_calls = herdr_a.calls.clone();
         let b_calls = herdr_b.calls.clone();
-        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
             assert!(
                 db::in_flight_turn(&app_to_repoint.db, &run_id).await.unwrap().is_some(),
                 "the direct turn already exists"
@@ -1704,7 +1704,7 @@ mod prompt_tests {
         let f = fixture("claude", "test").await;
         let app = f.env.app.clone();
         let conn = app.hosts.get(crate::config::LOCAL_HOST).await.unwrap();
-        crate::lifecycle::race_point::arm("agent_prompt_after_guard", &f.bot_id, move || async move {
+        crate::race_point::arm("agent_prompt_after_guard", &f.bot_id, move || async move {
             conn.bump_generation_for_test();
         });
 
@@ -2175,7 +2175,7 @@ mod send_now_tests {
         let app = f.env.app.clone();
         let running = busy(&f).await;
         let herdr = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
+        crate::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
             herdr.lock().unwrap().get_mut("pane-sn").unwrap().composer.push("我自己的草稿".into());
         });
 
@@ -2310,7 +2310,7 @@ mod send_now_tests {
         let hidden = transcript.with_extension("hidden");
         let (herdr_live, herdr_screens) = (f.env.herdr.live.clone(), f.env.herdr.screens.clone());
         let (from, to) = (transcript.clone(), hidden.clone());
-        crate::lifecycle::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
+        crate::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
             herdr_live.lock().unwrap().remove("pane-sn");
             herdr_screens.lock().unwrap().insert("pane-sn".into(), "__READ_ERROR__".into());
             std::fs::rename(&from, &to).unwrap();
@@ -2397,7 +2397,7 @@ mod send_now_tests {
         .await
         .unwrap();
         let db = app.db.clone();
-        crate::lifecycle::race_point::arm("send_now_owed", &f.bot_id, move || async move {
+        crate::race_point::arm("send_now_owed", &f.bot_id, move || async move {
             sqlx::query("DROP TRIGGER lost_close").execute(&db).await.unwrap();
         });
 
@@ -2426,13 +2426,13 @@ mod send_now_tests {
         .unwrap();
         let sent_by = Arc::new(std::sync::Mutex::new(String::new()));
         let (db, bot, seen) = (app.db.clone(), f.bot_id.clone(), sent_by.clone());
-        crate::lifecycle::race_point::arm("send_now_owed", &f.bot_id, move || async move {
+        crate::race_point::arm("send_now_owed", &f.bot_id, move || async move {
             sqlx::query("DROP TRIGGER lost_close").execute(&db).await.unwrap();
             sqlx::query("CREATE TRIGGER lost_delivery BEFORE UPDATE OF delivery_verified ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
                 .execute(&db)
                 .await
                 .unwrap();
-            crate::lifecycle::race_point::arm("owed_delivery_recorded", &bot, move || async move {
+            crate::race_point::arm("owed_delivery_recorded", &bot, move || async move {
                 *seen.lock().unwrap() = db::now();
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 sqlx::query("DROP TRIGGER lost_delivery").execute(&db).await.unwrap();
@@ -2516,7 +2516,7 @@ mod send_now_tests {
         .await
         .unwrap();
         let fail = f.env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
+        crate::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
 
@@ -2894,7 +2894,7 @@ mod restamp_tests {
         let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "daemon 通知").await;
         let turn2 = turn.clone();
         let app2 = app.clone();
-        crate::lifecycle::race_point::arm("mark_delivery_before_claim", &turn, move || async move {
+        crate::race_point::arm("mark_delivery_before_claim", &turn, move || async move {
             mark_delivery(
                 &app2,
                 &turn2,

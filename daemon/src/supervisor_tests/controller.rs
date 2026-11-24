@@ -2567,7 +2567,7 @@ mod responder_attribution_read_failure_tests {
         let responder_id = responder_id.expect("fixture configured responder");
         let app = env.app.clone();
         let fault_app = app.clone();
-        crate::lifecycle::race_point::arm("dispatch_before_responder_attribution", &assignment_id, move || async move {
+        crate::race_point::arm("dispatch_before_responder_attribution", &assignment_id, move || async move {
             crate::testing::make_table_unreadable(&fault_app, "supervisor_roles").await;
         });
 

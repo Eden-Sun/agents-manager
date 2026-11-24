@@ -294,7 +294,7 @@ mod live_slash_tests {
             let screens = env.herdr.screens.clone();
             let fail = env.herdr.fail_later();
             let pane_for_hook = pane.clone();
-            crate::lifecycle::race_point::arm(
+            crate::race_point::arm(
                 "slash_after_enter_before_read",
                 &pane,
                 move || async move {
@@ -354,7 +354,7 @@ mod live_slash_tests {
         let pane = "pane-before-answer";
         env.herdr.set_screen(pane, SWITCH_MODEL);
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("slash_confirm_before_answer", pane, move || async move {
+        crate::race_point::arm("slash_confirm_before_answer", pane, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
 
@@ -378,7 +378,7 @@ mod live_slash_tests {
         let pane = "pane-after-answer";
         env.herdr.set_screen(pane, SWITCH_MODEL);
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("slash_after_answer_before_read", pane, move || async move {
+        crate::race_point::arm("slash_after_answer_before_read", pane, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
 
@@ -422,7 +422,7 @@ mod live_slash_tests {
         let (bot_id, run_id, pane) = model_apply_fixture(&env, "settle-read-error", "model").await;
         env.herdr.set_screen(&pane, "Claude Code\n❯\n");
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("slash_before_settle_read", &pane, move || async move {
+        crate::race_point::arm("slash_before_settle_read", &pane, move || async move {
             fail("pane.read", tt::Fault::Refuse);
         });
 
@@ -481,7 +481,7 @@ mod live_slash_tests {
         env.herdr.set_screen(&pane, SWITCH_MODEL);
         let screens = env.herdr.screens.clone();
         let pane_for_hook = pane.clone();
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "slash_after_answer_before_read",
             &pane,
             move || async move {
@@ -510,7 +510,7 @@ mod live_slash_tests {
         let pane = "pane-switch-race";
         env.herdr.set_screen(pane, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch\n  2. No, go back\n");
         let screens = env.herdr.screens.clone();
-        crate::lifecycle::race_point::arm("slash_confirm_before_answer", pane, move || async move {
+        crate::race_point::arm("slash_confirm_before_answer", pane, move || async move {
             screens.lock().unwrap().insert(pane.into(), "Claude Code\n❯\n".into());
         });
 

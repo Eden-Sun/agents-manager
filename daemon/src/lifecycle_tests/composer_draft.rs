@@ -186,7 +186,7 @@ mod tests {
             f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
             let old_token = current_draft_token(&f, "observe").await;
             let live = f.env.herdr.live.clone();
-            crate::lifecycle::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+            crate::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
                 let mut live = live.lock().unwrap();
                 let pane = live.get_mut("pane-d").unwrap();
                 pane.composer = vec!["draft B".into()];
@@ -215,7 +215,7 @@ mod tests {
         let f = idle("grok", &["draft A"], false).await;
         let token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             let pane = live.get_mut("pane-d").unwrap();
             pane.revision = pane.revision.max(1) + 1;
@@ -237,7 +237,7 @@ mod tests {
         let token = current_draft_token(&f, "observe").await;
         let app = f.env.app.clone();
         let bot_id = f.bot_id.clone();
-        crate::lifecycle::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET native_session_id='replaced-session' WHERE bot_id=? AND state='running'")
                 .bind(bot_id)
                 .execute(&app.db)
@@ -260,7 +260,7 @@ mod tests {
             let token = current_draft_token(&f, "observe").await;
             if kind == "grok" {
                 let live = f.env.herdr.live.clone();
-                crate::lifecycle::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
+                crate::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
                     live.lock().unwrap().get_mut("pane-d").unwrap().no_spinner = false;
                 });
             }
@@ -291,7 +291,7 @@ mod tests {
             f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
         let old_token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             let pane = live.get_mut("pane-d").unwrap();
             pane.composer = vec!["draft B".into()];
@@ -313,7 +313,7 @@ mod tests {
         let f = idle("claude", &["draft A"], false).await;
         let token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
             let mut live = live.lock().unwrap();
             let pane = live.get_mut("pane-d").unwrap();
             pane.revision = pane.revision.max(1) + 1;
@@ -336,7 +336,7 @@ mod tests {
         let token = current_draft_token(&f, "observe").await;
         let app = f.env.app.clone();
         let bot_id = f.bot_id.clone();
-        crate::lifecycle::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
             sqlx::query("UPDATE runs SET state='stopping' WHERE bot_id=? AND state='running'")
                 .bind(bot_id)
                 .execute(&app.db)
@@ -358,7 +358,7 @@ mod tests {
         let f = idle("claude", &["一段留在框裡的假草稿"], false).await;
         let token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
             live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec!["清不掉的殘字".into()];
         });
         let body = conflict(f.send("我自己要送的", "c1", Some(&token)).await);
@@ -457,7 +457,7 @@ mod tests {
         let path = f.env.herdr.pane("pane-d").unwrap().transcript_file.unwrap();
         let bot_id = f.bot_id.clone();
         let exact = "transcript original text";
-        crate::lifecycle::race_point::arm("draft_after_enter", &bot_id, move || async move {
+        crate::race_point::arm("draft_after_enter", &bot_id, move || async move {
             let entry = json!({"type":"user","message":{"role":"user","content":exact}});
             std::fs::write(path, format!("{entry}\n")).unwrap();
         });
@@ -495,7 +495,7 @@ mod tests {
     /// `draft_after_enter` 時把這些行寫進 session log（像別人剛好也在這個 pane 送了一則）。
     fn arm_transcript_lines(f: &Fx, lines: Vec<String>) {
         let path = f.env.herdr.pane("pane-d").unwrap().transcript_file.unwrap();
-        crate::lifecycle::race_point::arm("draft_after_enter", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_after_enter", &f.bot_id, move || async move {
             std::fs::write(path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
         });
     }
@@ -628,7 +628,7 @@ mod tests {
         f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
         let token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        crate::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
             live.lock().unwrap().get_mut("pane-d").unwrap().transcript.push("new output".into());
         });
         let body = conflict(f.send("my prompt", "screen-change", Some(&token)).await);
@@ -682,7 +682,7 @@ mod tests {
                     if changed {
                         let live = f.env.herdr.live.clone();
                         let point = if clearing { "draft_before_clear_key" } else { "draft_before_enter" };
-                        crate::lifecycle::race_point::arm(point, &f.bot_id, move || async move {
+                        crate::race_point::arm(point, &f.bot_id, move || async move {
                             live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec!["draft B".into()];
                         });
                     }

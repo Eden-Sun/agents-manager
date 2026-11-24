@@ -189,7 +189,6 @@ impl s6_ports::StartServices for App {
         crate::lifecycle::start_send::flush_once_running(&self.shared(), bot_id, run_id);
     }
 
-    #[cfg(test)]
     fn spawn_adopted_capture(&self, run_id: &str, bot_id: &str) {
         crate::lifecycle::poller::spawn_adopted_capture(&self.shared(), run_id, bot_id);
     }

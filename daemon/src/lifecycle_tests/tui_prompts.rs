@@ -77,7 +77,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let app = env.app.clone();
         let hook_run = run.clone();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || mutate(app, hook_run));
+        crate::race_point::arm("survey_before_first_key", &run.id, move || mutate(app, hook_run));
 
         assert!(!dismiss_if_survey(&env.app, &run).await, "changed authority must not count as a dismissal");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a changed authority receives no key");
@@ -88,7 +88,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let pane = run.pane_id.clone().unwrap();
         let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+        crate::race_point::arm("survey_before_first_key", &run.id, move || async move {
             replace(&pane, PERMISSION);
         });
 
@@ -125,7 +125,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let pane = run.pane_id.clone().unwrap();
         let bump = env.herdr.bump_screen_revision_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+        crate::race_point::arm("survey_before_first_key", &run.id, move || async move {
             bump(&pane);
         });
 
@@ -158,7 +158,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let pane = zero_revision_survey(&env, &run);
         let live = env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+        crate::race_point::arm("survey_before_first_key", &run.id, move || async move {
             live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu = Some(PERMISSION.to_string());
         });
 
@@ -183,7 +183,7 @@ mod tests {
         let pane = zero_revision_survey(&env, &run);
         let live = env.herdr.live.clone();
         let gone = pane.clone();
-        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
+        crate::race_point::arm("survey_after_zero", &run.id, move || async move {
             live.lock().unwrap().get_mut(&gone).unwrap().cold_resume_menu = Some(screens::IDLE_CLAUDE.to_string());
         });
         assert!(dismiss_if_survey(&env.app, &run).await);
@@ -199,7 +199,7 @@ mod tests {
     async fn an_unreadable_final_survey_read_receives_no_zero() {
         let (env, run) = survey_test_env().await;
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+        crate::race_point::arm("survey_before_first_key", &run.id, move || async move {
             fail("pane.read", crate::testing::Fault::Refuse);
         });
 
@@ -256,7 +256,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let pane = run.pane_id.clone().unwrap();
         let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
+        crate::race_point::arm("survey_after_zero", &run.id, move || async move {
             replace(&pane, screens::IDLE_CLAUDE);
         });
 
@@ -270,7 +270,7 @@ mod tests {
         let (env, run) = survey_test_env().await;
         let pane = run.pane_id.clone().unwrap();
         let replace = env.herdr.set_screen_later();
-        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
+        crate::race_point::arm("survey_before_enter", &run.id, move || async move {
             replace(&pane, PERMISSION);
         });
 
@@ -283,7 +283,7 @@ mod tests {
     async fn an_unreadable_final_second_stage_read_receives_no_enter() {
         let (env, run) = survey_test_env().await;
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
+        crate::race_point::arm("survey_before_enter", &run.id, move || async move {
             fail("pane.read", crate::testing::Fault::Refuse);
         });
 

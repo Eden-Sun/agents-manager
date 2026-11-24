@@ -12,11 +12,11 @@ async fn an_unreadable_arrival_snapshot_is_a_retryable_503_without_esc() {
     crate::testing::make_table_unreadable(&e.app, "runs").await;
     let restore_app = e.app.clone();
     let restore_bot = bot.id.clone();
-    crate::lifecycle::race_point::arm("interrupt_after_arrival", &bot.id, move || async move {
+    crate::race_point::arm("interrupt_after_arrival", &bot.id, move || async move {
         crate::testing::make_table_readable(&restore_app, "runs").await;
     });
     let result = interrupt_bot(State(e.app.clone()), Path(bot.id.clone()), None).await;
-    crate::lifecycle::race_point::hit("interrupt_after_arrival", &restore_bot).await;
+    crate::race_point::hit("interrupt_after_arrival", &restore_bot).await;
     let response = match result {
         Ok(response) => response,
         Err(error) => error.into_response(),

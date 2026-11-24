@@ -802,7 +802,7 @@ mod tests {
         let runs = running(&env, &["a", "b", "c"]).await;
         for (n, state) in [(0, "stopped"), (1, "stopping")] {
             let (db, id) = (env.app.db.clone(), runs[n].1.clone());
-            crate::lifecycle::race_point::arm("mark_run_exited_after_read", &runs[n].1, move || async move {
+            crate::race_point::arm("mark_run_exited_after_read", &runs[n].1, move || async move {
                 sqlx::query("UPDATE runs SET state=?, ended_at=? WHERE id=?").bind(state).bind(db::now()).bind(&id).execute(&db).await.unwrap();
             });
         }
@@ -834,7 +834,7 @@ mod tests {
         let runs = running(&env, &["a", "b", "c"]).await;
         for (n, (_, run)) in runs.iter().enumerate() {
             let (db, id) = (env.app.db.clone(), run.clone());
-            crate::lifecycle::race_point::arm("mark_run_exited_after_read", run, move || async move {
+            crate::race_point::arm("mark_run_exited_after_read", run, move || async move {
                 sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&id).execute(&db).await.unwrap();
             });
             assert_eq!(env.app.mark_run_exited(run, "pane exited").await, RunExit::Recorded);

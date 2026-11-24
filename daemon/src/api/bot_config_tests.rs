@@ -924,7 +924,7 @@ async fn live_apply_stamps_the_run_selected_after_the_patch_snapshot() {
     e.herdr.set_screen(&pane_b, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n");
     let screens = e.herdr.screens.clone();
     let pane_after_answer = pane_b.clone();
-    crate::lifecycle::race_point::arm("slash_after_answer_before_read", &pane_b, move || async move {
+    crate::race_point::arm("slash_after_answer_before_read", &pane_b, move || async move {
         screens.lock().unwrap().insert(pane_after_answer, "Claude Code\n❯\n".into());
     });
 
@@ -934,7 +934,7 @@ async fn live_apply_stamps_the_run_selected_after_the_patch_snapshot() {
     let run_b_for_rollover = run_b.clone();
     let pane_for_rollover = pane_b.clone();
     let baseline = old_rev.clone();
-    crate::lifecycle::race_point::arm("patch_after_active_snapshot", &id, move || async move {
+    crate::race_point::arm("patch_after_active_snapshot", &id, move || async move {
         sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?")
             .bind(db::now())
             .bind(&run_a_for_rollover)
@@ -1012,7 +1012,7 @@ async fn a_deferred_live_apply_keeps_its_stamp_retry_after_launch_write_fails() 
     let replace_screen = e.herdr.set_screen_later();
     let toggled_screen = "gpt-6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
     let pane_after_toggle = pane.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "codex_after_fast_toggle",
         &pane,
         move || async move {
@@ -1147,7 +1147,7 @@ async fn a_busy_fast_only_change_goes_in_during_the_turn() {
     let replace_screen = e.herdr.set_screen_later();
     let toggled = codex_working_screen("  GPT-6-Luna max fast · /tmp · Context 43% used · 5h 12% left");
     let pane_after = pane.clone();
-    crate::lifecycle::race_point::arm("codex_after_fast_toggle", &pane, move || async move {
+    crate::race_point::arm("codex_after_fast_toggle", &pane, move || async move {
         replace_screen(&pane_after, &toggled);
     });
 
@@ -1271,19 +1271,19 @@ async fn turn_status(e: &tt::Env, turn_id: &str) -> String {
 fn script_interrupt_apply(e: &tt::Env, pane: &str, after_esc: String, after_apply: String) {
     let screens = e.herdr.screens.clone();
     let (pane_a, screens_a) = (pane.to_string(), screens.clone());
-    crate::lifecycle::race_point::arm("codex_interrupt_after_esc", pane, move || async move {
+    crate::race_point::arm("codex_interrupt_after_esc", pane, move || async move {
         screens_a.lock().unwrap().insert(pane_a, after_esc);
     });
     let (pane_b, screens_b) = (pane.to_string(), screens.clone());
-    crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+    crate::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
         screens_b.lock().unwrap().insert(pane_b, CODEX_MODEL_MENU.into());
     });
     let (pane_c, screens_c) = (pane.to_string(), screens.clone());
-    crate::lifecycle::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
+    crate::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
         screens_c.lock().unwrap().insert(pane_c, CODEX_EFFORT_MENU.into());
     });
     let (pane_d, screens_d) = (pane.to_string(), screens);
-    crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+    crate::race_point::arm("codex_picker_before_final_read", pane, move || async move {
         screens_d.lock().unwrap().insert(pane_d, after_apply);
     });
 }
@@ -1333,7 +1333,7 @@ async fn a_failed_apply_after_the_interrupt_still_resumes_the_turn() {
     let replace = e.herdr.set_screen_later();
     let idle = codex_idle_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left");
     let pane_after = pane.clone();
-    crate::lifecycle::race_point::arm("codex_interrupt_after_esc", &pane, move || async move {
+    crate::race_point::arm("codex_interrupt_after_esc", &pane, move || async move {
         replace(&pane_after, &idle);
     });
 
@@ -1365,7 +1365,7 @@ async fn a_resume_that_cannot_be_typed_fails_the_turn_with_a_visible_reason() {
     let pane_hook = pane.clone();
     let screens = e.herdr.screens.clone();
     let after_apply = codex_idle_screen("  GPT-6-Luna high · /tmp · Context 43% used · 5h 12% left");
-    crate::lifecycle::race_point::arm("codex_picker_before_final_read", &pane, move || async move {
+    crate::race_point::arm("codex_picker_before_final_read", &pane, move || async move {
         screens.lock().unwrap().insert(pane_hook, after_apply);
         fail("pane.send_text", tt::Fault::Refuse);
     });
@@ -1538,7 +1538,7 @@ async fn a_live_apply_with_a_failed_runtime_write_is_not_reported_as_applied() {
     e.herdr.set_screen(&pane, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n");
     let screens = e.herdr.screens.clone();
     let pane_after_answer = pane.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "slash_after_answer_before_read",
         &pane,
         move || async move {

@@ -353,7 +353,7 @@ pub async fn switch_candidate(
     let next = super::setup::candidate(next);
     let model = super::setup::model_arg(next).to_string();
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("supervisor_switch_before_config", &bot_id).await;
+    crate::race_point::hit("supervisor_switch_before_config", &bot_id).await;
     let bid = bot_id.clone();
     let m2 = model.clone();
     let effort = sup.effort.clone();
@@ -411,7 +411,7 @@ mod switch_write_tests {
         store::get_or_init(&e.app.db).await.unwrap();
         store::set_env(&e.app.db, &bot.id, &e.project_id, "/tmp").await.unwrap();
         let path = e.app.cfg.path.clone();
-        crate::lifecycle::race_point::arm("supervisor_switch_before_config", &bot.id, move || async move {
+        crate::race_point::arm("supervisor_switch_before_config", &bot.id, move || async move {
             std::fs::write(&path, "[[[ 寫到一半的設定").unwrap();
         });
 

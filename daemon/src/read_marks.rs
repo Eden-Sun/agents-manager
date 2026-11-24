@@ -27,7 +27,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         .fetch_optional(&mut *tx)
         .await?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("read_marks_after_table_read", &crate::db::file_key(&mut tx).await).await;
+    crate::race_point::hit("read_marks_after_table_read", &crate::db::file_key(&mut tx).await).await;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_reads (
            bot_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT ''

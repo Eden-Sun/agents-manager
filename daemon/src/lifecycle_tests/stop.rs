@@ -246,7 +246,7 @@ mod stop_commit_tests {
         assert!(matches!(api_begin_stop_transaction(&env.app.db, &bad, Mode::Idle, &shutdown).await, Err(Error::IdentityMismatch)));
         assert_eq!(state(&env.app, &key.run_id).await, "running");
         let cancel = shutdown.clone();
-        crate::lifecycle::race_point::arm("api_begin_stop_before_commit", &key.run_id, move || async move { cancel.cancel(); });
+        crate::race_point::arm("api_begin_stop_before_commit", &key.run_id, move || async move { cancel.cancel(); });
         assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: false }, &shutdown).await, Err(Error::Busy)));
         assert_eq!(state(&env.app, &key.run_id).await, "running");
         let fresh = tokio_util::sync::CancellationToken::new();
@@ -300,7 +300,7 @@ mod stop_commit_tests {
         let key = ApiRunKey { bot_id: "after-bot".into(), run_id: "after-run".into() };
         let shutdown = tokio_util::sync::CancellationToken::new();
         let cancel = shutdown.clone();
-        crate::lifecycle::race_point::arm("api_begin_stop_after_commit", &key.run_id, move || async move { cancel.cancel(); });
+        crate::race_point::arm("api_begin_stop_after_commit", &key.run_id, move || async move { cancel.cancel(); });
         assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: false }, &shutdown).await, Err(Error::Ambiguous)));
         assert_eq!(state(&env.app, &key.run_id).await, "stopping", "a confirmed post-commit fault cannot be reported as rollback");
     }
@@ -356,7 +356,7 @@ mod stop_commit_tests {
         let (bot, run) = running_bot(&env).await;
         let in_flight = rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         rs::refuse_run_state(&app, "stopping").await;
         let n = env.herdr.methods().len();
 
@@ -367,7 +367,7 @@ mod stop_commit_tests {
         assert_eq!(state(&app, &run).await, "running");
         assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
         assert_eq!(rs::turn_status(&app, &queued).await, "queued");
-        assert!(rs::watched(&app, &watcher).await);
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await);
     }
 
     /// 驗收 2：pane 真的關了，`stopped` 卻寫不進去——不回一般的成功；終態還沒成立，佇列與 watcher 先不動。
@@ -379,7 +379,7 @@ mod stop_commit_tests {
         let (bot, run) = running_bot(&env).await;
         let pane = db::run(app.db(), &run).await.unwrap().unwrap().pane_id.unwrap();
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         rs::refuse_run_state(&app, "stopped").await;
 
         match stop_bot(&app, &bot).await {
@@ -390,7 +390,7 @@ mod stop_commit_tests {
         assert!(client.pane_get(&pane).await.unwrap().is_none(), "pane 真的關了");
         assert_eq!(state(&app, &run).await, "stopping");
         assert_eq!(rs::turn_status(&app, &queued).await, "queued", "終態還沒寫進去，佇列先不撤");
-        assert!(rs::watched(&app, &watcher).await);
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await);
         assert_eq!(rs::scheduled(&run), vec![rs::Settle::FinishStop], "排了補記的重試");
 
         rs::accept_run_state(&app, "stopped").await;
@@ -398,7 +398,7 @@ mod stop_commit_tests {
         assert_eq!(state(&app, &run).await, "stopped", "使用者要它停");
         assert_eq!(rs::turn_status(&app, &queued).await, "failed");
         assert_eq!(rs::system_notes(&app, &queued).await, 1);
-        assert!(!rs::watched(&app, &watcher).await);
+        assert!(!crate::lifecycle_tests::support::watched(&app, &watcher).await);
     }
 
     /// 補記 `stopped` 的重試（`FinishStop`）讀不到主機：這一輪什麼都不寫——收尾要拆那台主機上的 watcher，以前退回 local，
@@ -408,7 +408,7 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         rs::refuse_run_state(&app, "stopped").await;
         assert!(stop_bot(&app, &bot).await.is_err());
         rs::accept_run_state(&app, "stopped").await;
@@ -417,11 +417,11 @@ mod stop_commit_tests {
         assert!(!rs::settle_once(&app, &run, &rs::Settle::FinishStop).await, "讀不到主機：還沒補上");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert_eq!(state(&app, &run).await, "stopping", "一步都沒寫");
-        assert!(rs::watched(&app, &watcher).await);
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await);
 
         assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
         assert_eq!(state(&app, &run).await, "stopped");
-        assert!(!rs::watched(&app, &watcher).await, "拆的是那台主機上的 watcher");
+        assert!(!crate::lifecycle_tests::support::watched(&app, &watcher).await, "拆的是那台主機上的 watcher");
     }
 
     /// #208：遠端 bot 的 `FinishStop` 補記時讀不到主機。以前退回 local 去拆 watcher——拆掉的是本機同名 session、同 pane id
@@ -454,12 +454,12 @@ mod stop_commit_tests {
         assert!(!rs::settle_once(&app, &far_run, &rs::Settle::FinishStop).await, "讀不到主機：這一輪不補");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert_eq!(state(&app, &far_run).await, "stopping");
-        assert!(rs::watched(&app, &key(LOCAL_HOST)).await && rs::watched(&app, &key("remote1")).await, "兩個 watcher 都沒動");
+        assert!(crate::lifecycle_tests::support::watched(&app, &key(LOCAL_HOST)).await && crate::lifecycle_tests::support::watched(&app, &key("remote1")).await, "兩個 watcher 都沒動");
 
         assert!(rs::settle_once(&app, &far_run, &rs::Settle::FinishStop).await);
         assert_eq!(state(&app, &far_run).await, "stopped");
-        assert!(!rs::watched(&app, &key("remote1")).await, "拆的是遠端那一個");
-        assert!(rs::watched(&app, &key(LOCAL_HOST)).await, "本機同名的那顆照舊收得到狀態事件");
+        assert!(!crate::lifecycle_tests::support::watched(&app, &key("remote1")).await, "拆的是遠端那一個");
+        assert!(crate::lifecycle_tests::support::watched(&app, &key(LOCAL_HOST)).await, "本機同名的那顆照舊收得到狀態事件");
     }
 
     /// The host can be repointed after the restart's fence check but before stop resolves the run's
@@ -506,7 +506,7 @@ mod stop_commit_tests {
 
         let app_to_repoint = app.clone();
         let replacement = cfg("target-b");
-        crate::lifecycle::race_point::arm("restart_before_stop_client_lookup", &bot.id, move || async move {
+        crate::race_point::arm("restart_before_stop_client_lookup", &bot.id, move || async move {
             app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
         });
 
@@ -575,7 +575,7 @@ mod stop_commit_tests {
 
         let app_to_repoint = app.clone();
         let replacement = cfg("target-b");
-        crate::lifecycle::race_point::arm("restart_before_no_run_preview_cleanup", &bot.id, move || async move {
+        crate::race_point::arm("restart_before_no_run_preview_cleanup", &bot.id, move || async move {
             app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
         });
 
@@ -696,7 +696,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("stop_before_stopping", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopping", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
         });
         let n = env.herdr.methods().len();
@@ -717,7 +717,7 @@ mod stop_commit_tests {
         let (bot, run) = running_bot(&env).await;
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("stop_before_stopped", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
         });
 
@@ -739,7 +739,7 @@ mod stop_commit_tests {
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
         sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("stop_before_stopped", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
         });
         rs::refuse_run_state(&app, "stopped").await;
@@ -750,13 +750,13 @@ mod stop_commit_tests {
         }
         assert_eq!(state(&app, &run).await, "exited");
         assert_eq!(rs::scheduled(&run), vec![rs::Settle::FinishStop], "排了補改標的重試");
-        assert!(rs::bot_stopped_reported(&app, &bot).await, "前提：留著 exited，探針說它自己掛了");
+        assert!(crate::lifecycle_tests::support::bot_stopped_reported(&app, &bot).await, "前提：留著 exited，探針說它自己掛了");
         assert_eq!(rs::turn_status(&app, &waiting).await, "failed", "等它起來的那一則在記 `stopping` 時就一起撤了（#199）");
 
         rs::accept_run_state(&app, "stopped").await;
         assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
         assert_eq!(state(&app, &run).await, "stopped", "使用者要它停");
-        assert!(!rs::bot_stopped_reported(&app, &bot).await, "故意停的 autostart bot 不是 outage");
+        assert!(!crate::lifecycle_tests::support::bot_stopped_reported(&app, &bot).await, "故意停的 autostart bot 不是 outage");
         assert_eq!(rs::system_notes(&app, &waiting).await, 1, "只撤一次");
     }
 
@@ -767,7 +767,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("stop_before_stopped", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
         });
         assert!(stop_for_restart_locked(&app, &bot).await.unwrap(), "pane 關了、舊 run 收掉了：重啟照常往下走");
@@ -844,7 +844,7 @@ mod stop_commit_tests {
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
         sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
-        crate::lifecycle::race_point::arm("stop_before_stopped", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
         });
 
@@ -903,7 +903,7 @@ mod stop_commit_tests {
         let (bot, run) = running_bot(&env).await;
         let in_flight = rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
-        let watcher = rs::watch_run_pane(&app, &run).await;
+        let watcher = crate::lifecycle_tests::support::watch_run_pane(&app, &run).await;
         rs::refuse_turn_close(&app, &in_flight).await;
         let n = env.herdr.methods().len();
 
@@ -917,7 +917,7 @@ mod stop_commit_tests {
         assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
         assert_eq!(rs::system_notes(&app, &in_flight).await, 0);
         assert_eq!(rs::turn_status(&app, &queued).await, "queued", "沒停就不撤");
-        assert!(rs::watched(&app, &watcher).await);
+        assert!(crate::lifecycle_tests::support::watched(&app, &watcher).await);
 
         rs::accept_turn_close(&app).await;
         assert!(stop_bot(&app, &bot).await.expect("DB 好了照常停"));

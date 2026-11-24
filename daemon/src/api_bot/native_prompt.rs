@@ -157,7 +157,7 @@ async fn prompt_body_inner(
         return Err(E::Unconfirmed);
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("api_native_prompt_after_pending_commit", crid).await;
+    crate::race_point::hit("api_native_prompt_after_pending_commit", crid).await;
     if !matches!(app.window_held().await, Ok(None)) || app.shutdown.is_cancelled() { return Err(E::Unconfirmed); }
     let key = ApiTurnKey { bot_id: bot.to_owned(), run_id: run, turn_id: turn.clone() };
     crate::lifecycle::api_bot_port::ApiBotPort::api_turn_spawn_pending(app, &key).await.map_err(|_| E::Unconfirmed)?;

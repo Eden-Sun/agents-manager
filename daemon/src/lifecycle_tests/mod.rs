@@ -37,6 +37,7 @@ mod queue;
 mod quota_hold;
 mod relay_watch;
 mod stuck_turns;
+pub(crate) mod support;
 mod resume_gate;
 mod resume_nudge;
 mod screen;

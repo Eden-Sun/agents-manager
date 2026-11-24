@@ -212,7 +212,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
         op.name = used_name.into_inner().unwrap_or_default();
         app.emit("bot_changed", json!({"bot_id": new_id})).await;
         #[cfg(test)]
-        lifecycle::race_point::hit("fork_after_bot_changed", &new_id).await;
+        crate::race_point::hit("fork_after_bot_changed", &new_id).await;
 
         if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
             let note = format!(
@@ -593,7 +593,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (r2, go) = (reached.clone(), release.clone());
-        lifecycle::race_point::arm("fork_after_bot_changed", &target, move || async move {
+        crate::race_point::arm("fork_after_bot_changed", &target, move || async move {
             r2.notify_one();
             go.notified().await;
         });
@@ -714,12 +714,12 @@ mod tests {
 
         let (visible_tx, visible_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        lifecycle::race_point::arm("fork_after_bot_changed", &target, move || async move {
+        crate::race_point::arm("fork_after_bot_changed", &target, move || async move {
             let _ = visible_tx.send(());
             let _ = release_rx.await;
         });
         let (manual_start_tx, manual_start_rx) = tokio::sync::oneshot::channel();
-        lifecycle::race_point::arm("restart_before_agent_start", &target, move || async move {
+        crate::race_point::arm("restart_before_agent_start", &target, move || async move {
             let _ = manual_start_tx.send(());
         });
 

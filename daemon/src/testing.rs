@@ -1341,7 +1341,7 @@ pub fn arm_foreign_writer(file: &std::path::Path, point: &'static str, key: &str
     use sqlx::ConnectOptions;
     let seen = Arc::new(StdMutex::new(None::<bool>));
     let (file, cell) = (file.to_path_buf(), seen.clone());
-    crate::lifecycle::race_point::arm(point, key, move || async move {
+    crate::race_point::arm(point, key, move || async move {
         let mut other = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&file)
             .busy_timeout(std::time::Duration::ZERO)
@@ -1656,4 +1656,36 @@ pub async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value
     let mut buf = vec![0u8; len];
     s.read_exact(&mut buf).await.unwrap();
     serde_json::from_slice(&buf).unwrap()
+}
+
+impl crate::capabilities::Db for Env {
+    fn db(&self) -> &sqlx::SqlitePool {
+        &self.app.db
+    }
+}
+
+impl crate::lifecycle::restart_kind_tests::RestartKindFixture for Env {
+    fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    fn herdr_client(&self) -> crate::herdr::HerdrClient {
+        crate::herdr::HerdrClient::new(self.dir.join("data/herdr.sock"))
+    }
+
+    async fn create_parent(&self, name: &str) -> String {
+        claude_bot(&self.app, &self.project_id, name).await.id
+    }
+
+    fn record_agent(&self, agent: serde_json::Value) {
+        self.herdr.agents.lock().unwrap().push(agent);
+    }
+
+    fn tab_has_pane(&self, tab_id: &str, pane_id: &str) -> bool {
+        self.herdr.tab(tab_id).unwrap().panes.iter().any(|pane| pane == pane_id)
+    }
+
+    fn calls_to(&self, method: &str) -> Vec<serde_json::Value> {
+        self.herdr.calls_to(method)
+    }
 }

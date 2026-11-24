@@ -156,7 +156,7 @@ async fn first_request_holds_lock_during_sweep_and_respects_terminal_state() {
         let turn = db::ulid();
         let conv = db::conversation_id(&env.app.db, &b.id).await.unwrap();
         let app = env.app.clone(); let key2 = key.clone(); let turn2 = turn.clone(); let conv2 = conv.clone();
-        crate::lifecycle::race_point::arm("relay_request_after_insert", &key, move || async move {
+        crate::race_point::arm("relay_request_after_insert", &key, move || async move {
             crate::runners::relay_requests::sweep(&app).await;
             let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE client_request_id=?").bind(&key2).fetch_one(&app.db).await.unwrap();
             assert_eq!(state, "pending", "sweep must skip the locked request");

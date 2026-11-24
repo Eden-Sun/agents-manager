@@ -436,7 +436,7 @@ async fn cursor_cas_does_not_overwrite_a_newer_cache_or_publish_after_startup() 
     newer.turn_id = "newer-turn".into();
     let expected = newer.clone();
     let target = app.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_startup_before_cursor_cas",
         &f.identity.bot_id,
         move || async move {
@@ -454,7 +454,7 @@ async fn cursor_cas_does_not_overwrite_a_newer_cache_or_publish_after_startup() 
     let f = fixture(false).await;
     let app = restart(&f).await;
     let target = app.clone();
-    crate::lifecycle::race_point::arm(
+    crate::race_point::arm(
         "api_startup_before_cursor_cas",
         &f.identity.bot_id,
         move || async move {

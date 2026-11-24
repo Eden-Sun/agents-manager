@@ -68,7 +68,7 @@ mod limit_hit_quota_tests {
         let (bot, run) = codex_run(&env, None, &banner_screen()).await;
         crate::lifecycle::limit_banner::sighting(&run, "", FAR_LIMIT, &[]);
         let a = app.clone();
-        crate::lifecycle::race_point::arm("codex_notice_after_insert", &bot.id, move || async move {
+        crate::race_point::arm("codex_notice_after_insert", &bot.id, move || async move {
             sqlx::query("ALTER TABLE turns RENAME TO turns_unreadable").execute(a.db()).await.unwrap();
         });
         let first = capture_codex_usage_notices(&app, &bot.id, &run).await;

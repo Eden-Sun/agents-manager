@@ -2225,7 +2225,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).collect();
         let ids: Vec<String> = in_project.iter().map(|b| b.id.clone()).collect();
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("delete_project_before_lock", &id).await;
+        crate::race_point::hit("delete_project_before_lock", &id).await;
         let (ids, guards) = lock_bots_in_order(&app, ids).await;
         let now: std::collections::BTreeSet<String> =
             db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).map(|b| b.id).collect();
@@ -2267,7 +2267,7 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
     let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by}))
         .await?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
+    crate::race_point::hit("delete_after_intent", &id).await;
     if let Err(e) = delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await {
         crate::delete_intents::abandon(&app, &intent, "delete_in_config refused").await;
         return Err(e);
@@ -2279,7 +2279,7 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
         share_retry = true;
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
+    crate::race_point::hit("delete_project_after_commit", &id).await;
     let draft_keys: Vec<String> = std::iter::once(format!("group:{id}")).chain(ids.iter().map(|b| format!("bot:{b}"))).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
     let mut failed: Vec<db::Bot> = Vec::new();
@@ -2517,7 +2517,7 @@ async fn create_bot(
     let restricted = share_profile == Some(crate::share::store::PROFILE_RESTRICTED);
     let share_bot = share_profile.is_some();
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
+    crate::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = if api_bot { (Some(b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::api_bot_defaults(&b.kind).map_or(crate::config::API_BOT_MODEL, |d| d.0)).to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
     let model = match (restricted, model) {
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
@@ -2602,7 +2602,7 @@ async fn create_bot(
             return Err(e);
         }
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("create_bot_after_identity_admit", &pid).await;
+        crate::race_point::hit("create_bot_after_identity_admit", &pid).await;
     }
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
@@ -3245,7 +3245,7 @@ async fn patch_bot(
     }
     let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("patch_after_active_snapshot", &id).await;
+    crate::race_point::hit("patch_after_active_snapshot", &id).await;
     if let Some(n) = &b.name {
         if !valid_bot_name(n) {
             return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
@@ -3366,7 +3366,7 @@ async fn patch_bot(
             identity_admit = crate::identity_fence::admit(&host, &kind, Some(name)).await;
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
             #[cfg(test)]
-            crate::lifecycle::race_point::hit("patch_bot_after_identity_admit", &id).await;
+            crate::race_point::hit("patch_bot_after_identity_admit", &id).await;
         }
     }
     if b.is_primary.is_some() && (restart_relevant || b.name.is_some() || b.autostart.is_some()) {
@@ -3640,7 +3640,7 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
     let intent =
         crate::delete_intents::begin(&app, "delete_bot", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by})).await?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
+    crate::race_point::hit("delete_after_intent", &id).await;
     let decided: Result<(), LcError> = if bot.managed_by == "child" {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map(|_| ()).map_err(any_err)
     } else {
@@ -3652,7 +3652,7 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
     }
     crate::api_bot::schedule_retention_after_delete(&app);
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
+    crate::race_point::hit("delete_bot_after_decided", &id).await;
     let draft_keys: Vec<String> = std::iter::once(&id).chain(children.iter().map(|c| &c.id)).map(|b| format!("bot:{b}")).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
     let mut child_retry = false;
@@ -3754,7 +3754,7 @@ pub(crate) async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Resu
         }
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_stop_before_proof", bot_id).await;
+    crate::race_point::hit("delete_stop_before_proof", bot_id).await;
     match db::active_run(&app.db, bot_id).await {
         Ok(None) if forced => {
             tracing::warn!(bot = %bot_id, "the stop was not confirmed (the run was ended anyway); keeping the bot's directory");
@@ -3855,7 +3855,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
         }
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("restore_child_after_liveness_check", &id).await;
+        crate::race_point::hit("restore_child_after_liveness_check", &id).await;
         let mut tx = app.db.begin().await.map_err(any_err)?;
         crate::child_reconcile_safety::record_retirement_grace_on(&mut tx, &id).await.map_err(any_err)?;
         let changed = sqlx::query(
@@ -4119,7 +4119,7 @@ async fn create_host(
     let hosts = app.cfg.get().await.hosts;
     let changed_hosts = app.hosts.apply_config(&app, &hosts).await;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("create_host_after_apply_config", &b.name).await;
+    crate::race_point::hit("create_host_after_apply_config", &b.name).await;
     drop(host_mutation);
     let (connected, error) = if changed_hosts.contains(&b.name) {
         match app.hosts.get(&b.name).await {
@@ -4180,7 +4180,7 @@ async fn delete_host(
         return Err(cfg_err(e));
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_host_after_config_remove", &name).await;
+    crate::race_point::hit("delete_host_after_config_remove", &name).await;
     app.hosts.remove(&app, &name).await;
     app.emit("project_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -5375,7 +5375,7 @@ async fn delete_identity(
         }
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("delete_identity_after_check", &name).await;
+    crate::race_point::hit("delete_identity_after_check", &name).await;
     let removed_kind = cfg.identities.iter().find(|i| i.name == name && i.host_or_local() == host).map(|i| i.kind.clone());
     let (n2, h2) = (name.clone(), host.clone());
     crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
@@ -5806,7 +5806,7 @@ async fn rotate_bot_credential(
     .await
     .map_err(any_err)?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("credential_rotation_after_descendant_query", &id).await;
+    crate::race_point::hit("credential_rotation_after_descendant_query", &id).await;
     if !live_descendants.is_empty() {
         return Err(LcError::conflict(
             "live descendants still use the parent's credential; stop them before rotating",
@@ -5895,7 +5895,7 @@ async fn rotate_bot_credential(
         return Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": false, "run_id": null}))).into_response());
     };
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("credential_rotation_committed", &id).await;
+    crate::race_point::hit("credential_rotation_committed", &id).await;
 
     let pending_error = |detail: String| {
         LcError::conflict(
@@ -6605,7 +6605,7 @@ pub(crate) async fn prompt_bot(
             .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster).bind(&cluster_key)
             .bind(&cluster).bind(sender).bind(&crid).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
+        crate::race_point::hit("relay_request_after_insert", &crid).await;
         let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND (to_bot_id=? OR (cluster IS NOT NULL AND cluster=?)) ORDER BY id<>?, to_bot_id<>? LIMIT 1")
             .bind(sender).bind(&crid).bind(&id).bind(&cluster).bind(&request_id).bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
         if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
@@ -7269,7 +7269,7 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     let mut rx = app.subscribe();
     let send_timeout = app.ws_send_timeout();
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("ws_subscribed", &app.data_dir.display().to_string()).await;
+    crate::race_point::hit("ws_subscribed", &app.data_dir.display().to_string()).await;
     let mut sent_through = 0u64;
     let backlog = match since {
         Some(s) => app.backlog(s).await,

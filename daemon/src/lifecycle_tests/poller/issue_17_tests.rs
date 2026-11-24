@@ -1062,7 +1062,7 @@ async fn a_stall_round_that_cannot_read_what_was_sent_does_not_fail_the_turn() {
     app.stall_timers.lock().await.insert(f.run_id.clone(), 31);
     sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable").execute(&app.db).await.unwrap();
     let a = app.clone();
-    crate::lifecycle::race_point::arm("stall_after_nudge", &f.turn_id, move || async move {
+    crate::race_point::arm("stall_after_nudge", &f.turn_id, move || async move {
         sqlx::query("ALTER TABLE messages_unreadable RENAME TO messages").execute(&a.db).await.unwrap();
     });
     let mut st = Stall::default();
@@ -1879,10 +1879,10 @@ async fn issue_1654_owed_unknown_write_restores_its_baseline_from_durable_storag
     let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, now.into());
     late_proof::persist_pending_at(&app.db, &f.run_id, &pending, now).await.unwrap();
 
-    assert!(!late_proof::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "delivery 仍是 ok：還沒寫成 unknown，不接回");
+    assert!(!late_proof::test_seams::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "delivery 仍是 ok：還沒寫成 unknown，不接回");
     assert!(!late_proof_armed(&f.turn_id));
     sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
-    assert!(late_proof::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "欠帳寫成 unknown 後要從 durable 列接回");
+    assert!(late_proof::test_seams::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "欠帳寫成 unknown 後要從 durable 列接回");
     let restored = late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| t == &f.turn_id).map(|(_, p)| p.clone()).expect("接回的基準已認領");
     assert_eq!((restored.kind.as_str(), restored.text.as_str()), ("claude", text));
 }
@@ -1931,7 +1931,7 @@ async fn issue_1654_late_proof_watcher_is_tracked_and_stops_at_shutdown() {
     let path = with_transcript(&f, quiet()).await;
     let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
     let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "Reply with PONG please", db::now());
-    late_proof::spawn_watch(&app, &f.run_id, &f.bot_id, &f.turn_id, pending);
+    late_proof::test_seams::spawn_watch(&app, &f.run_id, &f.bot_id, &f.turn_id, pending);
     assert_eq!(app.background_tasks.len(), 1, "補證 watcher 要登記在 background_tasks");
 
     app.shutdown.cancel();

@@ -51,7 +51,7 @@ pub(crate) async fn post_share(
 ) -> Result<Json<Value>, LcError> {
     user_only(&principal)?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
+    crate::race_point::hit("share_admin_before_lock", &id).await;
     let lock = app.bot_lock(&id).await;
     let _guard = lock.lock_owned().await;
     if !admin::shareable_bot(&app, &id).await? {
@@ -83,7 +83,7 @@ pub(crate) async fn post_rotate(
 ) -> Result<Json<Value>, LcError> {
     user_only(&principal)?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
+    crate::race_point::hit("share_admin_before_lock", &id).await;
     let lock = app.bot_lock(&id).await;
     let _guard = lock.lock_owned().await;
     if !admin::shareable_bot(&app, &id).await? {

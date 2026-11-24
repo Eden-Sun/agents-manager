@@ -471,5 +471,7 @@ mod tests;
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
     use super::*;
+    pub const PENDING_ALERT_AFTER: Duration = super::PENDING_ALERT_AFTER;
+    pub const PENDING_OBSERVATION_GAP: Duration = super::PENDING_OBSERVATION_GAP;
     pub async fn accept_on_body_at(app: &(impl Db + HerdrRoutes + HostsAccess), run: &db::Run, client: &RunClient, now: Option<std::time::Instant>) -> anyhow::Result<bool> { super::accept_on_body_at(app, run, client, now).await }
 }

@@ -288,7 +288,7 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::config::LOCAL_HOST;
-    use crate::lifecycle::race_point;
+    use crate::race_point;
     use crate::testing as tt;
     use serde_json::json;
 

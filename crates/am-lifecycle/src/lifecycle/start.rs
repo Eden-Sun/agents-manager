@@ -901,7 +901,8 @@ async fn unsettled_fork(app: &impl Db, bot_id: &str) -> Option<(String, String)>
 
 /// 這顆 bot 還在等它的 fork（config 的 `fork_from`）：沒有自己的 session，且來源 codex bot 有 session → `(來源的 session, 來源 bot)`。
 /// 有自己的 session 了就不再分岔（那是重啟，走 resume）。
-pub(crate) async fn pending_fork(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow::Result<Option<(String, String)>> {
+test_visible_item! { pub(crate),
+async fn pending_fork(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow::Result<Option<(String, String)>> {
     let cfg = app.cfg().get().await;
     let Some(source) = cfg
         .projects
@@ -922,6 +923,7 @@ pub(crate) async fn pending_fork(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow
             Ok(None)
         }
     }
+}
 }
 
 async fn is_first_contact(app: &impl Db, bot: &db::Bot, run_id: &str) -> LcResult<bool> {
@@ -2150,7 +2152,7 @@ async fn restart_start_body(
 }
 
 /// herdr `agent.start` 回「名字被占」：原 pane 的舊 agent 還在（狀態 Done、名字沒釋放）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn agent_name_taken(e: &anyhow::Error) -> bool {
     if let Some(h) = e.downcast_ref::<crate::herdr::HerdrError>() {
         return h.code == "agent_name_taken";
@@ -2162,13 +2164,13 @@ fn agent_name_taken(e: &anyhow::Error) -> bool {
 /// 同名 `agent.start --resume <上一個 session>`。pane 是父 agent 開的，且 shell 裡的環境
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
 /// 過程中 pane 不見了就不重開。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn restart_child_in_pane(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_child_in_pane_with(app, bot_id, false).await
 }
 
 /// 同上；`require_idle` 見 [`StartOpts::require_idle`]。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, require_idle: bool) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;

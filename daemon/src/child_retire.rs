@@ -449,7 +449,7 @@ mod tests {
         let kid = a_child(&env).await;
         let restore_app = app.clone();
         let restore_id = kid.clone();
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "child_retire_before_transaction",
             &kid,
             move || async move {
@@ -499,7 +499,7 @@ mod tests {
         let kid = a_child(&env).await;
         let handoff_app = app.clone();
         let project_id = env.project_id.clone();
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "child_retire_before_transaction",
             &kid,
             move || async move {

@@ -1,4 +1,4 @@
-//! 守衛測試共用：把原始碼裡 `#[cfg(test)]`（與 `#[cfg(all(test, …))]`）的區塊標成遮罩，讓掃描只看正式碼。
+//! 守衛測試共用：把原始碼裡只在測試建置存在的區塊（`#[cfg(test)]`、`#[cfg(all(test, …))]`、test-hooks gate）標成遮罩，讓掃描只看正式碼。
 //! 各 crate 的 ports 守衛測試（send／session／ingress）都用這一份。
 
 /// 每一行是否落在 `#[cfg(test)]` 區塊（含 `#[cfg(all(test, …))]`）裡。
@@ -8,8 +8,11 @@ pub fn test_mask(src: &str) -> Vec<bool> {
     let mut mask = vec![false; lines.len()];
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim_start().starts_with("#[cfg(test)]")
-            || lines[i].trim_start().starts_with("#[cfg(all(test,")
+        let head = lines[i].trim_start();
+        if head.starts_with("#[cfg(test)]")
+            || head.starts_with("#[cfg(all(test,")
+            || head.starts_with("#[cfg(any(test, feature = \"test-hooks\"")
+            || head.starts_with("#[cfg(any(feature = \"test-hooks\"")
         {
             let (mut depth, mut seen, mut j) = (0i32, false, i);
             while j < lines.len() {
@@ -40,5 +43,8 @@ mod tests {
     fn test_mask_skips_cfg_test_items() {
         assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
         assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"daemon-test-harness\"))]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
+        assert!(test_mask("fn a() {}\n#[cfg(any(feature = \"test-hooks\", all(test, feature = \"daemon-test-harness\")))]\nfn b() {\n}\nfn c() {}\n") == vec![false, true, true, true, false]);
+        assert!(test_mask("#[cfg(any(test, feature = \"test-hooks\"))]\nfn b() {}\nfn c() {}\n") == vec![true, true, false]);
+        assert!(test_mask("#[cfg(not(any(feature = \"test-hooks\", all(test, feature = \"daemon-test-harness\"))))]\nfn b() {}\n") == vec![false, false]);
     }
 }

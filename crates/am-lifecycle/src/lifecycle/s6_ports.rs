@@ -109,7 +109,6 @@ pub trait StartServices: SetupShareServices + Send + Sync {
         client: &crate::herdr::HerdrClient,
     ) -> impl Future<Output = std::result::Result<(), String>> + Send;
     fn flush_once_running(&self, bot_id: &str, run_id: &str);
-    #[cfg(test)]
     fn spawn_adopted_capture(&self, run_id: &str, bot_id: &str);
     fn watch_pane_on_session(&self, host: &str, session: &str, pane: &str) -> impl Future<Output = ()> + Send;
     fn session_connected_with_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = bool> + Send;

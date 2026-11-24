@@ -476,7 +476,7 @@ pub async fn post_review(
     if matches!(updated.status.as_str(), "cancelled" | "superseded" | "failed") {
         if let Some(tid) = updated.turn_id.as_deref() {
             #[cfg(test)]
-            crate::lifecycle::race_point::hit("review_before_revoke", &updated.id).await;
+            crate::race_point::hit("review_before_revoke", &updated.id).await;
             let withdrawal = app.assignment_withdrawal(tid).await;
             if let Err(e) = &withdrawal {
                 tracing::warn!(assignment = %updated.id, turn = tid, error = ?e, "讀不到交辦是否已撤回：排著的那一則這一刻撤不成，交給 flush");
@@ -3082,11 +3082,11 @@ mod verified_actor_role_read_failure_tests {
 
     fn fail_role_lookup_once(app: &Arc<App>, bot_id: &str) {
         let make_unreadable = app.clone();
-        crate::lifecycle::race_point::arm("actor_role_before_lookup", bot_id, move || async move {
+        crate::race_point::arm("actor_role_before_lookup", bot_id, move || async move {
             crate::testing::make_table_unreadable(&make_unreadable, "supervisor_roles").await;
         });
         let restore = app.clone();
-        crate::lifecycle::race_point::arm("actor_role_after_lookup", bot_id, move || async move {
+        crate::race_point::arm("actor_role_after_lookup", bot_id, move || async move {
             crate::testing::make_table_readable(&restore, "supervisor_roles").await;
         });
     }

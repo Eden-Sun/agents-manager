@@ -5,7 +5,7 @@ use crate::lifecycle::*;
 use crate::lifecycle::poller::*;
 use crate::lifecycle::poller::test_seams::*;
 
-use crate::lifecycle::race_point;
+use crate::race_point;
 use crate::testing as tt;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

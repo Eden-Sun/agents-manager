@@ -572,6 +572,6 @@ pub async fn settle_in_flight(app: &impl GrokTranscriptContext, bot: &db::Bot, r
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
-    pub(crate) const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
-    pub(crate) const RUN_USER_PROMPTS_SQL: &str = super::RUN_USER_PROMPTS_SQL;
+    pub const MAX_READ_BYTES: u64 = super::MAX_READ_BYTES;
+    pub const RUN_USER_PROMPTS_SQL: &str = super::RUN_USER_PROMPTS_SQL;
 }

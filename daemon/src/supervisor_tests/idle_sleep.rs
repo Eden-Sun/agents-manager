@@ -510,7 +510,7 @@ mod tests {
 
         let db = app.db.clone();
         let run_for_race = run_id.clone();
-        crate::lifecycle::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
+        crate::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
             sqlx::query("UPDATE runs SET native_session_id='current-session' WHERE id=?")
                 .bind(&run_for_race)
                 .execute(&db)
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(decide(&stale, 90), Ok(()));
 
         let (db2, run2) = (app.db.clone(), run.clone());
-        crate::lifecycle::race_point::arm("idle_sleep.marked", &bot, move || async move {
+        crate::race_point::arm("idle_sleep.marked", &bot, move || async move {
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(&db2).await.unwrap();
         });
         sleep_one(&app, &stale, 90).await;
@@ -910,7 +910,7 @@ mod tests {
     {
         let landing = Landing { finished_inside_the_window: Arc::new(AtomicBool::new(false)), handle: Arc::new(std::sync::Mutex::new(None)) };
         let (finished, slot) = (landing.finished_inside_the_window.clone(), landing.handle.clone());
-        crate::lifecycle::race_point::arm("idle_sleep.marked", bot, move || async move {
+        crate::race_point::arm("idle_sleep.marked", bot, move || async move {
             let h = tokio::spawn(f());
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             finished.store(h.is_finished(), Ordering::SeqCst);
@@ -984,7 +984,7 @@ mod tests {
         let stale = stale_cand(&app, &bot).await;
 
         let (app2, stale2) = (app.clone(), stale.clone());
-        crate::lifecycle::race_point::arm("prompt_before_bot_lock", &bot, move || async move {
+        crate::race_point::arm("prompt_before_bot_lock", &bot, move || async move {
             sleep_one(&app2, &stale2, 90).await;
         });
         let out = tokio::time::timeout(std::time::Duration::from_secs(30), crate::lifecycle::prompt(&app, &bot, "還在嗎", "req-on-its-way"))
@@ -1029,7 +1029,7 @@ mod tests {
     fn watch_the_mark(bot: &str) -> Arc<AtomicBool> {
         let hit = Arc::new(AtomicBool::new(false));
         let h = hit.clone();
-        crate::lifecycle::race_point::arm("idle_sleep.marked", bot, move || async move { h.store(true, Ordering::SeqCst) });
+        crate::race_point::arm("idle_sleep.marked", bot, move || async move { h.store(true, Ordering::SeqCst) });
         hit
     }
 
@@ -1056,7 +1056,7 @@ mod tests {
         let stale = stale_cand(&app, &bot).await;
         let hit = Arc::new(AtomicBool::new(false));
         let h = hit.clone();
-        crate::lifecycle::race_point::arm("idle_sleep.marked", &bot, move || async move {
+        crate::race_point::arm("idle_sleep.marked", &bot, move || async move {
             h.store(true, Ordering::SeqCst);
             observe_status(&run, "working");
         });
@@ -1206,7 +1206,7 @@ mod tests {
         let _shell = provably_no_background_work(&env, &bot);
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
         let app = env.app.clone();
-        crate::lifecycle::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
+        crate::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
             crate::runners::background_hook::on_stop(
                 &app,
                 &run,

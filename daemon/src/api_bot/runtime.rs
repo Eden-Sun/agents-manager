@@ -192,7 +192,7 @@ impl ApiBotRuntime {
         let dependencies = self.dependencies_snapshot();
 
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_run_stop_before_admission", &key.run_id).await;
+        crate::race_point::hit("api_run_stop_before_admission", &key.run_id).await;
         let _bot_admission = self.bot_gate(&key.bot_id).await;
         let _admission = self.admission_gate(key).await;
 
@@ -738,7 +738,7 @@ impl ApiBotRuntime {
             .await
             .map_err(|_| if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Upstream })?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_run_spawn_after_owner_writes", &key.run_id).await;
+        crate::race_point::hit("api_run_spawn_after_owner_writes", &key.run_id).await;
 
         let registry_key = RunTurnKey {
             run_id: key.run_id.clone(),
@@ -766,7 +766,7 @@ impl ApiBotRuntime {
         #[cfg(all(test, feature = "daemon-test-harness"))]
         let runner_run_id = key.run_id.clone();
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_same_run_before_control_cas", &key.run_id).await;
+        crate::race_point::hit("api_same_run_before_control_cas", &key.run_id).await;
         let (run_ticket, cancel) = {
         let mut controls = self.inner.controls.lock().expect("control mutex poisoned");
         if let Some((old, tag, proof)) = &prior {
@@ -782,7 +782,7 @@ impl ApiBotRuntime {
                     if !admitted { return Ok(TurnOutcome::Cancelled); }
                 }
                 #[cfg(all(test, feature = "daemon-test-harness"))]
-                crate::lifecycle::race_point::hit("api_run_runner_before_entry", &runner_run_id)
+                crate::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
                 let responses_before = state.responses.len();
                 let interrupted = {
@@ -953,7 +953,7 @@ impl ApiBotRuntime {
             )));
             let outcome = task.await;
             #[cfg(all(test, feature = "daemon-test-harness"))]
-            crate::lifecycle::race_point::hit("api_same_run_proof_before_cas", &owner_key.run_id).await;
+            crate::race_point::hit("api_same_run_proof_before_cas", &owner_key.run_id).await;
             let mut controls = owner_inner.controls.lock().expect("control mutex poisoned");
             if let Some(record) = controls.get_mut(&owner_key) {
                 if Arc::ptr_eq(&record.identity, &identity_tag) {
@@ -968,7 +968,7 @@ impl ApiBotRuntime {
         }));
         if native_pending {
             #[cfg(all(test, feature = "daemon-test-harness"))]
-            crate::lifecycle::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
+            crate::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
             let admitted = async {
                 let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| ())?;
                 let changed = sqlx::query(concat!("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)"))
@@ -991,7 +991,7 @@ impl ApiBotRuntime {
                 return Err(ApiBotError::Unconfirmed);
             }
             #[cfg(all(test, feature = "daemon-test-harness"))]
-            crate::lifecycle::race_point::hit("api_native_after_delivery_commit", &key.turn_id).await;
+            crate::race_point::hit("api_native_after_delivery_commit", &key.turn_id).await;
             if app.shutdown.is_cancelled() {
                 if let Some(tx) = accept_tx { let _ = tx.send(false); }
                 cancel_before_release.cancel();
@@ -1012,7 +1012,7 @@ impl ApiBotRuntime {
             }
         }
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_run_spawn_after_registry", &key.run_id).await;
+        crate::race_point::hit("api_run_spawn_after_registry", &key.run_id).await;
         Ok(())
     }
 
@@ -1393,7 +1393,7 @@ async fn own_ticket_inner(
                     || (joined == Completion::Failed && payload.outcome() == super::receipt::JoinOutcome::Failed);
                 if clean && published {
                     #[cfg(all(test, feature = "daemon-test-harness"))]
-                    crate::lifecycle::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
+                    crate::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
                     if shutdown.is_cancelled() { return None; }
                     return Some(super::same_run::Finalized { identity: owner.identity, revision, payload });
                 }
@@ -1712,7 +1712,7 @@ async fn settle_joined_completion_body(
                     log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
                     return None;
                 }
-                _ = crate::lifecycle::race_point::hit("api_completion_backoff", &owner.key.run_id) => {},
+                _ = crate::race_point::hit("api_completion_backoff", &owner.key.run_id) => {},
             }
         }
         if !completion_retry_wait(shutdown, completion_retry_delay(failures)).await {
@@ -1768,7 +1768,7 @@ async fn store_joined_completion_with_test_fault(
         && matches!(&stored, Ok(super::completion::Outcome::Committed(_)))
     {
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_completion_ack_lost", &owner.key.run_id).await;
+        crate::race_point::hit("api_completion_ack_lost", &owner.key.run_id).await;
         return Err(super::completion::StoreError::Ambiguous);
     }
     stored
@@ -2324,7 +2324,7 @@ impl ApiBotRuntime {
             return Ok(StartupRestore::Fenced);
         }
         #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("api_startup_before_cursor_cas", &identity.bot_id).await;
+        crate::race_point::hit("api_startup_before_cursor_cas", &identity.bot_id).await;
         if !self.startup_guard_matches(app, identity, guard) {
             tx.rollback().await.map_err(|_| StartupError::Storage)?;
             return Ok(StartupRestore::Fenced);

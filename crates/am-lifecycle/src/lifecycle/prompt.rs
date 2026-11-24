@@ -381,9 +381,9 @@ pub async fn prompt(app: &impl LcHost, bot_id: &str, text: &str, client_request_
 
 /// `prompt` with images (`attach.rs`): the agent gets paths on its host; the timeline renders
 /// thumbnails from `messages.attachments_json`.
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn prompt_with(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -938,9 +938,9 @@ pub async fn prompt_expect_run(
 ///
 /// 不合資格（不是 claude、CLI 比 2.1.275 舊、版本還不知道）時**不插隊**：照原本的路走，忙的話一樣
 /// 回 409，只是 body 多帶 `send_now_refused` 說清楚為什麼沒插隊。API 走 [`prompt_from_api`]；這支是測試用的捷徑。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn prompt_send_now(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,

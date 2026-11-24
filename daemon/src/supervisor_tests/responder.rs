@@ -551,7 +551,7 @@ mod flow_tests {
         roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
         roles::set_watchdog(&app.db, Role::Responder, 0, Some("2020-01-01T00:00:00Z"), None).await.unwrap();
         let db = app.db.clone();
-        crate::lifecycle::race_point::arm("responder_watchdog_start", &bot.id, move || async move {
+        crate::race_point::arm("responder_watchdog_start", &bot.id, move || async move {
             roles::set_desired_running(&db, Role::Responder, false).await.unwrap();
         });
         watchdog_tick(&app).await;

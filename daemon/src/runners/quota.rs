@@ -653,7 +653,7 @@ mod tests {
         herdr_a.screens.lock().unwrap().insert(pane, "\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h 90% left · weekly 65% left\n".into());
 
         let (a2, cfg_b) = (app.clone(), cfg("target-b"));
-        crate::lifecycle::race_point::arm("codex_panes_before_set", &host, move || async move {
+        crate::race_point::arm("codex_panes_before_set", &host, move || async move {
             a2.hosts.replace_remote_for_test(&a2, cfg_b).await;
         });
         assert_eq!(refresh_codex_from_panes(&app, &host).await, 0, "換掉的主機上的讀數不算寫入");

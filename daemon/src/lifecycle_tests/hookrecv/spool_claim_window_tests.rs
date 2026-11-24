@@ -37,7 +37,7 @@ async fn a_line_appended_between_claim_and_ack_survives() {
 
     let late_path = spool.clone();
     let late = line(&bot.id, "s2");
-    crate::lifecycle::race_point::arm("spool_claimed", &bot.id, move || async move {
+    crate::race_point::arm("spool_claimed", &bot.id, move || async move {
         append(&late_path, &late);
     });
 

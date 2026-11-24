@@ -379,7 +379,7 @@ async fn deleting_a_host_keeps_a_connection_recreated_after_its_config_removal()
     crate::hosts::set_ssh_fake(&host, |_script| Err(anyhow::anyhow!("test fake: no SSH")));
 
     let (connected_app, connected_host) = (app.clone(), host.clone());
-    crate::lifecycle::race_point::arm("create_host_after_apply_config", &host, move || async move {
+    crate::race_point::arm("create_host_after_apply_config", &host, move || async move {
         if let Some(conn) = connected_app.hosts.get(&connected_host).await {
             conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -388,7 +388,7 @@ async fn deleting_a_host_keeps_a_connection_recreated_after_its_config_removal()
     let recreate_task = Arc::new(tokio::sync::Mutex::new(None));
     let callback_task = recreate_task.clone();
     let (recreate_app, recreate_host) = (app.clone(), host.clone());
-    crate::lifecycle::race_point::arm("delete_host_after_config_remove", &host, move || async move {
+    crate::race_point::arm("delete_host_after_config_remove", &host, move || async move {
         let task = tokio::spawn(async move {
             create_host(
                 State(recreate_app),

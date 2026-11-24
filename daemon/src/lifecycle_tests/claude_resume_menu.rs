@@ -112,7 +112,7 @@ mod tests {
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
         let changed = pane.clone();
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "cold_resume_start_empty_frame",
             &run.id,
             move || async move {
@@ -227,7 +227,7 @@ mod tests {
         let (env, _, run, _) = fixture(Some(ACTUAL)).await;
         let app = env.app.clone();
         let id = run.id.clone();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
                 .bind(id)
                 .execute(&app.db)
@@ -288,7 +288,7 @@ mod tests {
     async fn cold_resume_changed_host_generation_never_sends_a_key() {
         let (env, _, run, _) = fixture(Some(ACTUAL)).await;
         let conn = env.app.hosts.get(crate::config::LOCAL_HOST).await.unwrap();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             conn.bump_generation_for_test();
         });
         assert!(accept_if_shown(&env.app, &run).await.is_err());
@@ -299,7 +299,7 @@ mod tests {
         let (env, _, run, _) = fixture(Some(ACTUAL)).await;
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             let mut panes = live.lock().unwrap();
             let p = panes.get_mut(&pane).unwrap();
             p.cold_resume_menu = None;
@@ -382,7 +382,7 @@ mod tests {
             .unwrap();
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             live.lock().unwrap().get_mut(&pane).unwrap().revision += 2;
         });
         let out = crate::lifecycle::prompt::prompt_with(&env.app, &bot.id, "retry safely", "cold-resume-race", &[])
@@ -404,7 +404,7 @@ mod tests {
             .unwrap();
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu =
                 Some(ACTUAL.replace("about 10%", "about 11%"));
         });
@@ -454,7 +454,7 @@ mod tests {
         zero_revision(&env, &run);
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
-        crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        crate::race_point::arm("cold_resume_before_key", &run.id, move || async move {
             live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu =
                 Some(ACTUAL.replace("2h and is 1m tokens", "3h and is 1m tokens"));
         });

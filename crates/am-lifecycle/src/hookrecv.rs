@@ -704,7 +704,7 @@ async fn store_resent_prompt_tx(
         .bind(&turn.id)
         .fetch_one(&mut **tx)
         .await?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::lifecycle::race_point::hit("resent_prompt_after_count_read", &turn.id).await;
     if have > 0 {
         return Ok(None);
@@ -925,7 +925,7 @@ async fn fill_or_drop_late_hook(
             .bind(&turn.id)
             .fetch_one(&mut *tx)
             .await?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::lifecycle::race_point::hit("late_hook_after_reply_count", &turn.id).await;
     if !body_text.trim().is_empty() && has_reply > 0 && same_turn {
         return replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id, event_id).await;
@@ -1975,7 +1975,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 } else { None };
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
                 let mut tx = app.db().begin().await?;
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
                 crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
@@ -2547,7 +2547,7 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
             std::fs::rename(&s, &c)
         })
         .await??;
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         crate::lifecycle::race_point::hit("spool_claimed", bot_id).await;
         fold_spool_blocking(claim.clone(), staging.clone()).await?;
     }

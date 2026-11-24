@@ -137,7 +137,7 @@ use crate::lifecycle::poller::codex_session_refresh::test_seams::*;
             let project = env.project_id.clone();
             let change = change.to_owned();
             let race_change = change.clone();
-            crate::lifecycle::race_point::arm("codex_session_refresh_before_write", &run_id, move || async move {
+            crate::race_point::arm("codex_session_refresh_before_write", &run_id, move || async move {
                 if race_change == "new_run" {
                     sqlx::query("UPDATE runs SET state='exited',ended_at='2026-10-27T00:00:00Z' WHERE id=?").bind(&run_for_race).execute(&app.db).await.unwrap();
                 }
@@ -171,7 +171,7 @@ use crate::lifecycle::poller::codex_session_refresh::test_seams::*;
             let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
             let bot = db::bot(&env.app.db, &run.bot_id).await.unwrap().unwrap();
             let fence = crate::lifecycle::client_for_run(&env.app, &run).await.unwrap().fence;
-            crate::lifecycle::race_point::arm("codex_session_refresh_before_write", &run_id, move || async move {
+            crate::race_point::arm("codex_session_refresh_before_write", &run_id, move || async move {
                 if case == "fence" { fence.conn().bump_generation_for_test(); }
                 else { tokio::time::sleep(Duration::from_millis(5100)).await; }
             });

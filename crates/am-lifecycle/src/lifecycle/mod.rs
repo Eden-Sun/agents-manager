@@ -7,11 +7,6 @@ use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
 use crate::hosts::{sh_quote, HostConn, HostFence};
 #[cfg(all(test, feature = "daemon-test-harness"))]
 use crate::state::App;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub(crate) use crate::app_ports_p4;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "../../../../daemon/src/app_ports_p4obs.rs"]
-pub(crate) mod app_ports_p4obs;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -87,3 +87,24 @@ daemon 三個測試執行檔的 `--list` 與 `--list --ignored` 前後逐位元�
 牆鐘中位數由 82.45 秒到 84.74 秒，daemon lib test 仍重編。本批未量到加速。兩次取樣和共用熱池的結果僅適用於這個中間步驟。
 
 daemon 的 lib、bin、`api_doc_parity` 三個測試執行檔，前後的 `--list` 和 `--list --ignored` 皆逐位元組相同。lib 6,157 條，含 4 條 ignored，bin 0 條，parity 1 條。掛載守門通過。`CHECK_MAX_LOAD=40 scripts/check.sh changed` exit 0，daemon 6,153 passed、4 ignored，lifecycle 720/720、scratch guard 8/8、API parity 1/1。日誌在 `/tmp/kx1862-orphan.brDxUq/`，原 E0117 日誌在 `/tmp/kx1862-base3.HbBiFY/after-warm.log`。
+
+## #1862 L3 中層與上層撤掛載（翻轉）
+
+基底 `d132e8202`（含 P1a `85ccd35a9`、P1b `6bdfad9b7`、P2+P3 `a080feda9`／`7de701a60`／`5a18db271`／`33a7d465c`、P4 `7455a1483`）。這一刀撤掉 `daemon/src/lib.rs` 剩下的 16 處 am-lifecycle `#[path]` 掛載：lifecycle（含 fence、turn_controller）、hookrecv、judge、tui_prompts、codex_live、codex_model_migration、blocked_reason、background_jobs、turn_error、child_alerts、dangerous_rm、compaction、events、arc_ports、ports_impl、default_session。daemon 測試改用 `am_lifecycle`（`test-hooks`）本體，lib.rs 不再有任何 `#[path]`。
+
+在同一 Ubuntu shim 熱池成員 `shared` 上，兩邊各暖編一次，再分別改 `crates/am-lifecycle/src/lifecycle/screen.rs` 一行，執行 `cargo test -p agents-managerd --no-run --timings`。負載和記憶體閘在計時外，編譯名額為共用。daemon lib test 秒數取自第二次樣本的 timing 報告（第一次的報告被同一 target 覆寫）。
+
+| 樣本 | 牆鐘秒 | daemon lib test 秒 |
+| --- | ---: | ---: |
+| 撤前暖編 | 496.69 | |
+| 撤前 1 | 78.96 | |
+| 撤前 2 | 81.63 | 70.94 |
+| 撤後暖編 | 452.69 | |
+| 撤後 1 | 84.86 | |
+| 撤後 2 | 81.31 | 70.25 |
+
+牆鐘中位數由 80.30 秒到 83.09 秒，daemon lib test 70.94 秒到 70.25 秒，本批未量到加速。改 am-lifecycle 的檔仍使下游的 daemon lib test 整個重編：撤掛載移除的是 daemon 重複編 lifecycle 原始碼，不是依賴鏈上的重編。要看撤掛載的效果，下一步應量「只改 daemon 檔」與「只改 am-lifecycle 檔、跑 `cargo test -p am-lifecycle`」兩種情境。
+
+check.sh 守衛 `session_production_code_reaches_other_features_only_through_ports` 原本只把 `cfg(test)`／`cfg(all(test, …))` 當測試區塊，過渡 gate 下的 `restart_child_in_pane_with` 被當成正式碼；`am_base::source_mask::test_mask` 補認 test-hooks gate。
+
+清單對帳：am-lifecycle 測試清單前後逐位元組相同（722 條）。daemon lib 由 6,166 條到 6,160 條，少的 6 條（`lifecycle::start::add_dir_args_tests` 1 條、`specialist_section_tests` 5 條）是 crate 裡 `#[cfg(test)]` 的純測試，掛載期間在 daemon 重複執行一次，翻轉後只在 am-lifecycle 執行，仍在 crate 清單內；沒有新增項。lib 的 `--ignored`、bin、`api_doc_parity` 前後相同。`rust_test_mount_test` 通過（未掛 0、harness 0）。

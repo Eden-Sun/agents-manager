@@ -546,10 +546,10 @@ async fn restart_resuming_with_authority(
     authority: Option<&crate::hosts::HostFence>,
 ) -> Restarted {
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("bulk_restart_before_lookup", bot_id).await;
+    crate::race_point::hit("bulk_restart_before_lookup", bot_id).await;
     let lookup = db::bot(&app.db, bot_id).await;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("bulk_restart_after_lookup", bot_id).await;
+    crate::race_point::hit("bulk_restart_after_lookup", bot_id).await;
     match lookup {
         Ok(Some(bot)) if bot.managed_by == "child" || bot.parent_bot_id.as_deref().is_some_and(|p| !p.is_empty()) => {
             return Restarted::Busy(Skip::Child);
@@ -923,7 +923,7 @@ mod tests {
         let (bot_id, run_id) = pending_bot(&env, "late-hook", "claude", "Update installed · Restart to update").await;
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
         let hook_app = app.clone();
-        crate::lifecycle::race_point::arm("stop_before_stopping", &bot_id, move || async move {
+        crate::race_point::arm("stop_before_stopping", &bot_id, move || async move {
             crate::runners::background_hook::on_stop(
                 &hook_app,
                 &run,
@@ -953,7 +953,7 @@ mod tests {
         let set_screen = env.herdr.set_screen_later();
         let pane = format!("pane-{bot}");
         let busy = background_screen();
-        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", &bot, move || async move {
+        crate::race_point::arm("bulk_restart_before_lookup", &bot, move || async move {
             set_screen(&pane, &busy);
         });
 
@@ -983,7 +983,7 @@ mod tests {
         let set_screen = env.herdr.set_screen_later();
         let pane = format!("pane-{bot}");
         let busy = background_screen();
-        crate::lifecycle::race_point::arm("stop_before_stopping", &bot, move || async move {
+        crate::race_point::arm("stop_before_stopping", &bot, move || async move {
             set_screen(&pane, &busy);
         });
 
@@ -1235,8 +1235,8 @@ mod tests {
     /// 第一次讀 bot（決定走哪一條重啟路）壞掉、下一次 DB 已經好了：#188 的窗口。
     fn first_bot_read_fails(app: &Arc<App>, bot_id: &str) {
         let (a, b) = (app.clone(), app.clone());
-        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", bot_id, move || async move { crate::testing::make_table_unreadable(&a, "bots").await });
-        crate::lifecycle::race_point::arm("bulk_restart_after_lookup", bot_id, move || async move { crate::testing::make_table_readable(&b, "bots").await });
+        crate::race_point::arm("bulk_restart_before_lookup", bot_id, move || async move { crate::testing::make_table_unreadable(&a, "bots").await });
+        crate::race_point::arm("bulk_restart_after_lookup", bot_id, move || async move { crate::testing::make_table_readable(&b, "bots").await });
     }
 
     async fn mark_update_pending(app: &Arc<App>, run_id: &str) {
@@ -1519,7 +1519,7 @@ mod tests {
     /// 把第一批卡在「輪到 `bot_id`、還沒開始重啟」那一刻，放行之前它一直佔著同時只准一批的那一格。
     fn hold_batch_at(bot_id: &str) -> tokio::sync::oneshot::Sender<()> {
         let (release, gate) = tokio::sync::oneshot::channel::<()>();
-        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", bot_id, move || async move {
+        crate::race_point::arm("bulk_restart_before_lookup", bot_id, move || async move {
             gate.await.ok();
         });
         release

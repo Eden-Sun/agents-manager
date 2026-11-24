@@ -198,7 +198,7 @@ mod tests {
         herdr_forgets_everything(&env).await;
         let app = env.app.clone();
         let run2 = run.clone();
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+        crate::race_point::arm("mark_run_exited_after_read", &run, move || async move {
             crate::lifecycle::mark_run_exited(&app, &run2, "pane exited").await;
         });
 
@@ -228,7 +228,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (hook_reached, hook_release) = (reached.clone(), release.clone());
-        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+        crate::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
             hook_reached.notify_one();
             hook_release.notified().await;
         });
@@ -288,7 +288,7 @@ mod tests {
         env.app.autostart_hosts.lock().unwrap().insert(host.to_string(), AutostartHostStatus::Done);
 
         let conn_after_check = conn.clone();
-        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+        crate::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
             conn_after_check.connected.store(false, Ordering::SeqCst);
         });
         runner::revive(&env.app, host, vec![super::Lost { bot_id: bot.id.clone(), run_id }]).await;
@@ -325,7 +325,7 @@ mod tests {
         crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
 
         let (app, bot_id) = (env.app.clone(), bot.id.clone());
-        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+        crate::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
             let user_run = crate::lifecycle::start_bot(&app, &bot_id).await.unwrap();
             crate::lifecycle::stop_bot(&app, &bot_id).await.unwrap();
             assert_ne!(user_run, "");
@@ -465,7 +465,7 @@ mod tests {
         let held = env.app.bot_lock(&bot.id).await.lock_owned().await;
         let reached = Arc::new(tokio::sync::Notify::new());
         let hook_reached = reached.clone();
-        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+        crate::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
             hook_reached.notify_one();
         });
         runner::spawn_revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]);

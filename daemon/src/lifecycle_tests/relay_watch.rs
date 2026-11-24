@@ -361,7 +361,7 @@ mod tests {
             let pane = f.pane.clone();
             let pool = app.db().clone();
             let run = f.run_id.clone();
-            crate::lifecycle::race_point::arm("relay_before_nudge", &f.bot_id, move || async move {
+            crate::race_point::arm("relay_before_nudge", &f.bot_id, move || async move {
                 if replace_run {
                     sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(run).execute(&pool).await.unwrap();
                 } else {

@@ -79,7 +79,7 @@ async fn fresh_dropped_caller_does_not_cancel_postcommit_owner() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES('fresh-drop','r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let entered = std::sync::Arc::new(tokio::sync::Notify::new()); let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_after_commit", "fresh-drop", move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_after_commit", "fresh-drop", move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone();
     let caller = tokio::spawn(async move {
         let target = crate::lifecycle::api_bot_port::ApiFreshTarget { session_id: "fresh-drop".into(), generation: 1 };
@@ -103,7 +103,7 @@ async fn fresh_dropped_caller_after_commit_poll_owner_finishes() {
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES('fresh-commit-drop','r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
     let entered = std::sync::Arc::new(tokio::sync::Notify::new()); let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let enter_hook = entered.clone(); let release_hook = release.clone();
-    crate::lifecycle::race_point::arm("api_fresh_commit_polled", "fresh-commit-drop", move || async move { enter_hook.notify_one(); release_hook.notified().await; });
+    crate::race_point::arm("api_fresh_commit_polled", "fresh-commit-drop", move || async move { enter_hook.notify_one(); release_hook.notified().await; });
     let app = env.app.clone();
     let caller = tokio::spawn(async move {
         let target = crate::lifecycle::api_bot_port::ApiFreshTarget { session_id: "fresh-commit-drop".into(), generation: 1 };

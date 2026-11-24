@@ -541,7 +541,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
         }
     };
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_after_intent", &id).await;
+    crate::race_point::hit("promote_after_intent", &id).await;
 
     if let Some(r) = &run {
         if let Err(why) = checkpoint_session(&app, r, &located).await {
@@ -558,7 +558,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
         }
     }
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_before_final_transcript", &id).await;
+    crate::race_point::hit("promote_before_final_transcript", &id).await;
 
     let (src, dest, session, source_identity, dest_identity) = (
         located.src.clone(), staged.dest.clone(), located.session_id.clone(), staged.source_identity, staged.dest_identity,
@@ -576,7 +576,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     }
 
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_after_stop", &id).await;
+    crate::race_point::hit("promote_after_stop", &id).await;
 
     let identity_admit = crate::identity_fence::admit(LOCAL_HOST, "claude", child.identity.as_deref()).await;
     let created = match admit_identity_still_exists(&app, &child).await {
@@ -600,7 +600,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     }
 
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_after_create", &id).await;
+    crate::race_point::hit("promote_after_create", &id).await;
 
     let seeded = crate::promote_intents::seed_session_run(&app.db, &id, &new_id, &located.session_id, &staged.dest.to_string_lossy()).await;
     let mut failure: Option<String> = seeded.err().map(|e| e.to_string());
@@ -621,7 +621,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     }
 
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_after_start", &id).await;
+    crate::race_point::hit("promote_after_start", &id).await;
 
     if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
         let note = format!("從子 agent {} 升級成頂層 bot：接續它的 claude session `{}`。", child.name, located.session_id);
@@ -873,7 +873,7 @@ mod tests {
             r2_api_sentinel(&r).await;
             if already_gone {
                 let pool = r.e.app.db.clone(); let child = r.child.clone();
-                lifecycle::race_point::arm("promote_after_start", &r.child, move || async move {
+                crate::race_point::arm("promote_after_start", &r.child, move || async move {
                     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(child).execute(&pool).await.unwrap();
                 });
             }
@@ -902,7 +902,7 @@ mod tests {
             let intent = crate::delete_intents::begin(&r.e.app, "promote", &r.child, LOCAL_HOST, &payload).await.unwrap();
             if already_gone {
                 let pool = r.e.app.db.clone(); let child = r.child.clone();
-                lifecycle::race_point::arm("promote_seed", &r.child, move || async move {
+                crate::race_point::arm("promote_seed", &r.child, move || async move {
                     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(child).execute(&pool).await.unwrap();
                 });
             }
@@ -951,7 +951,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (r2, go) = (reached.clone(), release.clone());
-        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+        crate::race_point::arm("promote_after_intent", &r.child, move || async move {
             r2.notify_one();
             go.notified().await;
         });
@@ -1035,7 +1035,7 @@ mod tests {
     async fn a_stopped_promote_recovered_before_final_sync_includes_the_last_message() {
         let r = rig(true).await;
         let src_path = r.src();
-        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+        crate::race_point::arm("promote_after_intent", &r.child, move || async move {
             use std::io::Write as _;
             let mut src = std::fs::OpenOptions::new().append(true).open(src_path).unwrap();
             writeln!(src, "{{\"type\":\"assistant\",\"message\":\"last-before-recovery\"}}").unwrap();
@@ -1066,7 +1066,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (r2, go) = (reached.clone(), release.clone());
-        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+        crate::race_point::arm("promote_after_intent", &r.child, move || async move {
             r2.notify_one();
             go.notified().await;
         });
@@ -1090,7 +1090,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (r2, go) = (reached.clone(), release.clone());
-        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+        crate::race_point::arm("promote_after_intent", &r.child, move || async move {
             r2.notify_one();
             go.notified().await;
         });
@@ -1342,7 +1342,7 @@ mod tests {
     async fn die_at(r: &Rig, point: &'static str) {
         let reached = Arc::new(tokio::sync::Notify::new());
         let r2 = reached.clone();
-        lifecycle::race_point::arm(point, &r.child, move || async move {
+        crate::race_point::arm(point, &r.child, move || async move {
             r2.notify_one();
             std::future::pending::<()>().await
         });
@@ -1405,7 +1405,7 @@ mod tests {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (r2, go) = (reached.clone(), release.clone());
-        lifecycle::race_point::arm("promote_after_stop", &r.child, move || async move {
+        crate::race_point::arm("promote_after_stop", &r.child, move || async move {
             r2.notify_one();
             go.notified().await;
         });
@@ -1485,7 +1485,7 @@ mod tests {
 
     /// 種 run 取了時間戳之後停 5ms 再寫：跨過毫秒邊界是確定的，不靠整樹負載碰運氣。
     fn straddle_the_seed(r: &Rig) {
-        lifecycle::race_point::arm("promote_seed", &r.child, || async { tokio::time::sleep(std::time::Duration::from_millis(5)).await });
+        crate::race_point::arm("promote_seed", &r.child, || async { tokio::time::sleep(std::time::Duration::from_millis(5)).await });
     }
 
     /// #401：種 run 跨過毫秒邊界時，補完仍要把目標 bot 真的以 native resume 起起來，不能直接記 done。

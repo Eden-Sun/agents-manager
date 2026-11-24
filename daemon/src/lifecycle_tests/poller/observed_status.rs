@@ -175,7 +175,7 @@ use crate::lifecycle::poller::observed_status::test_seams::*;
         let f = permission_fixture().await;
         let app = f.env.app.clone();
         let turn = f.turn.clone();
-        crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+        crate::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
             sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
                 .bind(db::now()).bind(&turn).execute(app.db()).await.unwrap();
         });
@@ -190,7 +190,7 @@ use crate::lifecycle::poller::observed_status::test_seams::*;
             let f = permission_fixture().await;
             let app = f.env.app.clone();
             let id = f.run.id.clone();
-            crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+            crate::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
                 let query = if field == "state" { "UPDATE runs SET state='stopped' WHERE id=?" } else { "UPDATE runs SET native_session_id='new-session' WHERE id=?" };
                 sqlx::query(query).bind(&id).execute(app.db()).await.unwrap();
             });
@@ -276,7 +276,7 @@ use crate::lifecycle::poller::observed_status::test_seams::*;
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
         let app = f.env.app.clone(); let turn = f.turn.clone(); let run_id = f.run.id.clone();
         let bot_id = f.run.bot_id.clone();
-        crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+        crate::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
             sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
                 .bind(db::now()).bind(&turn).execute(app.db()).await.unwrap();
             let conversation = db::conversation_id(app.db(), &bot_id).await.unwrap();
@@ -649,7 +649,7 @@ use crate::lifecycle::poller::observed_status::test_seams::*;
         let f = fixture().await;
         let stamp = Stamp::capture(&f.env.app, &f.run).await.unwrap();
         let (app, turn) = (f.env.app.clone(), f.turn.clone());
-        crate::lifecycle::race_point::arm(
+        crate::race_point::arm(
             "observed_status_before_write",
             &f.run.id,
             move || async move {

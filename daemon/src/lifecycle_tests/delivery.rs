@@ -321,7 +321,7 @@ mod api_tests {
         let (bot_id, conv, _run) = idle_bot(&env, "codex").await;
         env.herdr.live_pane("pane-api", crate::testing::LivePane { codex: true, width: Some(120), ..Default::default() });
         let live = env.herdr.live.clone();
-        crate::lifecycle::race_point::arm("delivery_before_typing", &bot_id, move || async move {
+        crate::race_point::arm("delivery_before_typing", &bot_id, move || async move {
             live.lock().unwrap().get_mut("pane-api").unwrap().composer = vec!["restored answer from Codex 0.157".into()];
         });
 

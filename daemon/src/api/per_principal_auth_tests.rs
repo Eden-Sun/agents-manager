@@ -2780,7 +2780,7 @@ async fn the_spawn_gate_refuses_a_child_created_after_the_descendant_snapshot() 
     let app = e.app.clone();
     let bot_id = parent.id.clone();
     let token = old.clone();
-    crate::lifecycle::race_point::arm("credential_rotation_after_descendant_query", &parent.id, move || async move {
+    crate::race_point::arm("credential_rotation_after_descendant_query", &parent.id, move || async move {
         let response = spawn_begin(app, &bot_id, &token).await;
         let _ = send.send(response);
     });

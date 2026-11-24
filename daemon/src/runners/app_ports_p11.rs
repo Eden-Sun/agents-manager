@@ -142,11 +142,11 @@ pub mod race_point {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        crate::lifecycle::race_point::arm(point, key, f);
+        crate::race_point::arm(point, key, f);
     }
 
     pub async fn hit(point: &'static str, key: &str) {
-        crate::lifecycle::race_point::hit(point, key).await;
+        crate::race_point::hit(point, key).await;
     }
 }
 

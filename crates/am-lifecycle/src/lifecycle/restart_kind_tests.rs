@@ -82,37 +82,3 @@ pub async fn assert_child_untouched(env: &impl RestartKindFixture, kid: &LiveChi
         assert!(aimed.is_empty(), "{m} 動到了子 agent：{aimed:?}");
     }
 }
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-impl crate::capabilities::Db for crate::testing::Env {
-    fn db(&self) -> &sqlx::SqlitePool {
-        &self.app.db
-    }
-}
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-impl crate::lifecycle::restart_kind_tests::RestartKindFixture for crate::testing::Env {
-    fn project_id(&self) -> &str {
-        &self.project_id
-    }
-
-    fn herdr_client(&self) -> crate::herdr::HerdrClient {
-        crate::herdr::HerdrClient::new(self.dir.join("data/herdr.sock"))
-    }
-
-    async fn create_parent(&self, name: &str) -> String {
-        crate::testing::claude_bot(&self.app, &self.project_id, name).await.id
-    }
-
-    fn record_agent(&self, agent: Value) {
-        self.herdr.agents.lock().unwrap().push(agent);
-    }
-
-    fn tab_has_pane(&self, tab_id: &str, pane_id: &str) -> bool {
-        self.herdr.tab(tab_id).unwrap().panes.iter().any(|pane| pane == pane_id)
-    }
-
-    fn calls_to(&self, method: &str) -> Vec<Value> {
-        self.herdr.calls_to(method)
-    }
-}

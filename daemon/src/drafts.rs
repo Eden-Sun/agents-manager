@@ -104,7 +104,7 @@ pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Opti
         Some(d) => (Some(d), true),
         None => {
             #[cfg(test)]
-            crate::lifecycle::race_point::hit("draft_put_after_noop", &crate::db::file_key(&mut tx).await).await;
+            crate::race_point::hit("draft_put_after_noop", &crate::db::file_key(&mut tx).await).await;
             if !text.is_empty() && !target_live(&mut *tx, key).await? {
                 (None, false)
             } else {
@@ -314,7 +314,7 @@ mod tests {
         let db_file = app.db.connect_options().get_filename().to_path_buf();
         let seen = Arc::new(std::sync::Mutex::new(None::<bool>));
         let cell = seen.clone();
-        crate::lifecycle::race_point::arm("draft_put_after_noop", &file, move || async move {
+        crate::race_point::arm("draft_put_after_noop", &file, move || async move {
             let mut other = sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&db_file)
                 .busy_timeout(std::time::Duration::ZERO)

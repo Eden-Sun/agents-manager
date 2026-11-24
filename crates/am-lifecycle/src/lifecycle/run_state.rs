@@ -244,21 +244,6 @@ pub async fn accept_run_state(app: &impl Db, state: &str) {
     sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(app.db()).await.unwrap();
 }
 
-/// 測試用：incident 探針這一輪會不會說這顆 bot「應該在跑卻停了」（`bot_stopped`）——`stopped`／`exited` 標籤的語意就在這裡。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn bot_stopped_reported(app: &Arc<App>, bot_id: &str) -> bool {
-    let t = crate::supervisor::incidents::Thresholds {
-        host_disconnected_secs: 120,
-        bot_stopped_secs: 300,
-        assignment_stalled_secs: 7200,
-        notify_max_attempts: 5,
-        approval_stalled_secs: 1800,
-        classify_failures: crate::supervisor::incidents::CLASSIFY_FAILURE_LIMIT,
-        spool_fold_stuck_rounds: crate::supervisor::incidents::SPOOL_FOLD_STUCK_LIMIT,
-    };
-    crate::supervisor::incidents::observe(app, &t).await.seen.iter().any(|o| o.kind == "bot_stopped" && o.resource == bot_id)
-}
-
 /// 測試用的故障注入（#156）：之後改這一筆回合 `status` 的 UPDATE 一律失敗，直到 [`accept_turn_close`]。
 /// 只擋這一筆：同一顆 bot 其他回合（排著的那些）照常寫得進去。
 #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
@@ -304,22 +289,6 @@ pub async fn turn_status(app: &impl Db, turn_id: &str) -> String {
 #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn system_notes(app: &impl Db, turn_id: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(turn_id).fetch_one(app.db()).await.unwrap()
-}
-
-/// 測試用：替這顆 run 的 pane 登記一個 watcher（`unwatch_pane_on_session` 拆的那一份），回傳它的 key。
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn watch_run_pane(app: &Arc<App>, run_id: &str) -> (String, String, String) {
-    let run = db::run(app.db(), run_id).await.unwrap().unwrap();
-    let host = db::bot_host(app.db(), &run.bot_id).await.unwrap();
-    let session = app.session_for_run(&run).await.unwrap();
-    let key = (host, session, run.pane_id.clone().unwrap());
-    app.pane_watchers.lock().await.insert(key.clone(), tokio::spawn(std::future::pending::<()>()));
-    key
-}
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub async fn watched(app: &Arc<App>, key: &(String, String, String)) -> bool {
-    app.pane_watchers.lock().await.contains_key(key)
 }
 
 #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]

@@ -114,7 +114,7 @@ fn parse_file_identity(payload: &serde_json::Value, key: &str) -> Result<Option<
 pub(crate) async fn seed_session_run(pool: &sqlx::SqlitePool, child_id: &str, new_id: &str, session_id: &str, dest: &str) -> sqlx::Result<()> {
     let at = db::now();
     #[cfg(test)]
-    lifecycle::race_point::hit("promote_seed", child_id).await;
+    crate::race_point::hit("promote_seed", child_id).await;
     #[cfg(not(test))]
     let _ = child_id;
     sqlx::query(

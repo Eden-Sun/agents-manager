@@ -1,6 +1,7 @@
 //! #198：備援看到 codex 撞限橫幅，記撞限走 `turn_error::mark_codex_limit_hit`（讀不到主機、算不準 key 都欠著），不退回 `local`、不猜 key。
 use crate::lifecycle_tests::prelude::*;
 use crate::lifecycle::*;
+use crate::app_ports_p4obs;
 use crate::lifecycle::poller::*;
 use crate::lifecycle::poller::test_seams::*;
 

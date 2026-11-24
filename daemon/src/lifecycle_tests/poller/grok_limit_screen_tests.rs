@@ -2,6 +2,7 @@
 //! herdr 把這張畫面判成 `blocked`（不是 working→idle），備援與掃描都靠 idle 邊觸發，blocked 的 bot 沒人看。
 use crate::lifecycle_tests::prelude::*;
 use crate::lifecycle::*;
+use crate::app_ports_p4obs;
 use crate::lifecycle::poller::*;
 use crate::lifecycle::poller::test_seams::*;
 
