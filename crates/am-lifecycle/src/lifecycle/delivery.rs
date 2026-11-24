@@ -306,7 +306,7 @@ pub fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
 /// after the baseline is read, so an old identical message sliding out of any window cannot hide
 /// a new one, and the cost is the new bytes only. A partial first line fails to parse and is
 /// skipped; a partial last line is simply not complete yet. `Err` = unreadable, never zero.
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
     log_hits_since(LogFormat::Claude, path, offset, text)
 }
@@ -662,7 +662,7 @@ pub enum SessionMatch {
 
 pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proof: &Proof) -> SessionMatch {
     let Proof::Transcript { format, path, session_id } = proof else { return SessionMatch::Same };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     if fail_session_read_for_test(run_id) {
         return SessionMatch::Unavailable;
     }
@@ -680,18 +680,18 @@ pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proo
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn session_read_failures() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     FAILURES.get_or_init(Default::default)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub(crate) fn fail_next_session_read_for_test(run_id: &str) {
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+pub fn fail_next_session_read_for_test(run_id: &str) {
     session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string());
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn fail_session_read_for_test(run_id: &str) -> bool {
     session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)
 }
@@ -780,7 +780,7 @@ pub async fn type_prepared(
     text: &str,
     ready: Ready,
 ) -> anyhow::Result<Delivered> {
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("delivery_before_typing", &run.bot_id).await;
     match type_text(app, client, run, bot, text, ready).await? {
         Typing::Done(d) => Ok(d),
@@ -826,7 +826,7 @@ pub async fn type_text(
 ) -> anyhow::Result<Typing> {
     let (pane, proof, submit, offset, baseline, structured) = match ready {
         Ready::AgentPrompt { target } => {
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("agent_prompt_before_rpc", &run.bot_id).await;
             if let Err(reason) =
                 super::prompt::final_agent_prompt_guard(app, client, run, bot, &target).await
@@ -837,7 +837,7 @@ pub async fn type_text(
                     retry: true,
                 }));
             }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("agent_prompt_after_guard", &run.bot_id).await;
             if !app.hosts().is_current(&client.fence).await {
                 return Ok(Typing::Done(Delivered::NotAttempted {
@@ -1888,7 +1888,7 @@ mod api_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

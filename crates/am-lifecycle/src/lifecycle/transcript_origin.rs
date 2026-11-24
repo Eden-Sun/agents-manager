@@ -10,7 +10,7 @@
 //! （同一筆還有 `promptSource: "system"`、`turnOrigin: "task_notification"`，前面另有 `queue-operation` enqueue／dequeue）。
 //! 回合中間的工具結果也是 `type == "user"`，但沒有 `origin`，不算起點。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use serde_json::Value;
 

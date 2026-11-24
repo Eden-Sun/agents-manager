@@ -11,7 +11,7 @@
 //! - `Err(_)`：DB 寫不進去。狀態沒變；不做後續不可逆的動作，錯誤往上傳。外面的副作用已經發生的，
 //!   用 [`schedule_settle`] 排重試，讓狀態照證據收斂，不留一顆永遠卡住的 run。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use crate::lifecycle::s6_ports::RunStateServices;
 use super::*;
@@ -136,8 +136,8 @@ fn settling() -> &'static std::sync::Mutex<std::collections::HashSet<(String, &'
 /// 測試裡不開背景 task，只記下排了什麼（[`scheduled`]），由測試自己呼叫 [`settle_once`]。
 pub fn schedule_settle<A: RunStateServices + Clone>(app: &A, run_id: &str, how: Settle) {
     tracing::warn!(run = run_id, ?how, "run state is not committed; retrying in the background");
-    if cfg!(test) {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         test_log().lock().unwrap().push((run_id.to_string(), how));
         return;
     }
@@ -213,14 +213,14 @@ pub async fn settle_once(app: &impl RunStateServices, run_id: &str, how: &Settle
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn test_log() -> &'static std::sync::Mutex<Vec<(String, Settle)>> {
     static L: std::sync::OnceLock<std::sync::Mutex<Vec<(String, Settle)>>> = std::sync::OnceLock::new();
     L.get_or_init(Default::default)
 }
 
 /// 測試用：這顆 run 排過哪些重試。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn scheduled(run_id: &str) -> Vec<Settle> {
     test_log().lock().unwrap().iter().filter(|(r, _)| r == run_id).map(|(_, s)| s.clone()).collect()
 }
@@ -322,7 +322,7 @@ pub async fn watched(app: &Arc<App>, key: &(String, String, String)) -> bool {
     app.pane_watchers.lock().await.contains_key(key)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

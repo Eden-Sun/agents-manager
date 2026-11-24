@@ -2,7 +2,7 @@
 
 use am_base::capture::claude::{codex_usage_notice_line, month_num_token};
 pub use am_base::composer_parse::{prompt_echo_prefix, strip_grok_decor};
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use super::s6_ports::{ScreenContext, ScreenServices};
 use super::*;
@@ -73,7 +73,7 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
             app.insert_system_notice(&conversation_id, &notice).await?;
             tracing::info!(bot = %bot.name, kind = %bot.kind, notice = %notice, "CLI account notice captured");
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         super::race_point::hit("codex_notice_after_insert", bot_id).await;
         if is_limit {
             if !fresh && in_flight.is_none() {
@@ -1036,7 +1036,7 @@ fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::Dat
 
 /// codex 撞限橫幅的那一筆撞限：到期是橫幅上寫的時間（撞的當下解析），沒寫就沒有（credits 用完，等下一個成功回合清）。
 /// 正式路徑在 `turn_error::mark_codex_limit_hit` 組（欠帳要留著撞的當下那一份），這支給測試直接寫一格。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn codex_limit_hit(notice: &str, at: String) -> crate::quota::LimitHit {
     crate::quota::LimitHit { message: notice.to_string(), until: parse_codex_try_again(notice), at, bucket: None }
 }

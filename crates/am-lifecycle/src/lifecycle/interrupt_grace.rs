@@ -111,7 +111,7 @@ pub fn expect_interrupt_echo(bot_id: &str, interrupted: InterruptedTurn) {
     pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), interrupted);
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn pending_echo(bot_id: &str) -> Option<InterruptedTurn> {
     pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned()
 }
@@ -670,7 +670,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

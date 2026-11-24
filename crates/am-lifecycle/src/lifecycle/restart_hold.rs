@@ -100,7 +100,7 @@ pub fn in_progress(bot_id: &str) -> bool {
     holds().lock().map(|m| m.contains_key(bot_id)).unwrap_or(false)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

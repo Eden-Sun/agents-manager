@@ -135,7 +135,7 @@ pub async fn arm(app: &impl ResumeNudgeContext, bot_id: &str, run_id: &str) {
 
 /// 測試裡不排：測試直接叫 [`check`]。
 fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, turn_id: &str) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return;
     }
     let app = (*app).clone();

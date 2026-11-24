@@ -236,7 +236,7 @@ pub fn heal_at_startup(app: &(impl crate::capabilities::DataDir + crate::capabil
     ensure(app, &path)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

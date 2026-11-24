@@ -5,7 +5,7 @@
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-pub(crate) const RECORD_LIMIT: usize = 128;
+pub const RECORD_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Record<C, S> {
@@ -38,7 +38,7 @@ impl<C, S> RecordSet<C, S> {
 
 /// 測試端的紀錄器（各測試模組的 `Handle` 就是 `Recorder<Code, StdoutKind>`）。
 #[derive(Debug, Clone)]
-pub(crate) struct Recorder<C, S>(Arc<Mutex<RecordSet<C, S>>>);
+pub struct Recorder<C, S>(Arc<Mutex<RecordSet<C, S>>>);
 
 impl<C, S> Default for Recorder<C, S> {
     fn default() -> Self {
@@ -51,12 +51,12 @@ where
     C: Copy + PartialEq,
     S: Copy,
 {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// 一次執行的結果：stderr 每一行若是標記就記一筆；一筆標記都沒有就記一筆 `code: None`。
-    pub(crate) fn record_output(&self, status: Option<i32>, stdout: S, stderr: &[u8], code_from_marker: fn(&[u8]) -> Option<C>) {
+    pub fn record_output(&self, status: Option<i32>, stdout: S, stderr: &[u8], code_from_marker: fn(&[u8]) -> Option<C>) {
         let mut found = false;
         let mut records = self.0.lock().expect("diagnostic record lock");
         for line in stderr.split(|byte| *byte == b'\n') {
@@ -70,15 +70,15 @@ where
         }
     }
 
-    pub(crate) fn record_code(&self, code: C, stdout: S) {
+    pub fn record_code(&self, code: C, stdout: S) {
         self.0.lock().expect("diagnostic record lock").push(Record { code: Some(code), exit_code: Some(0), stdout });
     }
 
-    pub(crate) fn contains(&self, code: C) -> bool {
+    pub fn contains(&self, code: C) -> bool {
         self.0.lock().expect("diagnostic record lock").records.iter().any(|record| record.code == Some(code))
     }
 
-    pub(crate) fn summary(&self) -> String
+    pub fn summary(&self) -> String
     where
         C: Debug,
         S: Debug,
@@ -87,7 +87,7 @@ where
         format!("records={:?}; overflow={}", records.records, records.overflow)
     }
 
-    pub(crate) fn length_and_overflow(&self) -> (usize, usize) {
+    pub fn length_and_overflow(&self) -> (usize, usize) {
         let records = self.0.lock().expect("diagnostic record lock");
         (records.records.len(), records.overflow)
     }
@@ -95,19 +95,19 @@ where
 
 /// 插樁失敗：哪個判斷點、預期幾處、實際找到幾處（插樁字串對不上就明確失敗，不要悄悄跑未插樁的腳本）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InstrumentError<S> {
-    pub(crate) site: S,
-    pub(crate) expected: usize,
-    pub(crate) found: usize,
+pub struct InstrumentError<S> {
+    pub site: S,
+    pub expected: usize,
+    pub found: usize,
 }
 
 impl<S: Debug> InstrumentError<S> {
-    pub(crate) fn summary(self) -> String {
+    pub fn summary(self) -> String {
         format!("site={:?}; expected={}; found={}", self.site, self.expected, self.found)
     }
 }
 
-pub(crate) fn replace_count<S>(
+pub fn replace_count<S>(
     source: &str,
     needle: &str,
     replacement: &str,

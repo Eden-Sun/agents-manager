@@ -114,7 +114,7 @@ pub(super) async fn observe(
     {
         return Ok(());
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::super::race_point::hit("observed_status_before_write", &stamp.run.id).await;
     let lock = app.bot_lock(&stamp.run.bot_id).await;
     let guard = lock.lock().await;
@@ -411,7 +411,7 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run, expected_turn: Opt
             if !matches!(fresh.agent_status.as_str(), "idle" | "unknown") && !(expected_turn.is_some() && fresh.agent_status == "working") { return Ok(false) }
             let Some(turn) = eligible_menu_turn(app, &fresh).await? else { return Ok(false) };
             if expected_turn.is_some_and(|expected| expected != turn) { return Ok(false) }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::super::race_point::hit("observed_menu_before_cas", &fresh.id).await;
             let mut tx = app.db().begin().await?;
             let applied = sqlx::query(
@@ -638,7 +638,7 @@ pub(super) async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyho
 }
 
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub mod test_seams {
     use super::*;
 

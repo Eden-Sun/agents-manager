@@ -186,7 +186,7 @@ pub async fn accept(
             return Err(err);
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("suggestion_before_tab", bot_id).await;
 
     if let Err(e) = client.pane_send_keys(&pane, &["tab"]).await {

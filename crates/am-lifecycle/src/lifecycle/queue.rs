@@ -1,6 +1,6 @@
 //! The queued-prompt flush and the run/turn bookkeeping that frees a slot.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use super::*;
 use super::s6_ports::QueueContext;
@@ -201,7 +201,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Err(e.context("relay authorization unavailable; prompt remains queued"));
         }
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("flush_before_claim", bot_id).await;
     }
@@ -388,14 +388,14 @@ async fn defer_queued_turn(
     reason: &str,
     wait_key: &str,
 ) -> anyhow::Result<Deferred> {
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("defer_before_return", turn_id).await;
     }
     let mut tx = db::begin_write(app.db()).await?;
     let (retries, queue_class): (i64, String) =
         sqlx::query_as("SELECT flush_retries, queue_class FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("defer_after_retries_read", turn_id).await;
     let notice = queue_class == super::prompt::QueueClass::DaemonNotice.as_str();
     if retries >= if notice { super::daemon_notice::RETRY_LIMIT } else { QUEUE_RETRY_LIMIT } {
@@ -578,7 +578,7 @@ pub async fn revoke_all_orphaned_queued_turns<C: QueueContext>(app: &C) -> Vec<S
 static QUEUE_RETRY_TIMERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, tokio::time::Instant)>>> =
     std::sync::OnceLock::new();
 static QUEUE_RETRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 static TEST_QUEUE_FLUSH_REQUESTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
     std::sync::OnceLock::new();
 
@@ -678,13 +678,13 @@ pub async fn rearm_queue_retries<C: QueueContext>(app: &C) -> anyhow::Result<usi
 }
 
 /// Test hook: is a retry timer waiting for this bot?
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn queue_retry_timer_armed(bot_id: &str) -> bool {
     QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock().map(|m| m.contains_key(bot_id)).unwrap_or(false)
 }
 
 /// Test hook: how long this bot's retry timer still has to run.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn queue_retry_timer_left(bot_id: &str) -> Option<std::time::Duration> {
     let now = tokio::time::Instant::now();
     let (_, at) = *QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock().ok()?.get(bot_id)?;
@@ -692,14 +692,14 @@ pub fn queue_retry_timer_left(bot_id: &str) -> Option<std::time::Duration> {
 }
 
 /// Test hook: what a process restart does to the in-memory timers.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn forget_queue_retry_timer(bot_id: &str) {
     if let Ok(mut map) = QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock() {
         map.remove(bot_id);
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn take_scheduled_flush_count(bot_id: &str) -> usize {
     TEST_QUEUE_FLUSH_REQUESTS
         .get_or_init(Default::default)
@@ -719,7 +719,7 @@ pub fn schedule_flush_retry<C: QueueContext>(app: &C, bot_id: &str, delay: std::
 /// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
 /// RPC cannot race the DB state machine they drive.
 pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         let _ = app;
         if let Ok(mut requests) = TEST_QUEUE_FLUSH_REQUESTS.get_or_init(Default::default).lock() {
@@ -727,7 +727,7 @@ pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
         }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
     {
         let app = (*app).clone();
         let bot_id = bot_id.to_string();
@@ -786,7 +786,7 @@ pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reas
             return (RunExit::NotRecorded, None);
         }
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("mark_run_exited_after_read", run_id).await;
     }

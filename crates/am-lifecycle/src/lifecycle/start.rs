@@ -1769,14 +1769,14 @@ async fn start_inner_body(
         }
     }
     let mut started = false;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     let mut first_agent_start = true;
     for attempt in 0..10u32 {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         if first_agent_start {
             super::race_point::hit("restart_before_agent_start", &bot.id).await;
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         {
             first_agent_start = false;
         }
@@ -1844,7 +1844,7 @@ async fn start_inner_body(
     }
     let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
     crate::codex_live::spawn_boot_version_read(app.db(), &client, fence.or(ready_fence.as_ref()), &bot.kind, &bot.id, run_id, &pane_id);
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("start_before_running", &bot.id).await;
     }
@@ -1900,7 +1900,7 @@ async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::ki
     crate::kind_probe::verdict(host, kind, found)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub async fn restart_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_bot_with(app, bot_id, StartOpts::default()).await
 }
@@ -1978,7 +1978,7 @@ async fn restart_bot_with_authority_body(
     let intent_id = app.prepare_restart_intent(bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, app.boot_id())
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record the restart intent: {e:#}")))?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping, fence).await;
     settle_restart_intent(app, &intent_id, &res).await;
@@ -2054,7 +2054,7 @@ async fn restart_stop_and_start_body(
         }
         Err(e) => return Err(e),
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("restart_after_stop", bot_id).await;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
@@ -2194,7 +2194,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record child restart grace: {e:#}")))?;
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("child_restart_before_stopping", bot_id).await;
     if require_idle {
         if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
@@ -2270,7 +2270,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
             ));
         }
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("child_restart_between_runs", bot_id).await;
     }
@@ -2530,7 +2530,7 @@ mod add_dir_args_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

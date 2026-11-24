@@ -1407,7 +1407,7 @@ pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db:
     if bot.kind != "claude" {
         return;
     }
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return;
     }
     let cfg_dir = env.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(str::to_string);
@@ -3344,7 +3344,7 @@ mod codex_stop_args_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

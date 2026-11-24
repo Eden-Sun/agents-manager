@@ -30,7 +30,7 @@ pub async fn publish_prompt_message(app: &(impl crate::capabilities::Db + crate:
 pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("mark_delivery_before_claim", turn_id).await;
 
     let mut tx = app.db().begin().await?;
@@ -191,7 +191,7 @@ fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabi
 }
 
 fn restamp_retry_delay(attempt: usize) -> std::time::Duration {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return std::time::Duration::from_millis(20);
     }
     const SECS: [u64; 5] = [2, 5, 15, 30, 60];
@@ -225,9 +225,9 @@ macro_rules! unretracted_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 unretracted_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 unretracted_type!(pub(super),);
 
 impl Unretracted {
@@ -257,9 +257,9 @@ macro_rules! retraction_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 retraction_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 retraction_type!(pub(super),);
 
 /// Remove a turn and its user message that never reached the agent. They were committed before the
@@ -773,7 +773,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                 ));
             }
             if crate::tui_prompts::is_auto_mode_offer(&screen) {
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
                 super::race_point::hit("claude_auto_mode_before_answer", &bot.id).await;
                 let latest = read_guard_screen(client, pane, run, "pane_unreadable").await?;
                 if crate::tui_prompts::is_auto_mode_offer(&latest) {
@@ -828,7 +828,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
     }
     if bot.kind == "grok" && crate::tui_prompts::is_grok_trust_dialog(&screen) {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("grok_trust_before_host", &bot.id).await;
             let authority = async {
                 let host = db::bot_host(app.db(), &bot.id).await?;
@@ -853,7 +853,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                     tracing::warn!(bot = %bot.name, host, cwd, warning = %warning, "could not record grok folder trust");
                 }
             }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("grok_trust_before_answer", &bot.id).await;
             let latest = read_guard_screen(client, pane, run, "pane_unreadable").await?;
             if crate::tui_prompts::is_grok_trust_dialog(&latest) {
@@ -862,7 +862,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                     pane_guard_retry(run, "pane_guard_failed")
                 })?;
                 tokio::time::sleep(Duration::from_millis(1200)).await;
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
                 super::race_point::hit("grok_trust_after_answer", &bot.id).await;
                 let still = read_guard_screen(client, pane, run, "pane_unreadable").await?;
                 if crate::tui_prompts::is_grok_trust_dialog(&still) {
@@ -997,7 +997,7 @@ async fn prompt_inner(
         super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &out.message_id, &out.turn_id, text).await;
         return Ok(out);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
     let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
     if let Some(token) = share_token {
@@ -1047,9 +1047,9 @@ macro_rules! gated_types {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 gated_types!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 gated_types!(,);
 
 /// `prompt_inner` 分三段、各段被呼叫端裝箱（#1461／#1465 的 1 MiB stack 守門）：整段寫在一個 async fn 裡時，debug 建置下
@@ -1268,7 +1268,7 @@ async fn prompt_commit_and_deliver_body(
     ready: Ready,
 ) -> LcResult<PromptOut> {
     let Ready { bot, conv, files, deliver, run, client, plan, interrupted, send_now, send_now_active } = ready;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("prompt_before_turn_commit", bot_id).await;
 
     let turn_id = db::ulid();
@@ -1355,7 +1355,7 @@ async fn prompt_commit_and_deliver_body(
 
     super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("prompt_before_typing", bot_id).await;
 
     let res = match interrupted.as_ref() {
@@ -1495,7 +1495,7 @@ mod stack_shape_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

@@ -18,7 +18,7 @@
 //!
 //! idle 計時放記憶體：daemon 重啟後從第一次看到 idle 重新算，寧可晚收，不要誤收。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::{BotLocks, Db};
 use super::s6_ports::{StuckTurnContext, StuckTurnServices};
 use super::*;
@@ -593,7 +593,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

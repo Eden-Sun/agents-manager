@@ -85,7 +85,7 @@ impl Admitted {
         &self.run_id
     }
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     pub fn for_test(run_id: &str) -> Self {
         Admitted { run_id: run_id.to_string() }
     }

@@ -725,7 +725,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
         .await
         .map_err(up)?;
     tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1200))).await;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::lifecycle::race_point::hit("slash_after_enter_before_read", pane_id).await;
     let screen = client
         .pane_read(pane_id, "visible", 60)
@@ -735,7 +735,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     if !crate::tui_prompts::is_switch_model_dialog(&screen) {
         return Ok(());
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::lifecycle::race_point::hit("slash_confirm_before_answer", pane_id).await;
     let latest = client
         .pane_read(pane_id, "visible", 60)
@@ -752,7 +752,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     );
     client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
     tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1000))).await;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::lifecycle::race_point::hit("slash_after_answer_before_read", pane_id).await;
     let screen = client
         .pane_read(pane_id, "visible", 60)
@@ -806,7 +806,7 @@ async fn wait_for_composer_settled(
         std::time::Instant::now() + std::time::Duration::from_millis(SLASH_SETTLE_MAX_MS);
     let mut prev: Option<String> = None;
     loop {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         crate::lifecycle::race_point::hit("slash_before_settle_read", pane_id).await;
         let screen = client
             .pane_read(pane_id, "visible", 60)
@@ -1289,7 +1289,7 @@ mod login_slash_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

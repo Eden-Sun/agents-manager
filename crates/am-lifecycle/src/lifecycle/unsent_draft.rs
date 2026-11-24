@@ -70,9 +70,9 @@ macro_rules! unreadable_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 unreadable_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 unreadable_type!(,);
 
 fn unreadable_rounds() -> &'static Mutex<Unreadable> {
@@ -324,7 +324,7 @@ async fn alert(app: &impl StuckTurnContext, bot: &db::Bot, turn: &db::Turn, reas
 #[path = "unsent_draft_tests.rs"]
 mod tests;
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

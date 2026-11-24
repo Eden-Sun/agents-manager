@@ -60,7 +60,7 @@ async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: Option<&str>) -> 
     if observed.pane_id != pane || observed.agent.as_deref() != Some("codex")
         || observed.terminal_id.as_deref() != Some(terminal) { return Ok(None) }
     let Some(native) = super::super::dead_panes::herdr_session_id(&observed) else { return Ok(None) };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::super::race_point::hit("codex_session_refresh_before_write", &run.id).await;
     let result = client.fence.run_current(Box::pin(async {
         if started.elapsed() >= Duration::from_secs(5) { return Ok::<_, anyhow::Error>(None) }
@@ -83,7 +83,7 @@ async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: Option<&str>) -> 
 }
 
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub mod test_seams {
     use super::*;
 

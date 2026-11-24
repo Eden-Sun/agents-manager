@@ -102,7 +102,7 @@ pub async fn insert_message_full(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("conversation {conversation_id} has no owner"))?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("insert_message_after_owner_read", conversation_id).await;
     let id = db::ulid();
     let now = db::now();
@@ -244,7 +244,7 @@ fn clear_turn_event_retry(turn_id: &str) {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn forget_turn_event_retry(turn_id: &str) {
     clear_turn_event_retry(turn_id);
 }
@@ -259,7 +259,7 @@ fn schedule_turn_event_retry(app: &impl LcHost, turn_id: &str) {
         if retry.pending.is_some() {
             return;
         }
-        let delay = if cfg!(test) {
+        let delay = if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
             TEST_RETRY_DELAY
         } else {
             std::time::Duration::from_secs(BACKOFF_SECONDS[retry.attempt.min(BACKOFF_SECONDS.len() - 1)])
@@ -284,10 +284,10 @@ fn schedule_turn_event_retry(app: &impl LcHost, turn_id: &str) {
     }));
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     pub fn forget_turn_event_retry(turn_id: &str) { super::forget_turn_event_retry(turn_id) }
 }

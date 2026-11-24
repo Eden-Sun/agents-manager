@@ -16,7 +16,7 @@
 //! 那一句寫不進去時，不回普通的 `failed`／`Ok`，也不讓那一筆停在 in_flight＋pending 沒人收（擋住之後每一則、佔住維護窗口的
 //! 送達臨界區）。記成欠著、照上面同一套補；補的時候同樣從不送。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use super::s6_ports::OwedDeliveryContext;
 use super::*;
@@ -64,9 +64,9 @@ macro_rules! owed_type {
         }
     };
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 owed_type!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 owed_type!(,);
 
 /// bot → 這顆 bot 欠著的送達結果，一筆回合一條。
@@ -159,7 +159,7 @@ async fn owe<C: OwedDeliveryContext>(app: &C, bot_id: &str, mut o: Owed) -> anyh
             tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "prompt 送出（或確定沒送出）之後，結果卻寫不進 DB：記成欠著，之後補");
             record(bot_id, o);
             schedule_retry(app, bot_id);
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("owed_delivery_recorded", bot_id).await;
             Err(e)
         }
@@ -262,7 +262,7 @@ fn is_unique_violation(e: &anyhow::Error) -> bool {
 
 /// 欠著的帳沒有 hook、也沒有下一則 prompt 時也要補上。
 fn schedule_retry<C: OwedDeliveryContext>(app: &C, bot_id: &str) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return;
     }
     let app = (*app).clone();
@@ -353,7 +353,7 @@ mod tests {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

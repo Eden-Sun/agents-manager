@@ -1,6 +1,6 @@
 //! Stopping, interrupting and aborting: the ways a run or a turn ends on purpose.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::{BotLocks, Db};
 use crate::hosts::HostsAccess;
 use super::*;
@@ -190,7 +190,7 @@ async fn stop_locked_body(
                     return Err(LcError::Upstream(format!("api_bot_stop_unconfirmed:{code}")));
                 }
             }
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("api_stop_proof_before_recover", &run.id).await;
             if db::api_bot::recover_unknown(app.db(), &run.id).await.is_err() {
                 tracing::warn!(bot = bot_id, run = %run.id, error_code = "recover_unknown", "API bot stop could not recover unknown attempts");
@@ -250,7 +250,7 @@ async fn stop_locked_body(
     let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
         match host_fence {
             Some(fence) => {
-                #[cfg(all(test, feature = "daemon-test-harness"))]
+                #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
                 super::race_point::hit("restart_before_no_run_preview_cleanup", bot_id).await;
                 if !app.stop_preview(bot_id, Some(fence)).await {
                     tracing::warn!(bot = %bot.name, host = %fence.conn().name, reason = "superseded", "skipped preview cleanup because the scoped host authority changed");
@@ -264,14 +264,14 @@ async fn stop_locked_body(
         return Ok(false);
     };
     let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("restart_before_stop_client_lookup", bot_id).await;
     let client = match host_fence {
         Some(fence) => client_for_run_with_host_fence(app, &run, fence).await?,
         None => client_for_run(app, &run).await?.client,
     };
     let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("stop_before_stopping", bot_id).await;
     }
@@ -395,7 +395,7 @@ async fn stop_locked_body(
             "stop_not_confirmed: agent `{target}` did not exit ({outcome:?}); the run is not recorded as stopped"
         )));
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     {
         super::race_point::hit("stop_before_stopped", bot_id).await;
     }
@@ -469,13 +469,13 @@ async fn api_begin_stop_transaction_body(pool: &sqlx::SqlitePool, key: &super::a
             }
         }
     }.await;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("api_begin_stop_before_commit", &key.run_id).await;
     let result = if shutdown.is_cancelled() { Err(E::Busy) } else { result };
     match result {
         Ok(result) => {
             let commit_result = tx.commit().await;
-            #[cfg(all(test, feature = "daemon-test-harness"))]
+            #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
             super::race_point::hit("api_begin_stop_after_commit", &key.run_id).await;
             if commit_result.is_err() || shutdown.is_cancelled() { return Err(E::Ambiguous); }
             Ok(result)
@@ -790,7 +790,7 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
 /// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
 pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
     let seen = if expect_turn.is_none() { in_flight_at_arrival(app, bot_id).await? } else { None };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("interrupt_after_arrival", bot_id).await;
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -942,7 +942,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else { return };
     let Some(expected_prompt) = expected_prompt.filter(|p| !p.trim().is_empty()) else { return };
     tokio::time::sleep(pane_settle(Duration::from_millis(400))).await;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("abort_after_settle", &bot.id).await;
     if !abort_binding_is_current(app, run).await {
         return;
@@ -959,7 +959,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
                        "interrupt: composer holds no exact copy of the interrupted prompt; not clearing");
         return;
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     super::race_point::hit("abort_before_clear_key", &bot.id).await;
 
     let Ok(fresh) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
@@ -1177,7 +1177,7 @@ pub async fn move_pane_to_own_tab(app: &impl StopContext, bot_id: &str) -> LcRes
 #[path = "force_abort_tests.rs"]
 pub mod force_abort_tests;
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

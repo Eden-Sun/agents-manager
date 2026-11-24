@@ -384,7 +384,7 @@ pub async fn pending_tail_for_session(
     Ok(split_output(&out).map(|(_, body)| body))
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

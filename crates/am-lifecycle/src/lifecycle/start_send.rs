@@ -243,7 +243,7 @@ pub fn kick(app: &impl LcHost, bot_id: &str) {
 
 /// 測試裡不做：背景的 RPC 會跟測試自己推的狀態機搶（同 `schedule_flush_queued`），測試直接呼叫 [`start_for_waiting`]。
 fn spawn_start(app: &impl LcHost, bot_id: &str, mark: Starting) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return;
     }
     let (app, id) = ((*app).clone(), bot_id.to_string());
@@ -335,8 +335,8 @@ enum Started {
 /// 由測試自己呼叫 [`flush_if_running`]。重啟（`restart_bot_with`／子 agent 原地重啟）遇到同一種 `Uncommitted` 也走這裡（#165）。
 pub fn flush_once_running(app: &impl LcHost, bot_id: &str, run_id: &str) {
     tracing::warn!(bot = %bot_id, run = %run_id, "agent 起來了、running 還沒記下：等對帳收斂後再叫 flush");
-    if cfg!(test) {
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         watch_log().lock().unwrap().push(run_id.to_string());
         return;
     }
@@ -365,14 +365,14 @@ pub async fn flush_if_running(app: &impl LcHost, bot_id: &str, run_id: &str) -> 
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn watch_log() -> &'static Mutex<Vec<String>> {
     static L: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     L.get_or_init(Default::default)
 }
 
 /// 測試用：有沒有替這顆 run 排「收成 running 就叫 flush」。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn watching_for_running(run_id: &str) -> bool {
     watch_log().lock().unwrap().iter().any(|r| r == run_id)
 }
@@ -614,7 +614,7 @@ async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<Stri
 }
 
 fn retry_resume(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) {
         return;
     }
     let (app, host) = ((*app).clone(), host.to_string());
@@ -624,7 +624,7 @@ fn retry_resume(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) {
     });
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。

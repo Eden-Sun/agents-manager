@@ -3,7 +3,7 @@
 //! A retry here only writes the observed snapshot to SQLite. It never sends a slash command or
 //! picker key, and every write stays bound to the run that produced the readback.
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 use crate::capabilities::Db;
 use crate::lifecycle::s6_ports::LiveApplyDebtContext;
 use sqlx::{FromRow, SqlitePool};
@@ -199,7 +199,7 @@ pub async fn recover(app: &(impl LiveApplyDebtContext + Clone)) {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;

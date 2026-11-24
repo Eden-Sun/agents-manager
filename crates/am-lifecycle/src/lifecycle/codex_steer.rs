@@ -52,7 +52,7 @@ pub async fn migrate(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
 }
 
 /// 測試用：把這個 (bot, crid) 從記憶體快取拿掉，模擬 daemon 重啟後只剩 DB 的帳。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 pub fn forget_memo_for_test(bot_id: &str, client_request_id: &str) {
     memo().lock().unwrap().remove(&(bot_id.to_string(), client_request_id.to_string()));
 }
