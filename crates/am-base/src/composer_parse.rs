@@ -917,4 +917,19 @@ mod agy_placeholder_tests {
             assert_eq!(box_state("agy", &real(" user prompt", msg)), BoxState::NonEmpty, "有字＋狀態訊息：{msg}");
         }
     }
+
+    /// agy 1.5.16 合成樣本（依 issue #2196 描述合成）：輸入框上方是步驟清單與分階段計時，游標列 `> 2. …` 在框線之上。
+    /// 輸入框本身仍是空的（只有 `>`），步驟列不能被當成草稿，也不能讓 `pane_awaits_input` 失準。
+    #[test]
+    fn step_list_above_the_composer_does_not_change_the_box() {
+        let steps = format!(
+            "  ✓ 1. Read the spec\n> 2. Run the tests\n  3. [ ] Update docs\n⋮ 1 more\nRunning command... 18s\n{RULE}\n>\n{RULE}\n? for shortcuts    Gemini 3.8 Flash · high\n"
+        );
+        assert_eq!(box_state("agy", &steps), BoxState::Empty);
+        assert_eq!(composer_text("agy", &steps), None);
+        assert!(pane_awaits_input("agy", &steps));
+        let typed = steps.replace(&format!("\n>\n{RULE}"), &format!("\n> 接著做\n{RULE}"));
+        assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
+        assert_eq!(composer_text("agy", &typed).as_deref(), Some("接著做"));
+    }
 }

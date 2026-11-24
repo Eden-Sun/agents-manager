@@ -346,7 +346,8 @@ fn has_prompt_cue(norm: &str) -> bool {
 /// 輸入列空著（[`composer_is_idle`]）是結構性證據：真的確認框會佔用輸入列，所以那時**提示字樣不算數**——工具輸出裡寫著
 /// `Do you want to …`、`1. foo` 清單不是框；既有的對話框辨識（它們各自會擋引文）仍照算。
 pub fn screen_has_answerable_prompt(screen: &str) -> bool {
-    screen_has_answerable_prompt_inner(&dialog_view(screen))
+    let screen = without_agy_progress(screen);
+    screen_has_answerable_prompt_inner(&dialog_view(&screen))
 }
 
 fn screen_has_answerable_prompt_inner(screen: &str) -> bool {
@@ -571,7 +572,20 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
 /// `Session paused`…）。那不是回合結束，選單那幾行更不是回覆（2026-09-25 cf-ox-fork-fork：herdr 判 idle，
 /// 備援把 `2. Edit prompt and retry with …` 存成了回覆）。
 pub fn awaits_menu_choice(screen: &str) -> bool {
-    awaits_menu_choice_inner(&dialog_view(screen))
+    let screen = without_agy_progress(screen);
+    awaits_menu_choice_inner(&dialog_view(&screen))
+}
+
+/// agy 1.5.16 的步驟清單與分階段計時在輸入框上方（#2196）：`1. …` 步驟、`> 2. …` 游標列、`N/M steps` 都不是選單，也不是要人作答的畫面。
+/// 那一段換成空白行（行數不變），再交給既有的選單與提示判斷。
+fn without_agy_progress(screen: &str) -> std::borrow::Cow<'_, str> {
+    let Some(range) = am_base::agy_screen::status_block_range(screen) else { return std::borrow::Cow::Borrowed(screen) };
+    let mut out = String::with_capacity(screen.len());
+    for (i, l) in screen.lines().enumerate() {
+        out.push_str(if range.contains(&i) { "" } else { l });
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn awaits_menu_choice_inner(screen: &str) -> bool {
@@ -2307,5 +2321,26 @@ Use arrow keys to navigate · Enter to select
         let switch_model_symbols = format!("⚠ Switch {}\n❯ 1. Yes, switch to Opus 4.8\n  2. No, go back\n", "model?");
         assert!(has(&switch_model_symbols), "帶 ⚠ 前綴的 switch model 分類為 awaiting confirmation");
         assert!(super::is_switch_model_dialog(&switch_model_symbols));
+    }
+
+    /// agy 1.5.16 合成樣本（依 issue #2196 描述合成）：步驟清單帶編號與方括號、游標停在進行中的那一步，框線上方是分階段計時。
+    /// 輸入列是空的，不是選單，也不是要使用者作答的畫面。
+    #[test]
+    fn agy_step_list_with_numbers_and_timer_is_not_an_answerable_menu() {
+        let screen = "\
+  Antigravity CLI 1.5.16
+2/3 steps · 0 failed
+  1. Read the spec
+> 2. Run the tests
+  3. [ ] Update docs
+⋮ 1 more
+Running command... 18s
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+        assert!(!super::awaits_menu_choice(screen), "步驟清單不是編號選單");
+        assert!(!super::screen_has_answerable_prompt(screen), "空輸入列＋進度列不是要人作答的畫面");
     }
 }

@@ -140,11 +140,106 @@ fn is_task_running_row(line: &str) -> bool {
     b.len() == 8 && b[2] == b':' && b[5] == b':' && b.iter().enumerate().all(|(i, c)| i == 2 || i == 5 || c.is_ascii_digit()) && inner.1.trim_end().ends_with("running")
 }
 
-/// agy 這一刻是不是還在工作（#2146）：herdr 報 idle、Stop hook 也來過，agy 仍可能在跑前景工具或背景工作。
+/// 1.5.16 的 spinner（braille）開頭。
+fn is_spinner(c: char) -> bool {
+    ('\u{2800}'..='\u{28ff}').contains(&c)
+}
+
+/// `Thinking... 12s`、`Running command... 18s`：階段名（ASCII 字母，首字大寫）後接 `...` 與一或多個時長（`12s`、`1m`、`250ms`）。
+fn is_timer_row(t: &str) -> bool {
+    let t = t.trim_start_matches(is_spinner).trim_start();
+    let Some((label, rest)) = t.split_once("...") else { return false };
+    let label_ok = label.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && label.chars().all(|c| c.is_ascii_alphabetic() || c == ' ');
+    let durations: Vec<&str> = rest.split_whitespace().collect();
+    label_ok && !durations.is_empty() && durations.iter().all(|w| is_duration(w))
+}
+
+fn is_duration(w: &str) -> bool {
+    ["ms", "h", "m", "s"].iter().find_map(|suf| w.strip_suffix(suf)).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `3/9 steps`（可附 ` · 1 skipped`）：步驟進度頭。回（完成, 總數）。
+fn steps_progress(t: &str) -> Option<(u32, u32)> {
+    let t = t.trim_start_matches(|c: char| c.is_whitespace() || is_spinner(c) || "●○└…⋮✓✗⊘•▸▶".contains(c));
+    let (done, rest) = t.split_once('/')?;
+    let total: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let after = rest[total.len()..].strip_prefix(" steps")?;
+    if !after.is_empty() && !after.starts_with(' ') {
+        return None;
+    }
+    Some((done.parse().ok()?, total.parse().ok()?))
+}
+
+/// 進度區的單行，不論有沒有進行中的標記：計時列、步驟頭、`⋮ N earlier`／`⋮ N more`。
+/// 只看這些結構，不靠任何會出現在正文裡的字（引文要是剛好排成一行，也只會是計時列形狀）。
+pub fn is_progress_line(line: &str) -> bool {
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let t = cleaned.trim();
+    is_timer_row(t) || steps_progress(t).is_some() || (t.starts_with('⋮') && (t.ends_with(" earlier") || t.ends_with(" more")))
+}
+
+/// `1. 讀規格`、`> 2. 跑測試`（游標可有可無）：編號步驟項目。數字不單獨構成進度，只在區塊裡才算。
+fn is_numbered_step(t: &str) -> bool {
+    let t = t.trim_start_matches(|c: char| c.is_whitespace() || ">❯›".contains(c));
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    (1..=2).contains(&digits) && t[digits..].strip_prefix(['.', ')']).is_some_and(|rest| rest.starts_with(' '))
+}
+
+/// 進度區的單行，連步驟項目也算（`✓`／`✗`／`⊘`／`[x]`／`[ ]`／`•`／`▸`／`▶`、編號步驟）與 `●`／`○`／`└`／`…`／spinner 的進度列。
+fn is_status_row(line: &str) -> bool {
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let t = cleaned.trim();
+    is_progress_line(t)
+        || is_numbered_step(t)
+        || t.starts_with(['●', '○', '└', '…', '✓', '✗', '⊘', '•', '▸', '▶'])
+        || t.starts_with("[x]")
+        || t.starts_with("[X]")
+        || t.starts_with("[ ]")
+        || t.chars().next().is_some_and(is_spinner)
+}
+
+/// 進行中的標記：計時列、`○ Running (`、還沒做完的步驟頭（`N/M steps`，N < M）。
+fn is_busy_marker(line: &str) -> bool {
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let t = cleaned.trim();
+    is_timer_row(t) || t.starts_with("○ Running (") || steps_progress(t).is_some_and(|(done, total)| done < total)
+}
+
+/// 輸入框（`top` 那條框線）上方、緊鄰它的尾端狀態區塊的起點（#2196，agy 1.5.16 的步驟清單與分階段計時）。
+/// 從 `top` 往上連續收進可見的進度列（[`is_status_row`]，空行略過），碰到第一行正文就停。
+/// 區塊裡沒有進行中的標記（[`is_busy_marker`]）就回 `None`：只有步驟項目、沒有計時的畫面不是忙碌。
+///
+/// 只看框線緊上方的區塊，所以正文裡引述的 `Thinking... 12s` 之後只要還有一行正文，就不會被算進來。
+pub fn status_block_start(lines: &[&str], top: usize) -> Option<usize> {
+    let mut start = None;
+    let mut marker = false;
+    for (i, line) in lines[..top].iter().enumerate().rev() {
+        if crate::composer_parse::strip_ansi(line).trim().is_empty() {
+            continue;
+        }
+        if !is_status_row(line) {
+            break;
+        }
+        marker |= is_busy_marker(line);
+        start = Some(i);
+    }
+    if marker { start } else { None }
+}
+
+/// 輸入框上方尾端進度區的行範圍（[`status_block_start`] 到輸入框頂線），給 am-lifecycle 的選單與提示判斷先略過（#2196）。
+pub fn status_block_range(screen: &str) -> Option<std::ops::Range<usize>> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let rules: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_rule(l)).map(|(i, _)| i).collect();
+    let [.., top, _] = rules[..] else { return None };
+    status_block_start(&lines, top).map(|start| start..top)
+}
+
+/// agy 這一刻是不是還在工作（#2146、#2196）：herdr 報 idle、Stop hook 也來過，agy 仍可能在跑前景工具或背景工作。
 /// 只認結構，不全畫面搜尋 `Running`、也不看 `N task(s)`（常駐 daemon task 會永遠擋住）：
 /// 1. 輸入框（最後兩條框線之間）下方的 footer 有 `esc to cancel`；
 /// 2. 輸入框下方有 `● [HH:MM:SS] … running` 的背景工作列；
-/// 3. 輸入框上方，最後一行 `○ Running (` 之後沒有新的 assistant 正文（只有 `●`／`○`／`└`／spinner 的進度列）。
+/// 3. 輸入框緊上方的尾端狀態區塊（[`status_block_start`]）有進行中的標記（`○ Running (`、`Thinking... 12s`、`N/M steps` 未完成），
+///    且區塊與輸入框下方都沒有 `interrupted`。
 ///
 /// 找不到輸入框就判不忙（維持原本行為）。
 pub fn is_busy(screen: &str) -> bool {
@@ -158,17 +253,8 @@ pub fn is_busy(screen: &str) -> bool {
     if below.iter().any(|l| is_task_running_row(l)) {
         return true;
     }
-    let above: Vec<String> = lines[..top].iter().map(|l| crate::composer_parse::strip_ansi(l)).filter(|l| !l.trim().is_empty()).collect();
-    let Some(at) = above.iter().rposition(|l| l.trim_start().starts_with("○ Running (")) else { return false };
-    if above[at..].iter().any(|l| l.to_lowercase().contains("interrupted"))
-        || below.iter().any(|l| crate::composer_parse::strip_ansi(l).to_lowercase().contains("interrupted"))
-    {
-        return false;
-    }
-    above[at + 1..].iter().all(|l| {
-        let t = l.trim_start();
-        t.starts_with('●') || t.starts_with('○') || t.starts_with('└') || t.starts_with('…') || t.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
-    })
+    let Some(start) = status_block_start(&lines, top) else { return false };
+    !lines[start..top].iter().chain(below).any(|l| crate::composer_parse::strip_ansi(l).to_lowercase().contains("interrupted"))
 }
 
 #[cfg(test)]
@@ -431,6 +517,125 @@ Antigravity CLI can make mistakes and is vulnerable to prompt injection and supp
         assert!(!is_busy(IDLE_QUOTE), "正文引用 Running、只剩常駐 daemon task 且無 esc to cancel");
         assert!(!is_busy(IDLE_AFTER_RUNNING), "Running 之後已有新的正文");
         assert!(!is_busy("no composer here\n○ Running (x)\n"), "找不到輸入框不判忙");
+    }
+
+    /// 1.5.16 合成樣本（依 issue #2196 的描述合成，非實機擷取）：步驟清單＋分階段計時，輸入框在最底下，footer 沒有 `esc to cancel`。
+    const STEPS_RUNNING_156: &str = "\
+● Edited 1 file (a.rs)
+  我先讀規格，再改解析器。
+3/9 steps · 1 skipped
+  ✓ Read the spec
+  ✓ Write the parser
+> 3. Run the tests
+  4. [ ] Update docs
+  ⋮ 1 earlier
+  [ ] Write the changelog
+  ⋮ 2 more
+Running command... 18s
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+  Gemini 3.8 Flash · high
+";
+    const THINKING_156: &str = "\
+  我來看看檔案。
+Thinking... 12s
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+  Gemini 3.8 Flash · high
+";
+    const STEPS_INTERRUPTED_156: &str = "\
+3/9 steps
+  ✓ Read the spec
+● Interrupted
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+    const STEPS_INTERRUPTED_FOOTER_156: &str = "\
+3/9 steps
+  ✓ Read the spec
+  ▸ Run the tests
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+Interrupted                                                  Gemini 3.8 Flash · high
+";
+    const STEPS_DONE_156: &str = "\
+● Edited 1 file (a.rs)
+  做完了，結果如下。
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+    const QUOTED_156: &str = "\
+  我看到畫面上寫著「Thinking... 12s」與「2/5 steps」，之後就結束了。
+  這段是引文，不是進度。
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+    const QUOTED_TIMER_LINE_156: &str = "\
+  Thinking... 12s
+  上面那行只是我在抄寫。
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+
+    #[test]
+    fn step_list_with_phase_timer_is_busy_without_esc_to_cancel() {
+        assert!(!STEPS_RUNNING_156.to_lowercase().contains("esc to cancel"));
+        assert!(is_busy(STEPS_RUNNING_156), "3/9 進行中＋Running command 計時");
+        assert!(is_busy(THINKING_156), "單獨一列 Thinking... 12s");
+    }
+
+    #[test]
+    fn step_list_with_interrupted_is_not_busy() {
+        assert!(!is_busy(STEPS_INTERRUPTED_156), "步驟清單裡的 ● Interrupted");
+        assert!(!is_busy(STEPS_INTERRUPTED_FOOTER_156), "輸入框下方的 Interrupted");
+        assert_eq!(blocking_dialog(STEPS_INTERRUPTED_156), None);
+        assert_eq!(blocking_dialog(STEPS_INTERRUPTED_FOOTER_156), None);
+    }
+
+    #[test]
+    fn finished_steps_and_empty_composer_are_not_busy() {
+        assert!(!is_busy(STEPS_DONE_156));
+        assert!(!is_busy("● Edited 1 file (a.rs)\n3/3 steps\n  ✓ a\n  ✓ b\n  ✓ c\n────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────\n"), "全部完成的步驟頭不是進行中");
+        assert_eq!(blocking_dialog(STEPS_DONE_156), None);
+    }
+
+    #[test]
+    fn quoted_timer_and_steps_in_a_reply_are_not_busy() {
+        assert!(!is_busy(QUOTED_156), "引文夾在正文裡，框線上方不是進度區");
+        assert!(!is_busy(QUOTED_TIMER_LINE_156), "引文最底下還有一行正文，計時列不在框線上方");
+        assert_eq!(blocking_dialog(QUOTED_156), None);
+        assert_eq!(blocking_dialog(QUOTED_TIMER_LINE_156), None);
+    }
+
+    #[test]
+    fn step_list_screens_are_not_blocking_dialogs() {
+        for screen in [STEPS_RUNNING_156, THINKING_156, STEPS_DONE_156] {
+            assert_eq!(blocking_dialog(screen), None, "{screen}");
+        }
+    }
+
+    #[test]
+    fn status_block_covers_only_the_run_above_the_composer() {
+        let lines: Vec<&str> = STEPS_RUNNING_156.lines().collect();
+        let top = lines.iter().position(|l| is_rule(l)).unwrap();
+        assert_eq!(status_block_start(&lines, top), Some(2), "從 3/9 steps 起算到框線");
+        let quoted: Vec<&str> = QUOTED_156.lines().collect();
+        let quoted_top = quoted.iter().position(|l| is_rule(l)).unwrap();
+        assert_eq!(status_block_start(&quoted, quoted_top), None);
+        assert!(is_progress_line("  Running command... 18s"));
+        assert!(is_progress_line("⋮ 2 more"));
+        assert!(!is_progress_line("  我看到 Thinking... 12s"));
     }
 
     #[test]

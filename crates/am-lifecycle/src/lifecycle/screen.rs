@@ -352,6 +352,7 @@ fn is_agy_chrome(s: &str) -> bool {
         || s == "agy"
         || s.starts_with("? for shortcuts")
         || is_agy_scroll_indicator(s)
+        || am_base::agy_screen::is_progress_line(s)
         || (s.contains('@') && s.split_whitespace().next().is_some_and(|w| w.contains(':') && (w.contains("$") || w.ends_with('$') || w.ends_with('#'))))
 }
 
@@ -1132,7 +1133,12 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     let grok = kind == "grok";
     let agy = kind == "agy";
-    let agy_end = if agy { agy_composer_top(&lines) } else { lines.len() };
+    let agy_end = if agy {
+        let top = agy_composer_top(&lines);
+        am_base::agy_screen::status_block_start(&lines, top).unwrap_or(top)
+    } else {
+        lines.len()
+    };
     let mut in_thought = false;
     let mut in_banner = false;
     for (i, line) in lines.iter().enumerate().skip(start) {
@@ -3356,5 +3362,57 @@ mod agy_1_5_12_scroll_indicator_tests {
         assert_eq!(box_state("agy", &screen), BoxState::Empty);
         assert_eq!(composer_text("agy", &screen), None);
         assert!(pane_awaits_input("agy", &screen.replace("> \u{1b}[38;5;8mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[0m", ">")));
+    }
+
+    /// agy 1.5.16 合成樣本（依 issue #2196 描述合成）：步驟清單與分階段計時在輸入框上方，不能進回覆。
+    #[test]
+    fn step_list_and_phase_timer_above_the_composer_are_not_the_reply() {
+        let screen = format!(
+            "      ▄▀▀▄        Antigravity CLI 1.5.16\n\
+                  ▀▀▀▀▀▀       me@example.com (Google AI Pro)\n\
+             {RULE}\n\
+             > 重構資料庫模組\n\
+             \n\
+               先讀規格，再改解析器。\n\
+             3/9 steps · 1 skipped\n\
+               ✓ Read the spec\n\
+               ▸ Run the tests\n\
+             ⋮ 1 earlier\n\
+               [ ] Update docs\n\
+             ⋮ 2 more\n\
+             Running command... 18s\n\
+             {RULE}\n\
+             >\n\
+             {RULE}\n\
+             ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
+        );
+
+        let reply = clean_screen("agy", &screen).expect("clean reply");
+        assert!(reply.contains("先讀規格，再改解析器。"), "{reply}");
+        for noise in ["steps", "⋮", "Running command", "✓ Read", "▸ Run", "[ ] Update"] {
+            assert!(!reply.contains(noise), "{noise} 不該進回覆：{reply}");
+        }
+        assert_eq!(box_state("agy", &screen), BoxState::Empty);
+        assert!(pane_awaits_input("agy", &screen));
+    }
+
+    /// 回覆正文最後是 `•` 清單，底下沒有進行中的標記：不是進度區，清單照樣是回覆。
+    #[test]
+    fn a_bullet_list_ending_the_reply_without_progress_markers_stays_in_the_reply() {
+        let screen = format!(
+            "      ▄▀▀▄        Antigravity CLI 1.5.16\n\
+             {RULE}\n\
+             > 列出待辦\n\
+             \n\
+               • 補測試\n\
+               • 更新文件\n\
+             {RULE}\n\
+             >\n\
+             {RULE}\n\
+             ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
+        );
+
+        let reply = clean_screen("agy", &screen).expect("clean reply");
+        assert!(reply.contains("• 補測試") && reply.contains("• 更新文件"), "{reply}");
     }
 }
