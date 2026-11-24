@@ -211,18 +211,18 @@ impl FastFollowEdges {
         true
     }
 }
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fast_follow_types!(pub,);
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 fast_follow_types!(,);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
 fn fast_follow_edges() -> SharedEdges {
     static EDGES: std::sync::OnceLock<std::sync::Mutex<FastFollowEdges>> = std::sync::OnceLock::new();
     EDGES.get_or_init(Default::default)
 }
 /// 測試同一個 process 裡每個測試各有自己的 DB（和 current-thread runtime）：共用一張表的話，一個測試的清理會把別的測試
 /// 的 edge 當成「run 不存在」清掉。所以測試時每條執行緒一張表。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 fn fast_follow_edges() -> SharedEdges {
     thread_local! { static EDGES: SharedEdges = Box::leak(Box::default()); }
     EDGES.with(|edges| *edges)
@@ -435,7 +435,7 @@ pub fn spawn_boot_version_read(
 }
 
 fn boot_version_retry_delay() -> Duration {
-    Duration::from_millis(if cfg!(test) { 1 } else { 1000 })
+    Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 1 } else { 1000 })
 }
 
 /// 讀到開機畫面就記（`codex_update::remember_running`）。第一次讀可能還沒畫出來，最多再讀 [`BOOT_VERSION_RETRIES`] 次。
@@ -654,7 +654,7 @@ async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<boo
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_picker_before_final_read", pane_id).await;
     let last = read(client, pane_id).await?;
     Ok(!picker_open(&last) && !transcript_browser_open(&last))
@@ -713,7 +713,7 @@ async fn apply_model_and_effort(
     }
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_apply_before_model_picker_read", pane_id).await;
     let screen = read(client, pane_id).await?;
     if !screen.contains("Select Model") {
@@ -729,7 +729,7 @@ async fn apply_model_and_effort(
         return Ok(false);
     }
 
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_apply_before_effort_picker_read", pane_id).await;
     let screen = read(client, pane_id).await?;
     if !screen.contains("Select Reasoning Level") {
@@ -772,7 +772,7 @@ async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
     if !key(client, pane_id, "Enter").await {
         return false;
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_after_fast_toggle", pane_id).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
     true
@@ -835,7 +835,7 @@ pub async fn apply(
         match oneshot_model_command(bot, fields, model_default_effort) {
             Ok((line, want_effort)) => match apply_oneshot(client, pane_id, bot, fields, &line, want_effort.as_deref()).await {
                 Err(ONESHOT_NOT_SUPPORTED) => {
-                    #[cfg(all(test, feature = "daemon-test-harness"))]
+                    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
                     crate::race_point::hit("codex_oneshot_before_fallback", pane_id).await;
                     match composer_is_empty(client, pane_id).await {
                         Some(true) => {}
@@ -888,11 +888,11 @@ const ONESHOT_NO_DEFAULT_EFFORT: &str = "oneshot_no_default_effort";
 
 /// 等回應文字、等狀態列回來各自最多這麼久，不無限等。
 fn oneshot_wait() -> Duration {
-    Duration::from_millis(if cfg!(test) { 200 } else { 3000 })
+    Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 200 } else { 3000 })
 }
 
 fn oneshot_poll() -> Duration {
-    Duration::from_millis(if cfg!(test) { 10 } else { 250 })
+    Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 10 } else { 250 })
 }
 
 /// 這個 run 跑的 codex（`codex_update::running_version_of`）能不能吃一次性 `/model`。版本沒看過、讀不懂（含 `-alpha`
@@ -1037,11 +1037,11 @@ async fn apply_oneshot(
     if !text(client, pane_id, line).await {
         return Err(oneshot_fail(client, pane_id, bot, "oneshot_send_failed").await);
     }
-    tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 600 })).await;
+    tokio::time::sleep(Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 20 } else { 600 })).await;
     if !key(client, pane_id, "Enter").await {
         return Err(oneshot_fail(client, pane_id, bot, "oneshot_send_failed").await);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_oneshot_after_enter", pane_id).await;
 
     let deadline = tokio::time::Instant::now() + oneshot_wait();
@@ -1190,7 +1190,7 @@ pub const RESUME_TEXT: &str = "continue";
 const INTERRUPT_SETTLE_READS: u32 = 10;
 
 fn interrupt_settle_poll() -> Duration {
-    Duration::from_millis(if cfg!(test) { 20 } else { 400 })
+    Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 20 } else { 400 })
 }
 
 /// 回合中改 model／effort（#1681）：model／effort 要開選單，回合跑著不能碰，所以先按 Esc 把回合停下來，
@@ -1211,7 +1211,7 @@ pub async fn interrupt_for_apply(client: &HerdrClient, pane_id: &str) -> Result<
     if !key(client, pane_id, "Escape").await {
         return Err(BUSY_NOT_READY);
     }
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
     crate::race_point::hit("codex_interrupt_after_esc", pane_id).await;
     let mut prev: Option<String> = None;
     for _ in 0..INTERRUPT_SETTLE_READS {
@@ -1255,13 +1255,13 @@ pub async fn send_resume(client: &HerdrClient, pane_id: &str) -> Result<(), &'st
     if !text(client, pane_id, RESUME_TEXT).await {
         return Err("resume_send_failed");
     }
-    tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 600 })).await;
+    tokio::time::sleep(Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 20 } else { 600 })).await;
     for press in 0..2 {
         if !key(client, pane_id, "Enter").await {
             return Err("resume_send_failed");
         }
-        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 900 })).await;
-        #[cfg(all(test, feature = "daemon-test-harness"))]
+        tokio::time::sleep(Duration::from_millis(if cfg!(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness"))) { 20 } else { 900 })).await;
+        #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
         crate::race_point::hit("codex_resume_after_enter", pane_id).await;
         let Ok(snap) = crate::composer_parse::read_styled_snapshot(client, pane_id, "visible", 60).await else {
             return Ok(());
@@ -1279,7 +1279,7 @@ pub async fn send_resume(client: &HerdrClient, pane_id: &str) -> Result<(), &'st
     Err("resume_not_submitted")
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
 #[doc(hidden)]
 pub mod test_seams {
     use super::*;
@@ -1304,7 +1304,7 @@ pub mod test_seams {
         super::remember_boot_version(pool, fence, kind, bot_id, run_id, read, delay).await
     }
 }
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
 mod tests {
     use super::{fast_plan, needs_second_toggle, FastPlan};
 

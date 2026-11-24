@@ -292,7 +292,7 @@ async fn run_of(app: &impl crate::capabilities::Db, turn_id: Option<&str>) -> Op
         .flatten()
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
 mod tests {
     use super::*;
 

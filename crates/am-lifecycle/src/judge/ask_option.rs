@@ -494,7 +494,7 @@ async fn still_current(
         && current_prompt(app, bot_id, run_id).await?.as_ref().map(|c| c.0.as_str()) == Some(turn_id))
 }
 
-#[cfg(all(test, not(feature = "daemon-test-harness")))]
+#[cfg(all(test, not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))))]
 mod pure_tests {
     use super::*;
 
