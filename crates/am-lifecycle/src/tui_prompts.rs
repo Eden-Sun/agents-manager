@@ -331,7 +331,7 @@ fn has_prompt_cue(norm: &str) -> bool {
         "enter to select", "enter to confirm", "enter/esc", "press enter to", "enter to continue",
         "esc to cancel", "esc to go back", "to navigate", "use arrow keys",
     ];
-    CUES.iter().any(|c| norm.contains(c))
+    CUES.iter().any(|c| norm.contains(c)) || (norm.contains("pageup") || norm.contains("pgup")) && (norm.contains("pagedown") || norm.contains("pgdn"))
 }
 
 /// **畫面上有沒有一個使用者可以回答的提示**（選單、確認框、問卷、y/n 問句）。
@@ -498,6 +498,14 @@ fn is_auto_mode_offer_inner(screen: &str) -> bool {
     }
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     line_starts_with(&tail, "yes, set auto mode as my default permission mode") && line_starts_with(&tail, "no, keep bypass permissions")
+}
+
+/// 替 Auto mode 框選「No, keep bypass permissions」要送的鍵。游標已在 No 上就只按 Enter；否則（游標在 Yes 或看不到游標）
+/// 按 Down 再 Enter。Down 只在游標確定在第一項時才是對的，游標在 No 時 Down 會回到 Yes。
+pub fn auto_mode_offer_keys(screen: &str) -> &'static [&'static str] {
+    let view = dialog_view(screen);
+    let on_keep = view.lines().any(|l| cursor_text(l).is_some_and(|t| norm_line(&t).starts_with("no, keep bypass permissions")));
+    if on_keep { &["Enter"] } else { &["Down", "Enter"] }
 }
 
 /// 編號選單最多這麼高（含說明、`Details:` 與折行）；最後一個選項之下最多再有 [`MENU_BELOW_LINES`] 行
@@ -1688,6 +1696,60 @@ Grok Build 1.0.46\n\
         assert!(screen_has_answerable_prompt(ansi), "styled 讀也要認得");
         let lines: Vec<&str> = plain.lines().collect();
         assert!(!composer_is_idle(&lines), "信任框佔住輸入列，不是空列");
+    }
+
+    /// 2.1.331 矮終端機（24 列）的啟動信任框（實機擷取 `claude-2.1.331-trust-24rows.txt`）：選項沒有編號，`No, exit` 在前、游標在它上面，
+    /// 底下是 `Enter to confirm · Esc to cancel`。沒有 `N.` 選項列，全靠提示字樣與輸入列空缺來認。
+    #[test]
+    fn claude_2331_short_terminal_trust_prompt_is_answerable() {
+        let plain = include_str!("lifecycle/fixtures/claude-2.1.331-trust-24rows.txt");
+        assert!(screen_has_answerable_prompt(plain), "{plain}");
+        assert!(permission_prompt(plain).is_none(), "信任框不是權限框");
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(!composer_is_idle(&lines), "信任框佔住輸入列，不是空列");
+    }
+
+    /// 2.1.331 矮終端機的 `/add-dir` 全螢幕框（實機擷取 `claude-2.1.331-add-dir-24rows.txt`）：只有一個路徑輸入框，
+    /// 底下 `Enter to add · Esc to cancel`，沒有編號選項。
+    #[test]
+    fn claude_2331_short_terminal_add_dir_frame_is_answerable() {
+        let plain = include_str!("lifecycle/fixtures/claude-2.1.331-add-dir-24rows.txt");
+        assert!(screen_has_answerable_prompt(plain), "{plain}");
+        assert!(!awaits_menu_choice(plain), "沒有編號選單");
+    }
+
+    /// 2.1.331 的 Auto mode 框若改成 Yes 在前、游標停在 No：仍要認得，而且只按 Enter（Down 會回到 Yes）。
+    #[test]
+    fn auto_mode_offer_with_cursor_on_no_is_answered_with_enter_only() {
+        let cursor_on_no = AUTO_MODE
+            .replace("│ ❯ Yes, set auto mode", "│   Yes, set auto mode")
+            .replace("│   No, keep bypass", "│ ❯ No, keep bypass");
+        assert_ne!(cursor_on_no, AUTO_MODE, "替換沒有生效");
+        assert!(is_auto_mode_offer(&cursor_on_no), "{cursor_on_no}");
+        assert!(screen_has_answerable_prompt(&cursor_on_no), "{cursor_on_no}");
+        assert_eq!(auto_mode_offer_keys(&cursor_on_no), &["Enter"]);
+        assert_eq!(auto_mode_offer_keys(AUTO_MODE), &["Down", "Enter"], "游標在 Yes 時維持 Down＋Enter");
+    }
+
+    /// codex 0.172 答案選項高過作答區時改用 PageUp／PageDown 捲動（合成畫面：照 codex 選單格式，捲動提示字樣未經實機確認）。
+    /// 畫面只露出中間幾項，第一項不是 `1.`，但輸入區已被選單取代，仍要認得是等人作答。
+    #[test]
+    fn codex_scrolled_choice_list_with_page_hint_is_answerable() {
+        let scrolled = "\
+  Which option should we use?
+
+  4. Option four
+  5. Option five
+› 6. Option six
+  7. Option seven
+  8. Option eight
+
+  enter select · PageUp/PageDown scroll · esc back
+";
+        assert!(screen_has_answerable_prompt(scrolled), "{scrolled}");
+        assert!(has_prompt_cue(&norm_line("  enter select · PgUp/PgDn scroll")));
+        assert!(has_prompt_cue(&norm_line("  PageUp and PageDown to scroll")));
+        assert!(!has_prompt_cue(&norm_line("  press PageDown to scroll the docs")), "單獨一個鍵名是正文，不是作答提示");
     }
 
     #[test]

@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.331
+▝▜██████▀  Sonnet 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   /work/project
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Add directory to workspace
+
+  Claude Code will be able to read files in this directory and make edits when
+  auto-accept edits is on.
+
+  Directory path
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ../other-project                                                         │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  Enter to add · Esc to cancel

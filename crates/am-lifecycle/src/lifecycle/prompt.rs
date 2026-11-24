@@ -775,7 +775,7 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                 super::race_point::hit("claude_auto_mode_before_answer", &bot.id).await;
                 let latest = read_guard_screen(client, pane, run, "pane_unreadable").await?;
                 if crate::tui_prompts::is_auto_mode_offer(&latest) {
-                    client.pane_send_keys(pane, &["Down", "Enter"]).await.map_err(|e| {
+                    client.pane_send_keys(pane, crate::tui_prompts::auto_mode_offer_keys(&latest)).await.map_err(|e| {
                         tracing::warn!(run = %run.id, error = %e, "could not answer claude's Auto mode dialog");
                         pane_guard_retry(run, "pane_guard_failed")
                     })?;
