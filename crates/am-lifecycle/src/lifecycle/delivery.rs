@@ -816,11 +816,13 @@ pub(super) fn typed_tail(text: &str) -> usize {
 const BRACKETED_PASTE_OPEN: &str = "\x1b[200~";
 const BRACKETED_PASTE_CLOSE: &str = "\x1b[201~";
 
-/// agy 空輸入列的第一個 `?` 會被當成「開快捷鍵說明」而不進輸入列；用 bracketed paste 包住那一個字元，其餘照舊直送，原文一字不改。
+/// agy 空輸入列的第一個 `?`（開快捷鍵說明）、`!`（進 bash 模式並吃掉字元）、`@`（開檔案選單）會被當成快捷鍵而不進輸入列；用 bracketed paste 包住那一個字元，其餘照舊直送，原文一字不改。
 pub(super) fn send_pieces(kind: &str, text: &str) -> Vec<String> {
-    match text.strip_prefix('?') {
-        Some(rest) if kind == "agy" => {
-            let mut pieces = vec![format!("{BRACKETED_PASTE_OPEN}?{BRACKETED_PASTE_CLOSE}")];
+    let lead = text.chars().next().filter(|c| matches!(c, '?' | '!' | '@'));
+    match lead {
+        Some(c) if kind == "agy" => {
+            let rest = &text[c.len_utf8()..];
+            let mut pieces = vec![format!("{BRACKETED_PASTE_OPEN}{c}{BRACKETED_PASTE_CLOSE}")];
             if !rest.is_empty() {
                 pieces.push(rest.to_string());
             }
@@ -1236,6 +1238,10 @@ mod tests {
         assert_eq!(super::send_pieces("agy", "?"), vec!["\x1b[200~?\x1b[201~".to_string()]);
         let p = super::send_pieces("agy", "?abc\ndef");
         assert_eq!(p, vec!["\x1b[200~?\x1b[201~".to_string(), "abc\ndef".to_string()]);
+        assert_eq!(super::send_pieces("agy", "!ls"), vec!["\x1b[200~!\x1b[201~".to_string(), "ls".to_string()]);
+        assert_eq!(super::send_pieces("agy", "@foo bar"), vec!["\x1b[200~@\x1b[201~".to_string(), "foo bar".to_string()]);
+        assert_eq!(super::send_pieces("agy", "/help"), vec!["/help".to_string()]);
+        assert_eq!(super::send_pieces("claude", "!ls"), vec!["!ls".to_string()]);
         assert_eq!(super::send_pieces("agy", "abc?"), vec!["abc?".to_string()]);
         assert_eq!(super::send_pieces("claude", "?abc"), vec!["?abc".to_string()]);
         assert_eq!(super::send_pieces("codex", "?"), vec!["?".to_string()]);
