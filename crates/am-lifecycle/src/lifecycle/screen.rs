@@ -54,7 +54,7 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
         if is_limit {
             let seen = super::limit_banner::sighting(&run.id, &screen, &notice, &limit_banners);
             let replayed = super::limit_banner::is_history(seen, in_flight.is_some());
-            if replayed || headroom_below {
+            if replayed || (headroom_below && !is_spend_limit(&notice)) {
                 tracing::debug!(bot = %bot.name, replayed, headroom_below, "codex limit banner on screen is history, not a limit hit");
                 continue;
             }
@@ -820,9 +820,10 @@ pub fn codex_limit_hit_line(line: &str) -> Option<String> {
         .unwrap_or(s);
     let lower = body.to_ascii_lowercase();
     let head: String = lower.chars().take(32).collect();
-    let hit = (lower.starts_with("you") && head.contains("hit your usage limit"))
+    let usage = (lower.starts_with("you") && head.contains("hit your usage limit"))
         || (lower.starts_with("usage limit") && (lower.contains("try again") || lower.contains("upgrade to")));
-    if !hit {
+    let banner = raw.starts_with('■') || s.to_ascii_lowercase().starts_with("error:");
+    if !usage && !(banner && is_spend_limit_text(&lower)) {
         return None;
     }
     if s.to_ascii_lowercase().starts_with("error:") {
@@ -830,6 +831,18 @@ pub fn codex_limit_hit_line(line: &str) -> Option<String> {
     } else {
         Some(format!("ERROR: {body}"))
     }
+}
+
+/// codex 0.172.0 的 API 花費上限錯誤（`Your API key／project／organization has reached its spend limit.`）。
+/// 花費上限不是速率窗：5h 還有餘也照樣擋，所以不適用狀態列餘裕判斷（[`is_spend_limit`]）。
+fn is_spend_limit_text(lower: &str) -> bool {
+    lower.starts_with("your ") && lower.contains("reached") && ["spend limit", "spending limit", "billing hard limit"].iter().any(|p| lower.contains(p))
+}
+
+/// 撞限的文字是不是花費上限（輸入是 [`codex_limit_hit_line`] 回的那一句）。
+pub fn is_spend_limit(notice: &str) -> bool {
+    let lower = notice.trim().to_ascii_lowercase();
+    is_spend_limit_text(lower.strip_prefix("error:").map_or(lower.as_str(), str::trim_start))
 }
 
 fn strip_codex_bullet(line: &str) -> &str {
@@ -842,7 +855,7 @@ fn strip_codex_bullet(line: &str) -> &str {
 
 /// Rejoin the limit banner that narrow panes wrap across rows, from row `i`; returns where it ends.
 fn join_wrapped_limit_hit(lines: &[&str], i: usize) -> (Option<String>, usize) {
-    let mut parts: Vec<&str> = vec![strip_codex_bullet(lines[i])];
+    let mut parts: Vec<&str> = vec![lines[i].trim()];
     let mut j = i + 1;
     while j < lines.len() && parts.len() < 16 {
         let t = lines[j].trim();
@@ -894,7 +907,8 @@ pub fn codex_usage_notice_lines(text: &str) -> Vec<String> {
         let head_low = strip_codex_bullet(line).to_ascii_lowercase();
         let looks_hit = head_low.starts_with("you've hit your usage")
             || head_low.starts_with("you hit your usage")
-            || (head_low.starts_with("error") && head_low.contains("usage"));
+            || (head_low.starts_with("error") && head_low.contains("usage"))
+            || (head_low.starts_with("your ") && line.trim_start().starts_with('■'));
         if looks_hit {
             let (joined, next) = join_wrapped_limit_hit(&lines, i);
             if let Some(notice) = joined.filter(|_| banner_is_last_cell(&lines, next.max(i + 1))) {
@@ -1783,6 +1797,64 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(parse_codex_try_again(&lines[0]).is_some());
         assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
     }
+    /// codex 0.172.0 的花費上限錯誤：不同範圍（key／project／organization／account）都認，且句子保留是哪一種上限。
+    #[test]
+    fn codex_spend_limit_names_the_scope_that_was_hit() {
+        for (line, scope) in [
+            ("■ Your API organization has reached its spend limit.", "organization"),
+            ("ERROR: Your API project has reached its spend limit.", "project"),
+            ("■ Your API key has reached its spend limit.", "key"),
+            ("■ Your account has reached its spending limit.", "account"),
+        ] {
+            let got = codex_limit_hit_line(line).unwrap_or_else(|| panic!("{line}"));
+            assert!(got.starts_with("ERROR: ") && got.contains(scope), "{got}");
+            assert!(is_spend_limit(&got), "{got}");
+        }
+        let usage = codex_limit_hit_line("■ You've hit your usage limit. Try again at 5:00 AM.").unwrap();
+        assert!(!is_spend_limit(&usage), "{usage}");
+    }
+
+    /// 串流途中就印出的花費上限錯誤：畫面停在橫幅與輸入列、還沒有最終回覆，照樣認；5h 還有餘也不能當舊的。
+    #[test]
+    fn a_spend_limit_printed_mid_stream_is_a_limit_hit_under_headroom() {
+        let screen = "› 幫我跑測試\n\n■ Your API project has reached its spend limit.\n\n› Ask Codex to do anything\n\n  gpt-6-sol medium · ~/p · 5h 82% left · weekly 97% left\n";
+        let lines = codex_usage_notice_lines(screen);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(is_spend_limit(&lines[0]), "{lines:?}");
+        assert_eq!(
+            super::super::limit_banner::fallback_hit("run-spend-stream", screen, lines.clone(), lines.clone()).as_deref(),
+            Some(lines[0].as_str()),
+        );
+    }
+
+    /// 窄 pane 折行的花費上限橫幅也認得（第一行還沒有完整句子）。
+    #[test]
+    fn a_wrapped_spend_limit_banner_is_read() {
+        let screen = "› ping\n\n■ Your API organization has\nreached its spend limit.\n\n› Ask Codex to do anything\n\n  gpt-6-sol medium · ~/p\n";
+        let lines = codex_usage_notice_lines(screen);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("organization") && is_spend_limit(&lines[0]), "{lines:?}");
+    }
+
+    /// 引文防護：assistant 正文或工具輸出裡提到 spend limit reached，不是撞限。
+    #[test]
+    fn a_spend_limit_sentence_in_the_reply_is_not_a_limit_hit() {
+        for no in [
+            "• Your API project has reached its spend limit, so I stopped the run.",
+            "Your API project has reached its spend limit.",
+            "> Your API key has reached its spend limit.",
+            "  └ Your API project has reached its spend limit.",
+            "  └ ■ Your API organization has reached its spend limit.",
+            "  └ +ERROR: Your API project has reached its spend limit.",
+        ] {
+            assert!(codex_limit_hit_line(no).is_none(), "{no}");
+        }
+        let quoted = "› 讀一下這個\n\n• Ran cat notes.txt\n  └ Your API project has reached its spend limit.\n\n• 讀完了，這是舊的紀錄。\n\n› Ask Codex to do anything\n\n  gpt-6-sol medium · ~/p\n";
+        assert!(codex_usage_notice_lines(quoted).is_empty(), "{:?}", codex_usage_notice_lines(quoted));
+        let wrapped_quote = "› 讀一下\n\n■ Your API organization has\nreached its spend limit.\n\n• 讀完了，這是舊的紀錄。\n\n› Ask Codex to do anything\n";
+        assert!(codex_usage_notice_lines(wrapped_quote).is_empty(), "{:?}", codex_usage_notice_lines(wrapped_quote));
+    }
+
     #[test]
     fn codex_banner_reads_in_the_hosts_own_zone() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-19T08:00:00Z").unwrap();

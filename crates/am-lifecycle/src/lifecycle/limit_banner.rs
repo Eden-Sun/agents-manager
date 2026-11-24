@@ -113,10 +113,8 @@ fn already_seen(run_id: &str, screen: &str, notice: &str) -> bool {
 /// 額度被釘到 9/19。規則跟擷取那條一致：同一畫面有比較新的狀態列還有餘裕 → 都不算；擷取已經記過、次數沒增加的 → 不算。
 /// 游標之後的新字優先；擷取沒記過的（例如 daemon 中途重啟）照舊算數。
 pub fn fallback_hit(run_id: &str, screen: &str, in_fresh: Vec<String>, on_screen: Vec<String>) -> Option<String> {
-    if status_line_says_headroom(screen) {
-        return None;
-    }
-    in_fresh.into_iter().chain(on_screen).find(|b| !already_seen(run_id, screen, b))
+    let headroom = status_line_says_headroom(screen);
+    in_fresh.into_iter().chain(on_screen).find(|b| (!headroom || super::screen::is_spend_limit(b)) && !already_seen(run_id, screen, b))
 }
 
 /// 同一畫面裡，最後一張撞限橫幅之後是否有 codex 的狀態列、而且 5h／weekly 都還有剩？
@@ -221,6 +219,18 @@ mod tests {
             sighting(&format!("lb-filler-{i}"), "", banner, &banners);
         }
         assert_eq!(sighting("lb-keep-old", &screen, banner, &banners), Sighting::Old, "表變大也不能把已知的橫幅變成 FirstRead");
+    }
+
+    /// 花費上限不是速率窗：同一畫面狀態列還有 5h／weekly 餘裕，花費上限照樣算撞限；用量橫幅仍當舊的。
+    #[test]
+    fn a_spend_limit_is_not_cleared_by_headroom_but_a_usage_banner_is() {
+        let spend = "ERROR: Your API project has reached its spend limit.";
+        let screen = "■ You've hit your usage limit. Try again at 6:43 PM.\n■ Your API project has reached its spend limit.\n\n  gpt-6-sol medium · ~/p · 5h 82% left · weekly 97% left\n";
+        assert!(status_line_says_headroom(&screen));
+        let hits = vec![spend.to_string()];
+        assert_eq!(fallback_hit("run-spend-headroom", &screen, hits.clone(), hits).as_deref(), Some(spend));
+        let usage_only = vec!["ERROR: You've hit your usage limit. Try again at 6:43 PM.".to_string()];
+        assert_eq!(fallback_hit("run-usage-headroom", &screen, usage_only.clone(), usage_only), None);
     }
 
     #[test]
