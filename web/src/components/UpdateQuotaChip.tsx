@@ -20,6 +20,7 @@ import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { mergeUpdateChips } from '../lib/updateBatch'
 import { useInstallTodo } from '../hooks/useInstallTodo'
+import { useUpdateChipRequest } from '../hooks/useUpdateChipRequest'
 import { CLI_UPDATE_PHASE_LABEL } from '../store/cliUpdate'
 import './updateQuotaChip.css'
 
@@ -103,6 +104,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const [force, setForce] = useState<{ ids: string[]; names: string[] } | null>(null)
   const busyOnly = readyCount === 0 && todo.count === 0
   const [localOpen, setLocalOpen] = useState(false)
+  useUpdateChipRequest((k) => k === 'claude' || k === 'codex', () => { if (!control) setLocalOpen(true) })
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => {
     return control ? !v && control.close() : setLocalOpen(v)

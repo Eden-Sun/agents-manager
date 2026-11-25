@@ -275,15 +275,32 @@ pub fn notice_text(status: &UpstreamStatus) -> String {
 }
 
 /// 快照＋畫面要顯示的那一句：有新版是 [`notice_text`]、抓不到是 [`error_text`]、其他 `null`。
+/// `short_text` 是右下角 toast 用的一行（[`short_notice`]／[`short_error`]），細節仍在 `text`。
 pub fn item_json(status: &UpstreamStatus) -> Value {
-    let text = if status.has_update {
-        Some(notice_text(status))
+    let (text, short_text) = if status.has_update {
+        (Some(notice_text(status)), Some(short_notice(status)))
+    } else if status.error.is_some() {
+        (Some(error_text(status)), Some(short_error(status)))
     } else {
-        status.error.as_ref().map(|_| error_text(status))
+        (None, None)
     };
     let mut v = serde_json::to_value(status).unwrap_or_else(|_| json!({}));
     v["text"] = json!(text);
+    v["short_text"] = json!(short_text);
     v
+}
+
+/// toast 的一行：`claude 2.1.284 可更新`。主機、版本細節與指令只留在頁首晶片與確認框。
+pub fn short_notice(status: &UpstreamStatus) -> String {
+    match status.latest_version.as_deref().or(status.target_version.as_deref()) {
+        Some(version) => format!("{} {version} 可更新", status.kind),
+        None => format!("{} 有更新", status.kind),
+    }
+}
+
+/// toast 的一行（抓不到上游）：原因放在 `text`，由畫面的「詳情」展開。
+pub fn short_error(status: &UpstreamStatus) -> String {
+    format!("查 {} 新版失敗", status.kind)
 }
 
 pub fn error_text(status: &UpstreamStatus) -> String {

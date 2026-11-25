@@ -10,6 +10,7 @@ export interface UpstreamItem {
   hasUpdate: boolean
   hosts: { host: string; installedVersion: string | null; error: string | null; behind: boolean }[]
   notify: 'update' | 'error' | null
+  shortText?: string | null
   text: string | null
   autoUpdate?: boolean
 }
@@ -38,6 +39,7 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
         })
       : [],
     notify,
+    shortText: typeof raw.short_text === 'string' && raw.short_text ? raw.short_text : null,
     text: typeof raw.text === 'string' && raw.text ? raw.text : null,
     autoUpdate: raw.auto_update === true,
   }
@@ -62,10 +64,17 @@ export function isNewerVersion(latest: string, seen: string | undefined): boolea
   return false
 }
 
-export function upstreamNotice(item: UpstreamItem, seen: Record<string, string>): { kind: 'info' | 'error'; text: string } | null {
+export interface UpstreamNotice {
+  kind: 'info' | 'error'
+  text: string
+  detail: string
+}
+
+export function upstreamNotice(item: UpstreamItem, seen: Record<string, string>): UpstreamNotice | null {
   if (!item.text) return null
-  if (item.notify === 'error') return { kind: 'error', text: item.text }
-  if (item.hasUpdate && item.latest && isNewerVersion(item.latest, seen[item.kind])) return { kind: 'info', text: item.text }
+  const text = item.shortText ?? item.text
+  if (item.notify === 'error') return { kind: 'error', text, detail: item.text }
+  if (item.hasUpdate && item.latest && isNewerVersion(item.latest, seen[item.kind])) return { kind: 'info', text, detail: item.text }
   return null
 }
 
@@ -89,23 +98,31 @@ function markSeen(kind: string, version: string) {
 
 type Notify = (kind: 'info' | 'error', text: string, action?: { label: string; run: () => void }) => void
 
-export function applyUpstreamItem(raw: unknown, notify: Notify): UpstreamItem | null {
+export function applyUpstreamItem(raw: unknown, notify: Notify, openChip: (kind: string) => void = () => {}): UpstreamItem | null {
   const item = parseUpstreamItem(raw)
   if (!item) return null
   const n = upstreamNotice(item, readSeen())
   if (!n) return item
   if (n.kind === 'info' && item.latest) markSeen(item.kind, item.latest)
-  notify(n.kind, n.text, { label: t('知道了'), run: () => {} })
+  const action = n.kind === 'info'
+    ? { label: t('查看'), run: () => openChip(item.kind) }
+    : { label: t('詳情'), run: () => notify('error', n.detail) }
+  notify(n.kind, n.text, action)
   return item
 }
 
-export async function loadUpstreamUpdates(fetchItems: () => Promise<unknown>, notify: Notify, onItem?: (item: UpstreamItem) => void) {
+export async function loadUpstreamUpdates(
+  fetchItems: () => Promise<unknown>,
+  notify: Notify,
+  onItem?: (item: UpstreamItem) => void,
+  openChip?: (kind: string) => void,
+) {
   try {
     const r = await fetchItems()
     const items = isRec(r) && Array.isArray(r.items) ? r.items : []
     for (const raw of items) {
       if (!isRec(raw)) continue
-      const item = applyUpstreamItem({ ...raw, notify: null }, notify)
+      const item = applyUpstreamItem({ ...raw, notify: null }, notify, openChip)
       if (item) onItem?.(item)
     }
   } catch {

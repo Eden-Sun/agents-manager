@@ -3,6 +3,7 @@ import { useGrokPlan } from '../hooks/useGrokPlan'
 import { grokChipLabel } from '../lib/grokUpdate'
 import { changelogRange } from '../lib/upstreamRange'
 import { useReviewAsk } from '../hooks/useReviewAsk'
+import { useUpdateChipRequest } from '../hooks/useUpdateChipRequest'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
@@ -15,6 +16,7 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
+  useUpdateChipRequest((k) => k === 'grok', () => { if (!control) setLocalOpen(true) })
   const range = changelogRange(plan?.hosts ?? [])
   const review = useReviewAsk('grok', range.host, range.from, plan?.target ?? null)
   if (!plan) return null

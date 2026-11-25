@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useUpdateChipRequest } from '../hooks/useUpdateChipRequest'
 import { useReviewAsk } from '../hooks/useReviewAsk'
 import { useStore } from '../store/store'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
@@ -29,6 +30,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const close = () => (control ? control.close() : setLocalOpen(false))
+  useUpdateChipRequest((k) => k === 'herdr', () => { if (!control) setLocalOpen(true) })
   const review = useReviewAsk('herdr', plan?.host ?? 'local', plan?.from ?? null, plan?.target ?? null, false)
 
   if (active) {

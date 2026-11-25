@@ -427,4 +427,6 @@ export default {
   '安裝並重啟': 'Install and restart',
   '安裝中 {hosts}…（裝完自動重啟）': 'Installing on {hosts}… (restarts automatically)',
   '安裝新版並重啟（{n} 項待辦）': 'Install the new version and restart ({n} to do)',
+  '查看': 'View',
+  '詳情': 'Details',
 } satisfies Dict

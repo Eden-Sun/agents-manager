@@ -5,6 +5,7 @@ import { updateBatchCounts } from '../lib/updateBatch'
 import { useInstallTodo } from '../hooks/useInstallTodo'
 import { mergedUpdateLabels } from '../lib/mergedUpdateLabels'
 import { useMenuKeys } from '../hooks/useMenuKeys'
+import { useUpdateChipRequest } from '../hooks/useUpdateChipRequest'
 import { UpgradeIcon } from './UpgradeIcon'
 import { RestartChip } from './UpdateQuotaChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
@@ -48,6 +49,14 @@ export function MergedUpdateChip() {
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
+  useUpdateChipRequest(
+    () => true,
+    () => {
+      const r = btn.current?.getBoundingClientRect()
+      if (r) setAt({ position: 'fixed', top: Math.round(r.bottom + 6), right: 8 })
+      setOpen(true)
+    },
+  )
 
   useEffect(() => {
     if (!open) return

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useUpdateChipRequest } from '../hooks/useUpdateChipRequest'
 import { useStore } from '../store/store'
 import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { agyChipLabel, agyUpdateTitle } from '../lib/agyUpdate'
@@ -19,6 +20,7 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
+  useUpdateChipRequest((k) => k === 'agy', () => { if (!control) setLocalOpen(true) })
   const range = changelogRange(plan?.hosts ?? [])
   const review = useReviewAsk('agy', range.host, range.from, plan?.target ?? null)
   if (!plan) return null

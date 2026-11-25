@@ -60,7 +60,7 @@ test('沒有新版不跳；抓不到上游只在 daemon 推 error 的那一次�
   store.clear()
   assert.equal(upstreamNotice(parseUpstreamItem({ kind: 'codex', latest_version: '0.157.0', has_update: false, text: null })!, {}), null)
   const err = { kind: 'claude', latest_version: null, has_update: false, notify: 'error', text: '查 claude 上游最新版失敗（npm registry）：timeout' }
-  assert.deepEqual(upstreamNotice(parseUpstreamItem(err)!, {}), { kind: 'error', text: err.text })
+  assert.deepEqual(upstreamNotice(parseUpstreamItem(err)!, {}), { kind: 'error', text: err.text, detail: err.text })
   assert.equal(upstreamNotice(parseUpstreamItem({ ...err, notify: null })!, {}), null, '沒有 notify 的快照不重複講錯')
 })
 
@@ -90,4 +90,24 @@ test('上游 latest 退回舊版（或字串比較順序不同）：同一瀏覽
   applyUpstreamItem({ ...CLAUDE, notify: null, latest_version: '2.1.10', text: 'claude 上游有新版 2.1.10' }, s.notify)
   applyUpstreamItem({ ...CLAUDE, notify: null, latest_version: '2.1.9', text: 'claude 上游有新版 2.1.9' }, s.notify)
   assert.equal(s.got.length, 1, '2.1.10 是第一次看到要跳；退回 2.1.9 不再跳')
+})
+
+test('toast 只講一行：有新版是「查看」開頁首晶片，抓不到是「詳情」再展開原因', () => {
+  store.clear()
+  const got: { kind: string; text: string; label?: string; run?: () => void }[] = []
+  const notify = (kind: 'info' | 'error', text: string, action?: { label: string; run: () => void }) =>
+    void got.push({ kind, text, label: action?.label, run: action?.run })
+  const opened: string[] = []
+  applyUpstreamItem({ ...CLAUDE, short_text: 'claude 2.1.283 可更新' }, notify, (kind) => opened.push(kind))
+  assert.equal(got[0].text, 'claude 2.1.283 可更新')
+  assert.equal(got[0].label, '查看')
+  got[0].run?.()
+  assert.deepEqual(opened, ['claude'])
+  const err = { kind: 'claude', latest_version: null, has_update: false, notify: 'error', short_text: '查 claude 新版失敗', text: '查 claude 上游最新版失敗（npm registry）：timeout' }
+  applyUpstreamItem(err, notify)
+  assert.equal(got[1].text, '查 claude 新版失敗')
+  assert.equal(got[1].label, '詳情')
+  got[1].run?.()
+  assert.equal(got[2].text, err.text)
+  assert.equal(got[2].label, undefined)
 })

@@ -513,6 +513,8 @@ export interface StoreState {
   clearRestartBatch: () => void
   cliUpdates: CliUpdate[]
   upstreamUpdates: Record<string, UpstreamItem>
+  updateChipRequest: { kind: string; seq: number } | null
+  requestUpdateChip: (kind: string) => void
   startCliUpdate: (host: string, kind: 'codex' | 'claude', targetVersion: string) => Promise<void>
   installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
   installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
@@ -851,6 +853,8 @@ export const useStore = create<StoreState>((set, get) => {
   updateChain: false,
   cliUpdates: [],
   upstreamUpdates: {},
+  updateChipRequest: null,
+  requestUpdateChip: (kind) => set((s) => ({ updateChipRequest: { kind, seq: (s.updateChipRequest?.seq ?? 0) + 1 } })),
 
   notify: (kind, text, action, topCenter) => {
     if (!action && get().notices.some((n) => n.kind === kind && n.text === text)) return
@@ -2697,7 +2701,7 @@ export function dispatchFrameForTest(frame: { seq?: number; type: string; data?:
 function reloadUpstreamUpdates(set: SetFn, get: GetFn) {
   void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify, (item) => {
     set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
-  })
+  }, (kind) => get().requestUpdateChip(kind))
 }
 
 const draftEpochs = new Map<string, number>()
@@ -3130,7 +3134,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       return
     }
     case 'upstream_update': {
-      const item = applyUpstreamItem(data, get().notify)
+      const item = applyUpstreamItem(data, get().notify, (kind) => get().requestUpdateChip(kind))
       if (item) set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
       return
     }
