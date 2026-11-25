@@ -642,10 +642,10 @@ export function ScheduleEditor({
       <p className="hint">{t('每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。')}</p>
 
       <label className="inline-check schedule-from-base">
-        <input type="checkbox" checked={form.fromBase} disabled={loading || (!form.fromBase && !baseLocked)} onChange={(e) => set('fromBase', e.target.checked)} />
+        <input type="checkbox" checked={form.fromBase} disabled={loading} onChange={(e) => set('fromBase', e.target.checked)} />
         {t('每次從基準快照開始')}
       </label>
-      <p className="hint">{baseLocked ? t('每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。') : t('只有已鎖定基準快照的 codex Bot 才能開啟：先到該 Bot 的設定按「鎖定目前 context 為基準」。')}</p>
+      <p className="hint">{baseLocked ? t('每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。') : t('這顆 Bot 還沒有基準快照：儲存時會將以此 Bot 目前對話建立基準（沒有對話就先啟動它一次，最久約兩分鐘）。只支援 codex、agy Bot。')}</p>
 
       <label className="field schedule-prompt-field">
         <span>

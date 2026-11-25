@@ -65,6 +65,11 @@ impl Site {
         }
     }
 
+    fn agy_dir(&self) -> PathBuf {
+        let (Site::Local { home, .. } | Site::Remote { home, .. }) = self;
+        home.join(".gemini").join("antigravity-cli")
+    }
+
     fn path_of(&self, id: &str) -> PathBuf {
         if let Site::Local { recorded: Some(p), .. } = self {
             if p.components().any(|c| c.as_os_str() == id) && p.file_name().is_some_and(|n| n == "transcript_full.jsonl") {
@@ -192,6 +197,52 @@ pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAcces
     Ok(Some((sid, text)))
 }
 
+/// 排程基準快照的「分岔」（agy 沒有原生 fork，1.5.16 實測）：把對話資料庫 `conversations/<id>.db` 複成新 id、
+/// 改掉庫裡 `trajectory_meta.cascade_id`，連同 `brain/<id>/` 一起複製，再 `--conversation=<新 id>` 接續；來源檔不動。
+/// 回新對話 id。本機與遠端都在 agy 那台主機上跑（身份 HOME 與 [`Site`] 同一套）。
+pub async fn clone_conversation(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>, src: &str) -> anyhow::Result<String> {
+    if !valid_session_id(src) {
+        anyhow::bail!("bad conversation id `{src}`");
+    }
+    let site = Site::of(app, host, identity, None).await.ok_or_else(|| anyhow::anyhow!("agy home on `{host}` is unknown or the host is not connected"))?;
+    let new = new_conversation_id();
+    let script = clone_script(&site.agy_dir().to_string_lossy(), src, &new);
+    let out = match &site {
+        Site::Local { .. } => {
+            let o = tokio::process::Command::new("sh").arg("-c").arg(&script).output().await?;
+            if !o.status.success() {
+                anyhow::bail!("{}", String::from_utf8_lossy(&o.stderr).trim());
+            }
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        }
+        Site::Remote { conn, .. } => conn.ssh_exec_path(&script).await?,
+    };
+    if !out.contains(CLONE_OK) {
+        anyhow::bail!("conversation copy did not finish: {}", out.trim());
+    }
+    Ok(new)
+}
+
+const CLONE_OK: &str = "AGY_CLONE_OK";
+
+pub fn new_conversation_id() -> String {
+    let mut b = ulid::Ulid::new().0.to_be_bytes();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
+pub fn clone_script(agy_dir: &str, src: &str, new: &str) -> String {
+    let d = crate::hosts::sh_quote(agy_dir);
+    format!(
+        "set -e; D={d}; S={src}; N={new}; [ -f \"$D/conversations/$S.db\" ] || {{ echo \"no conversation $S\" >&2; exit 3; }}; \
+         sqlite3 \"$D/conversations/$S.db\" \"VACUUM INTO '$D/conversations/$N.db'\"; \
+         sqlite3 \"$D/conversations/$N.db\" \"UPDATE trajectory_meta SET cascade_id='$N'\"; \
+         if [ -d \"$D/brain/$S\" ]; then cp -R \"$D/brain/$S\" \"$D/brain/$N\"; fi; echo {CLONE_OK}"
+    )
+}
+
 /// 讀到紀錄之後順手補網頁的 `status_json`（模型與 context token 數）。已經收過 statusLine 時以 statusLine 為準，不覆蓋；沒變也不寫。
 pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::Cfg), bot: &db::Bot, run: &db::Run, text: &str) {
     if let Some(at) = crate::agy_support::last_assistant_at(text) {
@@ -216,6 +267,34 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
+    #[test]
+    fn a_clone_gets_its_own_id_and_leaves_the_source_alone() {
+        let dir = crate::home::dir().unwrap().join(format!(".agy-clone-{}", new_conversation_id()));
+        let (conv, brain) = (dir.join("conversations"), dir.join("brain"));
+        let src = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        std::fs::create_dir_all(brain.join(src).join(".system_generated")).unwrap();
+        std::fs::create_dir_all(&conv).unwrap();
+        std::fs::write(brain.join(src).join(".system_generated/t.jsonl"), "x").unwrap();
+        let db = conv.join(format!("{src}.db"));
+        let q = |f: &std::path::Path, sql: &str| {
+            let o = std::process::Command::new("sqlite3").arg(f).arg(sql).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        q(&db, &format!("create table trajectory_meta (trajectory_id text, cascade_id text); insert into trajectory_meta values ('t','{src}')"));
+        let before = std::fs::read(&db).unwrap();
+        let new = new_conversation_id();
+        assert!(valid_session_id(&new) && new.len() == 36);
+        let o = std::process::Command::new("sh").arg("-c").arg(clone_script(&dir.to_string_lossy(), src, &new)).output().unwrap();
+        assert!(String::from_utf8_lossy(&o.stdout).contains(CLONE_OK), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(q(&conv.join(format!("{new}.db")), "select cascade_id from trajectory_meta"), new);
+        assert_eq!(q(&db, "select cascade_id from trajectory_meta"), src);
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        assert!(brain.join(&new).join(".system_generated/t.jsonl").is_file());
+        let missing = std::process::Command::new("sh").arg("-c").arg(clone_script(&dir.to_string_lossy(), "nope", &new_conversation_id())).output().unwrap();
+        assert!(!missing.status.success());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn the_known_conversation_wins_while_it_is_open_otherwise_the_newest_free_one() {
         let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));

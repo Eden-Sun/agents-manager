@@ -34,10 +34,10 @@ async function open(locked: boolean, schedule = row()) {
   return { requests, box }
 }
 
-test('Bot 沒有基準快照：開關停用並說明要先鎖定', async () => {
+test('Bot 沒有基準快照：開關仍可開，並說明將以目前對話建立基準', async () => {
   const { box } = await open(false)
-  assert.equal(box().disabled, true)
-  assert.match(document.body.textContent ?? '', /先到該 Bot 的設定按「鎖定目前 context 為基準」/)
+  assert.equal(box().disabled, false)
+  assert.match(document.body.textContent ?? '', /將以此 Bot 目前對話建立基準/)
 })
 
 test('Bot 有基準快照：可開，儲存時 PATCH 帶 from_base: true', async () => {

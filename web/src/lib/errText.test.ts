@@ -22,6 +22,6 @@ test('isLegacyDaemonError', () => {
 })
 test('reason tables', () => {
   assert.equal(reasonTextBySubstring('x api_retire_busy y', RETIRE_REASON_TEXT), 'bot 仍有進行中的回合或關閉尚未完成，請稍後再試')
-  assert.equal(reasonTextBySubstring('base_snapshot_not_codex', BASE_SNAPSHOT_REASON_TEXT), '基準快照只支援 codex Bot')
+  assert.equal(reasonTextBySubstring('base_snapshot_not_codex', BASE_SNAPSHOT_REASON_TEXT), '基準快照只支援 codex、agy Bot')
   assert.equal(reasonTextBySubstring('other', RETIRE_REASON_TEXT), null)
 })

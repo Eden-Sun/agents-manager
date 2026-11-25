@@ -1642,7 +1642,14 @@ async fn start_inner_body(
         None
     };
     if let Some(from) = opts.fork_session.as_deref() {
-        let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
+        let fork = if bot.kind == "agy" {
+            let copy = super::agy_session::clone_conversation(app, &host, bot.identity.as_deref(), from)
+                .await
+                .map_err(|e| LcError::conflict("base_fork_failed", json!({"session_id": from, "cause": e.to_string()})))?;
+            resume_args_by_kind("agy", &copy).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?
+        } else {
+            fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?
+        };
         if bot.kind == "claude" {
             crate::rewind::anchor::ensure(app, from).await;
             let source = opts.fork_source_bot.as_deref().ok_or_else(|| LcError::Bad("cannot fork: 沒有來源 bot".into()))?;

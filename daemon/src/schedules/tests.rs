@@ -861,12 +861,119 @@ mod from_base {
     }
 
     #[tokio::test]
-    async fn only_codex_bots_can_lock() {
+    async fn only_codex_and_agy_bots_can_lock() {
         let e = testing::env().await;
         let bot = testing::claude_bot(&e.app, &e.project_id, "cl").await;
         ended_session(&e, &bot.id, "sid-1", None).await;
         let err = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap_err();
-        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_not_codex"), "{err:?}");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_unsupported_kind"), "{err:?}");
+    }
+
+    async fn agy_bot(e: &testing::Env, name: &str) -> db::Bot {
+        let bot = super::dedicated(e, name).await;
+        sqlx::query("UPDATE bots SET kind = 'agy' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
+    }
+
+    fn agy_dir() -> std::path::PathBuf {
+        crate::home::dir().unwrap().join(".gemini").join("antigravity-cli")
+    }
+
+    fn agy_cascade(id: &str) -> String {
+        let db = agy_dir().join("conversations").join(format!("{id}.db"));
+        let o = std::process::Command::new("sqlite3").arg(db).arg("select cascade_id from trajectory_meta").output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    fn agy_conversation() -> String {
+        let id = crate::lifecycle::agy_session::new_conversation_id();
+        let dir = agy_dir();
+        std::fs::create_dir_all(dir.join("conversations")).unwrap();
+        std::fs::create_dir_all(dir.join("brain").join(&id).join(".system_generated")).unwrap();
+        let db = dir.join("conversations").join(format!("{id}.db"));
+        let o = std::process::Command::new("sqlite3").arg(&db).arg(format!("create table trajectory_meta (trajectory_id text, cascade_id text); insert into trajectory_meta values ('t','{id}')")).output().unwrap();
+        assert!(o.status.success());
+        id
+    }
+
+    #[tokio::test]
+    async fn an_agy_base_is_a_frozen_copy_and_each_run_forks_a_new_conversation() {
+        let e = testing::env().await;
+        let bot = agy_bot(&e, "ag").await;
+        let src = agy_conversation();
+        ended_session(&e, &bot.id, &src, None).await;
+        let locked = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        let base_id = locked["session_id"].as_str().unwrap().to_string();
+        assert_ne!(base_id, src, "基準是凍結的複本，bot 繼續用原對話也不會動到它");
+        assert_eq!(agy_cascade(&base_id), base_id);
+        assert_eq!(agy_cascade(&src), src);
+        let base_file = agy_dir().join("conversations").join(format!("{base_id}.db"));
+        let before = std::fs::read(&base_file).unwrap();
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(base::dispatch(&e.app, &occ).await.unwrap());
+        let last = started_args(&e).pop().unwrap();
+        let conv = last.iter().find_map(|a| a.strip_prefix("--conversation=")).expect("接續複出來的對話").to_string();
+        assert!(conv != base_id && conv != src, "{last:?}");
+        assert_eq!(agy_cascade(&conv), conv);
+        assert_eq!(std::fs::read(&base_file).unwrap(), before, "基準檔不被改");
+        assert_eq!(base::get(&e.app.db, &bot.id).await.unwrap().unwrap().session_id, base_id);
+    }
+
+    #[tokio::test]
+    async fn an_agy_base_whose_copy_is_gone_fails_without_running_in_the_old_context() {
+        let e = testing::env().await;
+        let bot = agy_bot(&e, "ag").await;
+        let src = agy_conversation();
+        ended_session(&e, &bot.id, &src, None).await;
+        let locked = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        std::fs::remove_file(agy_dir().join("conversations").join(format!("{}.db", locked["session_id"].as_str().unwrap()))).unwrap();
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let before = started_args(&e).len();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        assert_eq!(started_args(&e).len(), before, "不在舊 context 重啟");
+        let (status, error) = status_and_error(&e, &occ).await;
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().starts_with("base_fork_failed"), "分岔失敗要講清楚");
+    }
+
+    #[tokio::test]
+    async fn turning_on_from_base_builds_the_missing_base() {
+        let e = testing::env().await;
+        let cx = codex_bot(&e, "cx").await;
+        ended_session(&e, &cx.id, "sid-live", None).await;
+        let mut body = daily(&cx.id, "x");
+        body.from_base = true;
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        let snap = base::get(&e.app.db, &cx.id).await.unwrap().expect("自動製作基準");
+        assert_eq!((snap.session_id.as_str(), snap.locked_by.as_str()), ("sid-live", "schedule"));
+
+        let cx2 = codex_bot(&e, "cx2").await;
+        let (pool, id) = (e.app.db.clone(), cx2.id.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let n = sqlx::query("UPDATE runs SET native_session_id = 'sid-born' WHERE bot_id = ? AND ended_at IS NULL").bind(&id).execute(&pool).await.unwrap().rows_affected();
+                if n > 0 {
+                    break;
+                }
+            }
+        });
+        let mut body = daily(&cx2.id, "x");
+        body.client_request_id = "crid-2".into();
+        body.from_base = true;
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        assert_eq!(base::get(&e.app.db, &cx2.id).await.unwrap().unwrap().session_id, "sid-born", "沒有 session 就啟動 bot 取得再鎖");
+
+        let cx3 = codex_bot(&e, "cx3").await;
+        let mut body = daily(&cx3.id, "x");
+        body.client_request_id = "crid-3".into();
+        body.from_base = true;
+        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("等不到 session 要說清楚");
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "base_snapshot_create_failed"), "{err:?}");
     }
 
     #[tokio::test]
@@ -997,13 +1104,9 @@ mod from_base {
     }
 
     #[tokio::test]
-    async fn from_base_needs_a_locked_codex_bot_to_turn_on() {
+    async fn from_base_needs_a_codex_or_agy_bot_to_turn_on() {
         let e = testing::env().await;
         let cx = codex_bot(&e, "cx").await;
-        let mut body = daily(&cx.id, "x");
-        body.from_base = true;
-        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("沒鎖基準不能開");
-        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_required"), "{err:?}");
         ended_session(&e, &cx.id, "sid-1", None).await;
         call(&e, "lock", &cx.id, RequestPrincipal::User).await.unwrap();
         let mut body = daily(&cx.id, "x");
@@ -1015,7 +1118,7 @@ mod from_base {
         body.client_request_id = "crid-2".into();
         body.from_base = true;
         let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("claude 不能開");
-        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_not_codex"), "{err:?}");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_unsupported_kind"), "{err:?}");
         let _ = json!(null);
     }
 }

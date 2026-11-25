@@ -281,7 +281,7 @@ const dict: Dict = {
   '重試間隔（分鐘）': 'Retry interval (minutes)',
   '只有明確失敗才重試；拒絕與結果不明不會重試。重試可能重複外部操作，請確認任務可安全重做。': 'Retries only on explicit failure; declined or unknown outcomes will not retry. Retrying may repeat external actions; ensure the task is idempotent.',
   '每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。': 'Before each trigger, the Bot restarts into a fresh chat from the "baseline snapshot"; the baseline itself is unaltered, and failure occurs if the baseline is missing.',
-  '只有已鎖定基準快照的 codex Bot 才能開啟：先到該 Bot 的設定按「鎖定目前 context 為基準」。': 'Only available to codex Bots with a locked baseline snapshot: go to Bot Settings and click "Lock current context as baseline" first.',
+  '這顆 Bot 還沒有基準快照：儲存時會將以此 Bot 目前對話建立基準（沒有對話就先啟動它一次，最久約兩分鐘）。只支援 codex、agy Bot。': 'This Bot has no baseline snapshot yet: saving builds one from its current conversation (if it has none, the Bot is started once first, up to about two minutes). Only codex and agy Bots are supported.',
 
   '停工的 bot：{names}。': 'Suspended Bots: {names}.',
   '{name} 額度用完了。{held}還有 {n} 張重置券{soonest}，要用一張嗎？': { one: '{name} quota exhausted. {held}There is {n} reset credit available{soonest}. Would you like to use one?', other: '{name} quota exhausted. {held}There are {n} reset credits available{soonest}. Would you like to use one?' },
@@ -296,7 +296,10 @@ const dict: Dict = {
   '結果不明，請查看回覆': 'Outcome unclear, check reply',
 
   '這顆 Bot 還沒有對話可鎖定，請先跟它對話': 'This Bot has no conversation to lock; please chat with it first',
-  '基準快照只支援 codex Bot': 'Baseline snapshots only support Codex Bots',
+  '基準快照只支援 codex、agy Bot': 'Baseline snapshots only support codex and agy Bots',
+  '自動製作基準快照失敗，請確認 Bot 能正常啟動並有對話後再試': 'Could not build the baseline snapshot automatically; make sure the Bot starts and has a conversation, then retry',
+  '複製 agy 對話失敗，無法建立基準快照': 'Could not copy the agy conversation, so no baseline snapshot was made',
+  'agy 對話分岔失敗，這次沒有在舊 context 執行': 'The agy conversation could not be forked; this run did not execute in the old context',
 }
 
 export default dict
