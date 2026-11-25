@@ -227,7 +227,7 @@ pub fn classify_failure(detail: Option<&str>) -> FailureReason {
     if esc_word || has(&["interrupt", "cancel", "abort", "user_stop", "user stop"]) {
         FailureReason::Interrupted
     } else if crate::turn_error::is_quota_exhaustion(&t)
-        || has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"])
+        || has(&["rate limit", "rate_limit", "ratelimit", "quota", "429", "overloaded"])
     {
         FailureReason::RateLimit
     } else if has(&["auth", "401", "403", "credential", "unauthorized", "forbidden", "login", "api key", "api_key"]) {
@@ -2804,5 +2804,23 @@ mod resend_staleness_tests {
     #[test]
     fn a_different_text_is_never_stale() {
         assert!(!is_stale_resend("現在部 demo", Some(ANSWERED_AT), "另一句新的話", Some("2026-11-22T01:21:00.000Z")));
+    }
+}
+
+#[cfg(test)]
+mod grok_reply_failure_tests {
+    use super::grok_reply_is_failure;
+
+    /// 2026-11-25（#2200 同類）：grok 回覆句中提到 usage limit 不是撞限；行首的真橫幅仍算失敗。
+    #[test]
+    fn a_grok_reply_that_only_mentions_usage_limit_is_not_a_failure() {
+        assert!(!grok_reply_is_failure("To check your usage limit, run /usage.\nThe usage limit resets weekly."));
+        assert!(!grok_reply_is_failure("Your usage limit documentation is in the docs folder."));
+    }
+
+    #[test]
+    fn a_grok_reply_with_a_real_limit_banner_is_a_failure() {
+        assert!(grok_reply_is_failure("Summary of the run.\n⏺ You've reached your usage limit. Try again at 6:43 PM.\n"));
+        assert!(grok_reply_is_failure("ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Aug 8th, 2025 1:47 PM."));
     }
 }

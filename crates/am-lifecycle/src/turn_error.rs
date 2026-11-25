@@ -31,13 +31,38 @@ pub fn is_quota_limit(body: &str) -> bool {
 /// 派送壓上好幾個小時。認的是跟畫面同一套的橫幅（前面可能多了 `API Error:` 之類的字）與 `usage limit`；
 /// 月度花費上限那類照 [`is_quota_limit`] 的規則不算。
 pub fn is_quota_exhaustion(detail: &str) -> bool {
-    let lower = detail.to_ascii_lowercase();
-    lower.contains("usage limit")
-        || lower.contains("usage_limit")
-        || agy_line(&lower)
-        || ["you've hit your", "you've reached your"]
-            .iter()
-            .any(|p| lower.find(p).is_some_and(|i| is_quota_limit_lower(&lower[i..])))
+    detail.lines().any(exhaustion_line)
+}
+
+/// 一行是不是額度用完的橫幅：前導記號與 `API Error:`／`ERROR:` 剝掉後，整行就是橫幅的形狀。
+/// 句中提到 `usage limit`（一般回覆、hook 的長說明）不算；超過 [`BANNER_MAX_CHARS`] 的也不是橫幅。
+fn exhaustion_line(line: &str) -> bool {
+    let s = banner_start(line).to_ascii_lowercase();
+    if s.chars().count() > BANNER_MAX_CHARS {
+        return false;
+    }
+    agy_line(&s) || is_quota_limit_lower(&s) || usage_limit_banner(&s) || matches!(s.trim_end_matches('.'), "usage_limit" | "usage_limit_exceeded")
+}
+
+const BANNER_MAX_CHARS: usize = 200;
+
+/// `usage limit` 桶的橫幅（`You've hit your usage limit. …`、`Claude usage limit reached. …`）：`limit` 之後要接橫幅收尾。
+fn usage_limit_banner(lower: &str) -> bool {
+    if let Some(rest) = lower.strip_prefix("claude usage limit reached") {
+        return banner_tail(rest);
+    }
+    lower.strip_prefix("you've hit your usage limit").or_else(|| lower.strip_prefix("you've reached your usage limit")).is_some_and(banner_tail)
+}
+
+/// 去掉行首的記號（`⏺`、`■`、`•`、`⎿`、`⚠`、提示符）與 `API Error:`／`ERROR:` 前綴，回傳橫幅本身。
+fn banner_start(line: &str) -> &str {
+    let s = line.trim_start_matches(|c: char| c.is_whitespace() || "⏺■•⎿⚠│┃>›❯".contains(c));
+    for prefix in ["api error:", "error:"] {
+        if s.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix)) {
+            return s[prefix.len()..].trim_start();
+        }
+    }
+    s
 }
 
 /// agy 額度列的判定（輸入須已轉小寫）：只剝前導的 ⚠ 與空白，不剝 `■`／`❯` 之類——那是助理回覆與使用者
@@ -79,7 +104,11 @@ fn is_quota_limit_lower(lower: &str) -> bool {
 /// `You've hit your weekly goal…`、`You've reached your goal; the limit was raised…` 的 `limit` 後面是別的句子，不算。
 fn banner_sentence(lower: &str) -> bool {
     let Some(at) = lower.find("limit") else { return false };
-    let tail = lower[at + "limit".len()..].trim_start();
+    banner_tail(&lower[at + "limit".len()..])
+}
+
+fn banner_tail(after_limit: &str) -> bool {
+    let tail = after_limit.trim_start();
     tail.is_empty() || ["·", ".", "…", "(", "resets", "try again", "upgrade"].iter().any(|p| tail.starts_with(p))
 }
 
@@ -1174,6 +1203,45 @@ mod quota_limit_tests {
         for no in ["429 rate_limit", "overloaded_error", "API Error: 529 Overloaded", "You've hit your monthly spend limit", "API Error: 500"] {
             assert!(!is_quota_exhaustion(no), "{no}");
         }
+    }
+
+    /// 2026-11-25（#2200 同類）：`usage limit` 只在行首的橫幅形狀才算額度用完。grok 回覆與 hook 失敗細節裡的句中提到不算。
+    #[test]
+    fn a_mention_of_usage_limit_in_prose_is_not_an_exhaustion() {
+        let grok_reply = "Here is how the usage limit works for SuperGrok.\nIf you see a usage limit warning, check /usage first.\n- usage limit reset: weekly";
+        assert!(!is_quota_exhaustion(grok_reply));
+        assert!(!is_quota_limit(grok_reply));
+        for hook_detail in [
+            "the request was rejected; the usage limit documentation is at docs.example",
+            "retry policy: rate limit and usage limit errors are retried twice",
+            "error while reading usage limit config: missing key",
+            "API Error: usage limit exceeded for your team's monthly budget",
+        ] {
+            assert!(!is_quota_exhaustion(hook_detail), "{hook_detail}");
+            assert!(!is_quota_limit(hook_detail), "{hook_detail}");
+        }
+        let long_prose = format!("You've hit your usage limit. {}", "x".repeat(300));
+        assert!(!is_quota_exhaustion(&long_prose));
+    }
+
+    /// 真橫幅（行首、狀態列樣式前綴、`API Error:`／`ERROR:`）在 grok 回覆與 hook 細節裡都要認得。
+    #[test]
+    fn real_limit_banners_are_exhaustions_in_grok_replies_and_hook_details() {
+        for banner in [
+            "You've hit your usage limit. Try again at 6:43 PM.",
+            "You've reached your usage limit",
+            "■ You've hit your usage limit. … try again at 6:43 PM.",
+            "ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Aug 8th, 2025 1:47 PM.",
+            "API Error: You've hit your weekly limit · resets Sep 20",
+            "Claude usage limit reached. Your limit will reset at 5pm",
+            "usage_limit_exceeded",
+        ] {
+            assert!(is_quota_exhaustion(banner), "{banner}");
+            assert!(is_quota_exhaustion(&format!("Sure, here is the answer.\n{banner}\n")), "{banner}");
+            assert_eq!(crate::hookrecv::classify_failure(Some(banner)), crate::hookrecv::FailureReason::RateLimit, "{banner}");
+        }
+        let grok_reply = "Summary of the run.\n⏺ You've reached your usage limit. Try again at 6:43 PM.\n";
+        assert!(is_quota_exhaustion(grok_reply));
     }
 
     #[test]

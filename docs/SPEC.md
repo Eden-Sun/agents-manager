@@ -470,7 +470,7 @@ stdin：SessionStart 含 `session_id`、`transcript_path`、`cwd`；Stop 另含 
 daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`、把原因寫成一則系統訊息。
 以前沒訂這個 hook，失敗的回合要等 §4.3 備援（`working → idle` 後 5 秒）或 stuck watchdog 才被發現，中間一直掛在 `in_flight`。
 - **`delivery` 不動**：字是送出去了，失敗的是回合。送達與回合成敗是兩件事（§4.4a）。
-- **原因分類**（`hookrecv::classify_failure`）：`rate limit`／`usage limit`／`429`／`overloaded` → 額度或速率限制；
+- **原因分類**（`hookrecv::classify_failure`）：`rate limit`／`429`／`overloaded` → 額度或速率限制；額度用完的橫幅（行首形狀，見 §4.3a）也歸此類，句中提到 `usage limit` 不算；
   `auth`／`401`／`403`／`credential`／`login` → 帳號或授權；其他有字的 → API 錯誤；撈不到原因 → 未分類（**照樣收回合**，只是說不出原因）。
   原因從 `reason`／`failure_reason`／`stop_reason`／`error_type`／`subtype`／`error`（含 `{type,message}` 巢狀）／`message`／`detail` 依序找，
   欄位名還在動，撈不到不等於沒發生。分類只寫進那則系統訊息，**不碰 quota 狀態**——撞限的判定仍由既有的橫幅／statusLine 那條路負責，這條不介入也就不會讓它回歸。
@@ -759,6 +759,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   `Fable limit`→Fable 桶，認不出才先 5h 再 7d。模型桶不標任何量表（daemon 沒有那格），重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 跟 `weekly_all` 同一個週期；
   它們只擋跑那個模型的 bot（§18.8b），以前記成 7d 會讓同帳號所有 claude bot 停派到週重置（review3 c4 M1）。
   `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
+  **額度用完（`is_quota_exhaustion`，grok 回覆與 hook 失敗細節共用）**（2026-11-25，#2200 同類）：逐行判，前導記號（`⏺`、`■`、`•`、`⎿`、`⚠`、提示符）與 `API Error:`／`ERROR:` 剝掉後，整行必須就是橫幅形狀——`You've hit／reached your … limit` 收尾同上、`You've hit your usage limit`、`Claude usage limit reached.`、整行的 `usage_limit`／`usage_limit_exceeded`、`Individual quota reached … Resets in …`——且不超過 200 字。句中提到 `usage limit` 的一般內文（例：grok 回覆「要查 usage limit 請跑 /usage」、hook 長說明裡的 `usage limit`）不算撞限；`classify_failure` 也不再用句中的 `usage limit` 字串歸成速率限制。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
   codex 模型滿載（`■ Selected model is at capacity. Please try a different model.`，行首必須是 `■`；`•` 回覆與縮排引文不算）同樣是回合錯誤，
   釘成人話「模型目前滿載，請換模型或稍後再試（原文）」。它**不是**額度撞限：不記撞限、不擋派工、不自動重送或換模型（#1673）。
