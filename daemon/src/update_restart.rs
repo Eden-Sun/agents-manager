@@ -60,12 +60,18 @@ pub(crate) async fn post(State(app): State<Arc<App>>, Extension(principal): Exte
         }
         ids.push(id.clone());
     }
-    db::update_restart::schedule(&app.db, &ids).await.map_err(internal)?;
-    publish(&app).await;
-    for id in ids {
-        schedule(&app, &id);
-    }
+    schedule_ids(&app, &ids).await?;
     Ok(Json(snapshot(&app).await?))
+}
+
+/// 排上這些 bot 並推 `update_restart_changed`、當場各判一次；`post` 與 [`crate::update_chain`] 共用。
+pub async fn schedule_ids(app: &Arc<App>, ids: &[String]) -> Result<(), LcError> {
+    db::update_restart::schedule(&app.db, ids).await.map_err(internal)?;
+    publish(app).await;
+    for id in ids {
+        schedule(app, id);
+    }
+    Ok(())
 }
 
 /// 取消。`bot_ids` 空＝全部取消。

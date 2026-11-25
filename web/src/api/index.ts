@@ -615,6 +615,21 @@ export async function startCliUpdate(host: string, kind: 'codex' | 'claude', tar
   return { update_id: str(pick(isRec(raw) ? raw : {}, 'update_id')) }
 }
 
+export interface UpdateChainInstall {
+  host: string
+  kind: 'codex' | 'claude'
+  target_version: string
+}
+
+export async function startUpdateChain(installs: UpdateChainInstall[]): Promise<{ chain_id: string; started: { update_id: string; host: string; kind: string }[] }> {
+  const raw = await transport.request('POST', '/update-chain', { installs })
+  const o = isRec(raw) ? raw : {}
+  return {
+    chain_id: str(pick(o, 'chain_id')),
+    started: arr(pick(o, 'started')).flatMap((v) => (isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')), kind: str(pick(v, 'kind')) }] : [])),
+  }
+}
+
 export function toRestartSkips(v: unknown): RestartSkip[] {
   return arr(v).flatMap((x) =>
     isRec(x)

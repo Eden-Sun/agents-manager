@@ -220,6 +220,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     });
     lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
     cli_update::recover_at_startup(&app).await;
+    update_chain::recover_at_startup(&app).await;
     lifecycle::purge_deleted_bot_dirs(&app).await;
     runners::shim_refresh::refresh_at_startup(&app).await;
     match lifecycle::grok_hook::heal_at_startup(&app, None) {

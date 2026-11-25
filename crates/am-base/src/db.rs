@@ -715,6 +715,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (104, "636d5dd624cfe7ab"),
     // 啟動時 `codex --version` 的版本記在 runs（issue #748，2026-11-23）：`runs.cli_version`。
     (105, "f681d6a1e504e1db"),
+    // 一條龍升級串接（2026-11-25）：`cli_update_chains`、`cli_update_chain_members`。
+    (106, "38c5ec0d631f7a40"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

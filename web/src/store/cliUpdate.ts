@@ -112,6 +112,9 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
   const plan = toPlan(pick(data, 'restart'))
   const up = from && to && from !== to ? `${from} → ${to}` : to || t('新版')
   const verb = pick(data, 'already_installed') === true ? t('本來就是') : t('已升到')
+  if (str(pick(data, 'restart_status')) === 'chained') {
+    return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}；全部安裝完會自動重啟閒置的 Bot', { host, kind, verb, up }), batch: null, joinBatchId: null }
+  }
   if (kind === 'claude' && pick(data, 'restart_required') === true) {
     return { id, ok: true, message: t('{host} 的 claude {verb} {up}；請按 header 的更新按鈕，在確認框按「重啟套用」', { host, verb, up }), batch: null, joinBatchId: null }
   }
@@ -149,4 +152,32 @@ export function reconcileCliUpdates(cur: CliUpdate[], running: { update_id: stri
   const active = new Set(running.map((row) => row.update_id))
   const next = cur.filter((item) => item.phase === 'starting' || active.has(item.id))
   return next.length === cur.length && next.every((item, i) => item === cur[i]) ? cur : next
+}
+
+export interface UpdateChainResult {
+  ok: boolean
+  message: string
+  batch: RestartBatch | null
+  joinBatchId: string | null
+}
+
+export function updateChainDone(data: Rec): UpdateChainResult {
+  if (pick(data, 'ok') !== true) {
+    const failed = arr(pick(data, 'failed')).flatMap((v) => (isRec(v) ? [t('{host} 的 {kind}：{why}', { host: str(pick(v, 'host')), kind: str(pick(v, 'kind')), why: str(pick(v, 'error')) || failureReason(str(pick(v, 'kind')), str(pick(v, 'reason'))) })] : []))
+    const head = t('升級沒有完成，沒有重啟任何 Bot')
+    return { ok: false, message: failed.length > 0 ? t('{head}：{list}', { head, list: failed.join('；') }) : head, batch: null, joinBatchId: null }
+  }
+  const plans = arr(pick(data, 'restarts')).flatMap((v) => {
+    const p = toPlan(v)
+    return p ? [p] : []
+  })
+  const scheduled = arr(pick(data, 'scheduled')).length
+  const errors = arr(pick(data, 'errors')).length
+  const started = plans.find((p) => p.total > 0 && !p.already_running)
+  const joined = plans.find((p) => p.already_running && p.batch_id)
+  const restarted = plans.reduce((n, p) => n + (p.already_running ? 0 : p.total), 0)
+  const parts = [t('升級完成，重啟 {n} 顆閒置的 Bot', { n: restarted })]
+  if (scheduled > 0) parts.push(t('{n} 顆在忙，已排成閒下來自動重啟', { n: scheduled }))
+  if (errors > 0) parts.push(t('{n} 項重啟沒排起來，請再按一次 header 的更新按鈕', { n: errors }))
+  return { ok: errors === 0, message: parts.join('；'), batch: started ? batchFromPlan(started) : null, joinBatchId: !started && joined ? joined.batch_id : null }
 }

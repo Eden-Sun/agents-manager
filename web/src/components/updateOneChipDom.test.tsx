@@ -15,9 +15,9 @@ before(async () => {
     const method = init?.method ?? 'GET'
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
     const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { 'content-type': 'application/json' } })
-    if (url.includes('/cli-update')) {
+    if (url.includes('/update-chain')) {
       calls.push({ method, url, body })
-      return json({ update_id: 'u1' })
+      return json({ chain_id: 'c1', started: [{ update_id: 'u1', host: 'local', kind: 'claude' }], rejected: [] })
     }
     if (url.includes('/bots/restart-idle')) {
       calls.push({ method, url, body })
@@ -75,35 +75,48 @@ test('同一次 claude 升級只有一個晶片，數字是安裝＋重啟＋在
   assert.match(tip, /1 顆在忙/)
 })
 
-test('點一下確認：先安裝，裝完才自動重啟閒置的，再把忙的排成閒下來自動重啟', async () => {
+test('點一下確認：只送一個串接請求，安裝→重啟→排程由 daemon 做，網頁不再自己重啟或排程', async () => {
   seed()
   await mount(<UpdateQuotaChip />)
   await until(() => chips().length === 1, '晶片')
   await click(chips()[0])
   await until(() => buttonByText('安裝並重啟') !== undefined, '站內確認框')
   await click(buttonByText('安裝並重啟')!)
-  await until(() => calls.some((c) => c.url.includes('/cli-update')), '送出安裝')
-  assert.deepEqual(calls[0].body, { kind: 'claude', target_version: '2.0.0' })
-  assert.ok(!calls.some((c) => c.url.includes('restart-idle')), '裝完前不重啟')
+  await until(() => calls.some((c) => c.url.includes('/update-chain')), '送出串接')
+  assert.deepEqual(calls[0].body, { installs: [{ host: 'local', kind: 'claude', target_version: '2.0.0' }] })
   assert.equal(chips().length, 1, '安裝中仍只有一個晶片')
-  handleFrame(useStore.setState, useStore.getState, { type: 'cli_update_done', data: { update_id: 'u1', host: 'local', kind: 'claude', ok: true, to: '2.0.0', restart_required: true } })
-  await until(() => calls.some((c) => c.url.includes('update-restart')), '忙的排程')
-  const order = calls.map((c) => (c.url.includes('/cli-update') ? 'install' : c.url.includes('restart-idle') ? 'restart' : 'schedule'))
-  assert.deepEqual(order, ['install', 'restart', 'schedule'])
-  assert.deepEqual(calls[2].body, { bot_ids: ['busy1'] })
+  handleFrame(useStore.setState, useStore.getState, { type: 'cli_update_done', data: { update_id: 'u1', host: 'local', kind: 'claude', ok: true, to: '2.0.0', restart_status: 'chained' } })
+  handleFrame(useStore.setState, useStore.getState, {
+    type: 'update_chain_done',
+    data: { chain_id: 'c1', ok: true, restarts: [{ batch_id: 'b1', total: 1, planned: [{ bot_id: 'ready', name: 'ready' }], skipped: [] }], scheduled: ['busy1'], errors: [] },
+  })
+  await settle()
+  assert.equal(useStore.getState().updateChain, false)
+  assert.equal(useStore.getState().restartBatch?.id, 'b1', '重啟進度接 daemon 開的那一批')
+  assert.deepEqual(calls.map((c) => c.url), ['/api/update-chain'], '網頁沒有另外呼叫 restart-idle 或 update-restart')
 })
 
-test('安裝失敗：不重啟也不排程', async () => {
+test('串接失敗：只收到失敗事件，不重啟也不排程', async () => {
   seed()
   await mount(<UpdateQuotaChip />)
   await until(() => chips().length === 1, '晶片')
   await click(chips()[0])
   await until(() => buttonByText('安裝並重啟') !== undefined, '確認框')
   await click(buttonByText('安裝並重啟')!)
-  await until(() => calls.some((c) => c.url.includes('/cli-update')), '送出安裝')
+  await until(() => calls.some((c) => c.url.includes('/update-chain')), '送出串接')
   handleFrame(useStore.setState, useStore.getState, { type: 'cli_update_done', data: { update_id: 'u1', host: 'local', kind: 'claude', ok: false, reason: 'install_failed' } })
+  handleFrame(useStore.setState, useStore.getState, { type: 'update_chain_done', data: { chain_id: 'c1', ok: false, reason: 'install_failed', failed: [{ host: 'local', kind: 'claude', error: 'boom' }] } })
   await settle()
-  assert.deepEqual(calls.map((c) => c.method + ' ' + c.url), ['POST /api/hosts/local/cli-update'], '只有安裝那一下')
+  assert.deepEqual(calls.map((c) => c.method + ' ' + c.url), ['POST /api/update-chain'], '只有串接那一下')
+  assert.equal(useStore.getState().updateChain, false)
+  assert.equal(useStore.getState().restartBatch, null)
+})
+
+test('網頁中途重載：daemon 還有串接在跑時晶片保持執行中，收尾後恢復', async () => {
+  useStore.setState({ updateChain: false })
+  handleFrame(useStore.setState, useStore.getState, { type: 'update_chain_progress', data: { chain_id: 'c1', phase: 'installing' } })
+  assert.equal(useStore.getState().updateChain, true)
+  handleFrame(useStore.setState, useStore.getState, { type: 'update_chain_done', data: { chain_id: 'c1', ok: true, restarts: [], scheduled: [], errors: [] } })
   assert.equal(useStore.getState().updateChain, false)
 })
 

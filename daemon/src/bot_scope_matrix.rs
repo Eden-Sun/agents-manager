@@ -570,6 +570,7 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/start", Expect::Forbidden, None),
         rule("POST", "/api/hosts", Expect::UserOnly, None),
         rule("POST", "/api/hosts/{name}/cli-update", Expect::Forbidden, None),
+        rule("POST", "/api/update-chain", Expect::Forbidden, None),
         rule("POST", "/api/turns/{id}/abandon", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/assignments", Expect::RoleRequired, None),
         scoped_allow_rule("POST", "/api/supervisor/assignments", "An ordinary Bot may send a notice to a registered AGM role; it may not dispatch work to Bot B or ask for review."),

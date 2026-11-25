@@ -754,6 +754,8 @@ export function toState(raw: unknown): AppState {
       'cli_updates' in root
         ? arr(pick(root, 'cli_updates')).flatMap((v) => (isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')) }] : []))
         : undefined,
+    update_chains:
+      'update_chains' in root ? arr(pick(root, 'update_chains')).flatMap((v) => (isRec(v) ? [{ chain_id: str(pick(v, 'chain_id')) }] : [])) : undefined,
     herdr_updates:
       'herdr_updates' in root
         ? arr(pick(root, 'herdr_updates')).flatMap((v) =>

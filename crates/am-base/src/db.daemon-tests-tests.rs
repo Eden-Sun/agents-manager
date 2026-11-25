@@ -1373,6 +1373,8 @@
         sqlx::query("DROP TABLE child_done_state").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS cli_update_chains").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS cli_update_chain_members").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_claims").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_sessions").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS ledger_events").execute(&mut *tx).await.unwrap();
@@ -1535,6 +1537,8 @@
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS cli_update_chains").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS cli_update_chain_members").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_claims").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_sessions").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS ledger_events").execute(&pool).await.unwrap();

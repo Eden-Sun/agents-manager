@@ -277,6 +277,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/baseline/apply", post(baseline_apply))
         .route("/hosts/{name}/baseline/restore", post(baseline_restore))
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
+        .route("/update-chain", post(crate::update_chain::post_chain))
         .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/recheck", post(recheck_identity))
@@ -1579,6 +1580,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "daemon_seq": app.current_seq(),
         "restart_batch": crate::runners::bulk_restart::running_batch(&app.data_dir),
         "cli_updates": crate::cli_update::running_list(app).await,
+        "update_chains": crate::update_chain::running_list(app).await,
         "codex_reset": app.codex_resets.lock().await.snapshot.clone(),
         "herdr_updates": crate::herdr_upgrade::running_list(app),
         "deploy_wait": crate::deploy_wait::view(app),

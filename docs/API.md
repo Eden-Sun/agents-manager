@@ -387,6 +387,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/fs/dirs` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）；在上層目錄新建單一資料夾，不能借名字跳出上層，也不能在憑證／設定目錄底下建 |
 | POST | `/api/hosts/{name}/cli-update` | User-only；Bot → 403 `ui_only` |
+| POST | `/api/update-chain` | User-only；Bot → 403 `ui_only`；body `{"installs":[{"host","kind","target_version"}]}`，一條龍安裝＋重啟（§12.7b） |
 | POST | `/api/hosts/{name}/herdr-integration` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/hosts/{name}/gh/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/gh/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -558,6 +559,8 @@ User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只�
 `cli_updates`：還沒收尾的 Claude／Codex CLI 安裝（§12.7a）`[{"update_id","host","kind","target_version","phase","recovered"}]`，沒有就是 `[]`。存在 DB（#564）：
 daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、`phase:"recovering"`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
+
+`update_chains`：還沒收尾的一條龍串接（§12.7b）`[{"chain_id","status":"running"|"restarting","members":[{"update_id","host","kind"}]}]`，沒有就是 `[]`；前端拿它對帳 `update_chain_done`（不在清單裡就當結束）。
 
 `codex_reset`：第三方 [資料：codex-reset.com](https://codex-reset.com/) 的全域公告快照，首次成功讀取前為 `null`；舊 daemon 可省略。格式 `{source,checked_at,source_updated_at,last_reset_at,upcoming,latest,notice}`，時間皆 RFC3339；`latest`／`notice` 為 `{id,at,text,url}` 或 `null`。`upcoming` 只表示 forecast 的非空 `official_signal`，不由機率推導；個人額度與重置時間不因此修改。`notice` 保留最近一批新消息的最新一則，客戶端依 `id` 去重。daemon 啟動即讀取，其後每 30 分鐘刷新；失敗保留前次快照，客戶端以 `checked_at` 判斷過期。
 
@@ -1132,6 +1135,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `update_restart_changed` | 見 §10.3b |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
+| `update_chain_progress` / `update_chain_done` | 見 §12.7b |
 | `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
 | `herdr_integration_auto_install` | `{"host","name","ok","state","error"}`：daemon 自動裝了某台的 grok／antigravity-cli herdr integration（SPEC §6.9c，issue #1871）；`ok:false` 時 `error` 是原因，不重試 |
 | `herdr_recovery_done` | `{"recovery_id","resumed":[{"bot_id","name","run_id"}],"failed":[{"bot_id","name","error"}],"children_lost":[{"bot_id","name","parent_bot_id","title"}],"limited","skipped"}`：本機 herdr 全域事件串流曾建立、之後中斷並重連，且 active run 的舊 pane 都已消失或不再有 agent occupant 時送出；重啟後仍存在的空 shell pane 也算遺失。只以原 native session 接回頂層 bot，child 不接回；既有 restart 流程會關閉舊空 pane/tab。側欄顯示摘要；同一 `recovery_id` 的 WS 重播只提示一次。AGM 同時收到一筆 `ops_alert`（`reason:"herdr_unexpected_restart"`），寫入後推 `supervisor_changed` |
@@ -2638,6 +2642,16 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
   `restart_status` 說重啟交到哪了（#566）：`started`（開了這台 codex 的一批）、`already_covered`（正在跑的那一批確實還排著這台每一顆該重啟的 codex，
   `restart.batch_id` 是那一批）、`deferred`（正在跑的那一批沒涵蓋，排在它後面：`restart.batch_id:null`、`restart.behind_batch_id`＝那一批，
   它結束時 daemon 自己接著開這台 codex 的一批，不用再按）、`error`（批次開不起來：`restart:null`＋`restart_error`，新版已裝好，照一般重啟再按一次）。
+
+### 12.7b 一條龍升級 `POST /api/update-chain`
+`{"installs":[{"host":"local","kind":"claude","target_version":"2.1.284"},{"host":"m4p","kind":"codex","target_version":"0.157.0"}]}`。User-only（帶 bot 身份 403 `ui_only`）。daemon 對每一項走 §12.7a 的安裝（同一套檢查與 409），全部成功才對每個 `(kind, host)` 走一鍵重啟的範圍批次（重啟閒置的舊版 bot），再把仍在忙（working／blocked／回合進行中／背景工作）的 bot 排進 `update-restart`（§10.3b）；子 agent 不動。任一項沒開起來或沒裝成：一顆都不重啟、不排程，推 `update_chain_done` `ok:false`。串接的 codex 裝完**不**自己重啟（`cli_update_done` 的 `restart_status:"chained"`，claude 同），由串接統一做一次，不重複。
+
+```json
+202 {"chain_id":"01M…","started":[{"update_id":"01M…","host":"local","kind":"claude"}],"rejected":[]}
+```
+- 一項都開不起來：回該項的錯誤（例 409 `stale_target`、`cli_update_in_progress`），不留串接。部分開起來、部分被拒：202，`rejected` 列原因，串接立刻以 `install_not_started` 收尾（已開的安裝照跑，但不重啟）。
+- 進度 WS：`update_chain_progress` `{"chain_id","phase":"installing"|"restarting","members"}`；結束 `update_chain_done` `{"chain_id","ok":true,"restarts":[<restart-idle 計畫>],"scheduled":[bot_id],"errors":[{"host","kind","error"}]}` 或 `{"ok":false,"reason":"install_failed"|"install_not_started","failed":[{"host","kind","reason","error"}]}`。每一項安裝的細節照舊走 `cli_update_progress`／`cli_update_done`。
+- 狀態存 DB（`cli_update_chains`）：daemon 在安裝途中或重啟階段重啟，開機後 `recover_at_startup` 接手——還在裝的等安裝收尾、已進到重啟階段的重跑一次（候選與排程都以 bot 當下的更新通知為準，已套用的不會再被重啟、已排的不會重複排）；收尾過的不重做。
 
 ### 12.7b header 一鍵更新 herdr `POST /api/hosts/{name}/herdr-update`
 `{"target_version":"0.9.3"}`。只由使用者在 header 確認框送出。下載驗版 → 等閒置 → 維護窗口裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回（SPEC §6.9b）。

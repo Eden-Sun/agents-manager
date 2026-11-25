@@ -420,7 +420,7 @@ pub async fn migrate(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS cli_updates_one_running ON cli_updates(host) WHERE status = 'running'")
         .execute(pool)
         .await?;
-    Ok(())
+    crate::update_chain::migrate(pool).await
 }
 
 /// Stable identity for a machine across daemon restarts. The same fields define a host repoint in
@@ -523,7 +523,7 @@ async fn finish_row(app: &(impl crate::capabilities::DataDir + crate::capabiliti
 }
 
 /// 帶 bot 身份的請求一律拒絕：這一下會換掉所有 codex bot 共用的 binary、接著重啟它們，只給使用者按。
-fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
+pub(crate) fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
     if headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token") {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "ui_only",
             "message": "CLI 升級只給使用者在 UI 上按；bot 要升級請照 SPEC §18.10 申請核准"})));
@@ -562,6 +562,19 @@ pub async fn start(
     kind: Option<&str>,
     target: Option<&str>,
     runner: Arc<dyn Runner>,
+) -> Result<Value, LcError> {
+    start_chained(app, headers, host, kind, target, runner, None).await
+}
+
+/// [`start`]，多一個 `chain_id`：屬於 [`crate::update_chain`] 的安裝，裝完後的重啟與排程由那條串接統一做，codex 這一步不自己重啟。
+pub async fn start_chained(
+    app: &Arc<App>,
+    headers: &HeaderMap,
+    host: &str,
+    kind: Option<&str>,
+    target: Option<&str>,
+    runner: Arc<dyn Runner>,
+    chain_id: Option<&str>,
 ) -> Result<Value, LcError> {
     refuse_bot_caller(headers)?;
     let kind = match kind.map(str::trim) {
@@ -633,6 +646,17 @@ pub async fn start(
     .bind(&operation_host_target)
     .execute(&app.db)
     .await;
+    if let (Ok(_), Some(chain_id)) = (&inserted, chain_id) {
+        if let Err(e) = sqlx::query("INSERT INTO cli_update_chain_members (update_id, chain_id) VALUES (?, ?)")
+            .bind(&update_id)
+            .bind(chain_id)
+            .execute(&app.db)
+            .await
+        {
+            let _ = sqlx::query("DELETE FROM cli_updates WHERE id = ?").bind(&update_id).execute(&app.db).await;
+            return Err(LcError::Upstream(format!("記不下這次串接的安裝，沒有開始：{e}")));
+        }
+    }
     if let Err(e) = inserted {
         if !e.as_database_error().is_some_and(|d| d.is_unique_violation()) {
             return Err(LcError::Upstream(format!("記不下這次安裝，沒有開始：{e}")));
@@ -888,6 +912,7 @@ async fn run_with_kind_result(
         .await;
     }
     if kind == "claude" {
+        let chained = chain_of(app, update_id).await.is_some();
         return finish(done(
             true,
             json!({
@@ -896,11 +921,15 @@ async fn run_with_kind_result(
                 "already_installed": already,
                 "notices_updated": notices,
                 "restart": null,
-                "restart_required": true,
-                "restart_status": "manual",
+                "restart_required": !chained,
+                "restart_status": if chained { "chained" } else { "manual" },
             }),
         ))
         .await;
+    }
+    if chain_of(app, update_id).await.is_some() {
+        return finish(done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
+            "restart": null, "restart_status": "chained"}))).await;
     }
     set_phase(app, update_id, "restarting", Some(&before)).await;
     app.emit(
@@ -1355,6 +1384,15 @@ async fn pending_target(app: &impl crate::capabilities::Db, host: &str) -> anyho
         .iter()
         .filter_map(|(_, n)| pending_notice_target("codex", n))
         .max_by(|a, b| parse_version(a).cmp(&parse_version(b))))
+}
+
+async fn chain_of(app: &impl crate::capabilities::Db, update_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT chain_id FROM cli_update_chain_members WHERE update_id = ?")
+        .bind(update_id)
+        .fetch_optional(app.db())
+        .await
+        .ok()
+        .flatten()
 }
 
 fn merge(v: &mut Value, extra: Value) {

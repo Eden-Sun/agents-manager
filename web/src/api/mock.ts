@@ -1224,6 +1224,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/mem/processes/pane') return this.memPane(q.get('host') ?? 'local', q.get('pane_id') ?? '')
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
+    if (method === 'POST' && seg[0] === 'update-chain' && seg.length === 1) return this.updateChain(Array.isArray(b.installs) ? (b.installs as Rec[]) : [])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'GET' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[3] === 'sync-plan' && seg.length === 4) return this.identitySyncPlan(decodeURIComponent(seg[1]))
@@ -3004,6 +3005,16 @@ export class MockTransport implements Transport {
       }
     }, kind === 'claude' ? 2800 : 3400)
     return { ...base, started: true }
+  }
+
+  private updateChain(installs: Rec[]) {
+    const chain_id = ulid('chain')
+    const started = installs.map((i) => this.cliUpdate(String(i.host ?? ''), { kind: i.kind, target_version: i.target_version }))
+    later(() => {
+      const restarts = installs.map((i) => this.restartIdle({ kind: String(i.kind), host: String(i.host) }))
+      this.emit('update_chain_done', { chain_id, ok: true, restarts, scheduled: [], errors: [] })
+    }, 3800)
+    return { chain_id, started, rejected: [] }
   }
 
   private restartIdle(scope?: { kind: string; host: string }) {

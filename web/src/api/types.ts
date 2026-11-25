@@ -564,6 +564,7 @@ export interface AppState {
   daemon_seq: number
   restart_batch: string | null | undefined
   cli_updates: { update_id: string; host: string }[] | undefined
+  update_chains: { chain_id: string }[] | undefined
   herdr_updates: { update_id: string; host: string; target_version: string; phase: string; started_at: string }[] | undefined
   deploy_wait: unknown
   connected: boolean

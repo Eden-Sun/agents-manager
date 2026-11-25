@@ -189,6 +189,7 @@ mod api_bot;
 mod api_bot_retire_route;
 mod api_bot_turn_cost;
 mod cli_update;
+pub mod update_chain;
 mod app_ports_p0;
 mod app_ports_p1;
 mod app_ports_p10;
