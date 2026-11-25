@@ -90,7 +90,14 @@ fn banner_start(line: &str) -> &str {
 /// 輸入的記號，橫幅前面不會有。
 fn agy_line(lower: &str) -> bool {
     let s = strip_warning(lower);
-    s.starts_with("individual quota reached") && s.contains("resets in")
+    (s.starts_with("individual quota reached") && s.contains("resets in")) || agy_prepaid_line(s)
+}
+
+/// agy 1.5.17：企業帳號預付餘額為空，CLI 直接停、不再重試；照額度用盡處理（沒有重置時間，到期交保底）。
+/// 舊版的 `You have exhausted your quota on this model.` 整行也認（同一種耗盡）。
+fn agy_prepaid_line(s: &str) -> bool {
+    let prepaid = s.strip_prefix("your organization's prepaid balance is insufficient").is_some_and(|tail| tail.is_empty() || tail.starts_with('.'));
+    prepaid || s.trim_end() == "you have exhausted your quota on this model."
 }
 
 /// 橫幅前導的 ⚠ 與空白。
@@ -796,6 +803,20 @@ mod tests {
         assert!(is_quota_exhaustion(AGY_JOINED));
         assert_eq!(kind_of(AGY_JOINED), "quota_limit");
         assert_eq!(agy_reset_until(AGY_JOINED, "2026-10-24T10:00:00Z").as_deref(), Some("2026-10-24T10:13:11.000Z"));
+    }
+
+    /// 合成樣本（依 agy 1.5.17 changelog 原文；無法在本機觸發空的預付錢包，未實錄）。
+    #[test]
+    fn an_agy_prepaid_balance_banner_is_quota_exhaustion() {
+        let line = "Your organization's prepaid balance is insufficient. Contact your administrator to add funds.";
+        let screen = format!("❯ prompt\n⚠ {line}\n─────\n❯\n");
+        assert_eq!(api_error_line(&screen).as_deref(), Some(line));
+        assert!(is_quota_limit(line));
+        assert!(is_quota_exhaustion(line));
+        assert_eq!(kind_of(line), "quota_limit");
+        assert!(is_quota_exhaustion(&format!("RESOURCE_EXHAUSTED (code 8): {line}")));
+        assert!(is_quota_exhaustion("You have exhausted your quota on this model."));
+        assert!(!is_quota_exhaustion("The prepaid balance is insufficient, so I cannot run this query."));
     }
 
     #[test]
