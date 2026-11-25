@@ -230,6 +230,8 @@ State files (all in `AGM_DIR`): `daemon-update.built` (short sha last swapped in
 `daemon-update.rejected` (full shas that were swapped in and rolled back; never picked again), `daemon-update.fails`
 (consecutive failed rounds), `daemon-update.lock` (owner and diagnostics), `daemon-update.lock.guard` (kernel-released
 advisory lock preventing overlap), `daemon-update.now.json` (a deploy-now request), `daemon-update.log`.
+Trust order (since 2026-11-25): the binary on disk is the truth. Each round the kick reads the `--version` sha embedded in `$REPO/target/release/agents-managerd`; if that commit exists in the dedicated checkout and differs from `daemon-update.built` (someone replaced the binary outside the pipeline), the kick rewrites `.built` to the live sha, pushes `ops_alert built_reconciled`, and swaps from there. A dirty or unknown embedded sha keeps the `.built` value (safe ABORT path). Because the live sha is re-read every round, a swap that ABORTs with rc=3 (\"線上 binary 已改變\") heals itself on the next round.
+
 Each `daemon-swap.sh` run leaves `agents-managerd.bak-<old sha>` (for rollback) and
 `.prev-<old sha>-<time>-<six random chars>` (mktemp, so two swaps in the same second never collide) in `target/release/`
 (the binary that was replaced). A **successful** swap keeps only this run's two and deletes the older ones (DB backups

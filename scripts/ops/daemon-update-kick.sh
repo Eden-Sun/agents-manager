@@ -308,13 +308,38 @@ print(" ".join(d.get("paths") or []))
 # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
 binary_same() { "$GIT" -C "$DEPLOY" diff --quiet "$1" "$2" -- $PATHS; }
 
+LIVE_BIN="$REPO/target/release/agents-managerd"
+embedded_live_sha() {
+  local line name pkg sha extra
+  line=$("$LIVE_BIN" --version 2>/dev/null | head -n 1) || return 1
+  read -r name pkg sha extra <<< "$line"
+  [ -n "$sha" ] && [ -z "$extra" ] || return 1
+  printf "%s" "$sha"
+}
 BUILT_SHA=""
 [ -f "$BUILT" ] && BUILT_SHA=$(tr -d '[:space:]' < "$BUILT")
-if [ -z "$BUILT_SHA" ] || ! "$GIT" -C "$DEPLOY" cat-file -e "${BUILT_SHA}^{commit}" 2>/dev/null; then
-  alert built_unknown "讀不到線上是哪一版（${BUILT} 是「${BUILT_SHA}」），不知道從哪裡往上換，自動部署停住。請確認線上 binary 的 short sha 後寫進那個檔"
+BUILT_FULL=""
+[ -n "$BUILT_SHA" ] && BUILT_FULL=$("$GIT" -C "$DEPLOY" rev-parse --verify --quiet "${BUILT_SHA}^{commit}" 2>/dev/null) || BUILT_FULL=""
+LIVE_SHA=$(embedded_live_sha) || LIVE_SHA=""
+if [ -n "$LIVE_SHA" ]; then
+  LIVE_FULL=$("$GIT" -C "$DEPLOY" rev-parse --verify --quiet "${LIVE_SHA}^{commit}" 2>/dev/null) || LIVE_FULL=""
+  if [ -z "$LIVE_FULL" ]; then
+    log "線上 binary 內嵌的 sha「${LIVE_SHA}」不是專用 checkout 裡的 commit（髒樹或沒抓到），沿用 ${BUILT} 的「${BUILT_SHA}」"
+  elif [ "$LIVE_FULL" != "$BUILT_FULL" ]; then
+    LIVE_SHORT=$(printf '%s' "$LIVE_FULL" | cut -c1-8)
+    if write_built_marker "$LIVE_SHORT"; then
+      alert built_reconciled "線上 binary 內嵌的 ${LIVE_SHORT} 與 ${BUILT} 記的「${BUILT_SHA:-空}」不符（像是管線外換過 binary），已以線上為準更新 ${BUILT}"
+    else
+      note_fail "線上 binary 是 ${LIVE_SHORT}，但 ${BUILT} 寫入失敗（記的是「${BUILT_SHA:-空}」）；這輪照線上版本往上換"
+    fi
+    BUILT_SHA="$LIVE_SHORT"
+    BUILT_FULL="$LIVE_FULL"
+  fi
+fi
+if [ -z "$BUILT_SHA" ] || [ -z "$BUILT_FULL" ]; then
+  alert built_unknown "讀不到線上是哪一版（${BUILT} 是「${BUILT_SHA}」，線上 binary 也說不出 commit），不知道從哪裡往上換，自動部署停住。請確認線上 binary 的 short sha 後寫進那個檔"
   exit 0
 fi
-BUILT_FULL=$("$GIT" -C "$DEPLOY" rev-parse "${BUILT_SHA}^{commit}")
 
 TARGET=""
 if [ "$NOW" = 1 ]; then
@@ -410,7 +435,6 @@ else
   log "建好 ${SHORT}"
 fi
 
-LIVE_BIN="$REPO/target/release/agents-managerd"
 OLDHASH=$(shasum -a 256 "$LIVE_BIN" 2>/dev/null | cut -c1-16)
 [ -n "$OLDHASH" ] || { note_fail "讀不到正式 binary ${LIVE_BIN}，不換版"; exit 0; }
 [ -f "$SWAP" ] || { note_fail "找不到換版腳本 ${SWAP}"; exit 0; }

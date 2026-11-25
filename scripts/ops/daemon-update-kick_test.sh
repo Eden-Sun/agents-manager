@@ -857,5 +857,65 @@ check_eq "no-diff：主樹快轉到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_REP
 check "no-diff：log 說快轉" "主樹快轉到" "$(LOG)"
 teardown
 
+fake_live() {
+  printf '#!/bin/sh\necho "agents-managerd 0.2.0 %s"\n' "$1" > "$AGM_REPO/target/release/agents-managerd"
+  chmod +x "$AGM_REPO/target/release/agents-managerd"
+}
+short() { echo "$1" | cut -c1-8; }
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_live "$C1"
+ci "$C3" success
+rc=$(STUB_SWAP_RC=3 run)
+check_eq "過期 .built：rc=0" "0" "$rc"
+check_eq "過期 .built：更正成線上的 short sha" "$(short "$C1")" "$(cat "$AGM_DIR/daemon-update.built")"
+check "過期 .built：換版的舊版是線上的 sha" "--old $(short "$C1")" "$AGM_DIR/swap.log"
+check "過期 .built：推 built_reconciled" "built_reconciled" "$AGM_DIR/alerts.log"
+check "過期 .built：log 說以線上為準" "已以線上為準更新" "$(LOG)"
+teardown
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_live "$(printf 'b%.0s' $(seq 1 40))"
+ci "$C3" success
+STUB_SWAP_RC=3 run >/dev/null
+check_eq "線上 sha 不在 checkout：.built 不動" "$(short "$C0")" "$(cat "$AGM_DIR/daemon-update.built")"
+check "線上 sha 不在 checkout：沿用 .built 的舊版" "--old $(short "$C0")" "$AGM_DIR/swap.log"
+check "線上 sha 不在 checkout：log 說沿用" "沿用" "$(LOG)"
+check_no "線上 sha 不在 checkout：不推 built_reconciled" "built_reconciled" "$AGM_DIR/alerts.log"
+teardown
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_live "$C1-dirty"
+ci "$C3" success
+STUB_SWAP_RC=3 run >/dev/null
+check_eq "髒樹 binary：.built 不動" "$(short "$C0")" "$(cat "$AGM_DIR/daemon-update.built")"
+check "髒樹 binary：沿用 .built 的舊版" "--old $(short "$C0")" "$AGM_DIR/swap.log"
+teardown
+
+setup
+rm -f "$AGM_DIR/daemon-update.built"
+fake_live "$C1"
+ci "$C3" success
+rc=$(STUB_SWAP_RC=3 run)
+check_eq ".built 缺檔、線上可辨認：rc=0" "0" "$rc"
+check_eq ".built 缺檔：由線上補回" "$(short "$C1")" "$(cat "$AGM_DIR/daemon-update.built")"
+check_no ".built 缺檔：不推 built_unknown" "built_unknown" "$AGM_DIR/alerts.log"
+teardown
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_live "$C0"
+ci "$C3" success
+STUB_SWAP_RC=3 run >/dev/null
+check "換版 rc=3（窗口後線上已改）：舊版是 C0" "--old $(short "$C0")" "$AGM_DIR/swap.log"
+fake_live "$C1"
+STUB_SWAP_RC=0 run >/dev/null
+check "下一輪自癒：舊版改成重新讀到的線上 C1" "--old $(short "$C1")" "$AGM_DIR/swap.log"
+check_eq "下一輪自癒：.built 也對上線上" "$(short "$C3")" "$(cat "$AGM_DIR/daemon-update.built")"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

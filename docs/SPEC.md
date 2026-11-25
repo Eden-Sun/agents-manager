@@ -4758,7 +4758,7 @@ SQLite 池健康探測獨立於使用 DB 的業務巡邏：每 30 秒檢查池�
   鎖帶 pid 與時間（執行者不在且鎖超過 `AGM_LOCK_STALE_SECS`＝120 秒才回收；還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人；mtime 在未來視為時間不可信，不回收並推 `runner_clock_skew` 告警）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。
 - **誰重建**：例行更新由上面那支腳本自己建；有 bot 要在 main 之前的 commit 上線，才走 §18.10 的 rebuild／restart 核准（申請者自己建、AGM 裁示）。
-- **docs-only 不重啟**：換版成功後 `daemon-swap.sh` 把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 用
+- **docs-only 不重啟**：換版成功後 `daemon-swap.sh` 把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 每輪先讀線上 binary 內嵌的 sha：與 .built 不符（管線外換過 binary）且那顆 commit 在專用 checkout 裡，就以線上為準更正 .built 並推 built_reconciled；髒樹或說不出 sha 時沿用 .built。kick 用
   `git diff --quiet <built> <sha> -- <build-inputs>`（路徑問 daemon 的 `agm build-inputs`，§18.11）判斷，沒差異就不建置、不換版。
 - **換版固定條件**（`daemon-swap.sh` 內建，全中才動手，否則回報阻塞）：
   1. 在**乾淨的專用 checkout** 建 web 與 daemon（共用樹的 WIP 不得編進 release）；`--old`（線上）必須是 `--sha` 的祖先或同一顆，否則拒絕降版（#638）。
