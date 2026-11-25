@@ -324,12 +324,14 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
   outcome_summary TEXT, reply_message_id TEXT,
   attempt_no INTEGER NOT NULL DEFAULT 1, next_retry_at TEXT,
   -- 總花費時間（SCHEMA 91）：第一次開始執行（turn 送出；fork 重啟則從重啟開始）與目前這次 attempt 的開始時間。
-  first_started_at TEXT, attempt_started_at TEXT
+  first_started_at TEXT, attempt_started_at TEXT,
+  -- 這次 attempt 開始時 bot 的名稱、kind、模型、effort、身份快照（JSON）；不是現值。
+  runner_json TEXT
 );
 CREATE TABLE IF NOT EXISTS schedule_attempts (
   occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id), attempt_no INTEGER NOT NULL,
   turn_id TEXT, reply_message_id TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('success','failed','refused','unknown')),
-  outcome_summary TEXT NOT NULL, finished_at TEXT NOT NULL, started_at TEXT,
+  outcome_summary TEXT NOT NULL, finished_at TEXT NOT NULL, started_at TEXT, runner_json TEXT,
   PRIMARY KEY (occurrence_id, attempt_no)
 );
 CREATE INDEX IF NOT EXISTS schedule_occ_turn ON schedule_occurrences(turn_id) WHERE turn_id IS NOT NULL;
@@ -717,6 +719,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (105, "f681d6a1e504e1db"),
     // 一條龍升級串接（2026-11-25）：`cli_update_chains`、`cli_update_chain_members`。
     (106, "38c5ec0d631f7a40"),
+    // 排程每次執行的 bot／模型快照（2026-11-25）：`schedule_occurrences.runner_json`、`schedule_attempts.runner_json`。
+    (107, "b490bf1089d0f868"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -927,6 +931,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedule_occurrences", "first_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN first_started_at TEXT"),
         ("schedule_occurrences", "attempt_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN attempt_started_at TEXT"),
         ("schedule_attempts", "started_at", "ALTER TABLE schedule_attempts ADD COLUMN started_at TEXT"),
+        ("schedule_occurrences", "runner_json", "ALTER TABLE schedule_occurrences ADD COLUMN runner_json TEXT"),
+        ("schedule_attempts", "runner_json", "ALTER TABLE schedule_attempts ADD COLUMN runner_json TEXT"),
         ("schedules", "from_base", "ALTER TABLE schedules ADD COLUMN from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))"),
         ("schedules", "code_no", "ALTER TABLE schedules ADD COLUMN code_no INTEGER NOT NULL DEFAULT 0"),
         ("schedule_occurrences", "slot_label", "ALTER TABLE schedule_occurrences ADD COLUMN slot_label TEXT"),

@@ -88,7 +88,7 @@ async fn pending(app: &std::sync::Arc<crate::state::App>, s: &Schedule) -> Strin
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -163,6 +163,32 @@ async fn enqueue_does_not_overwrite_a_turn_the_user_already_queued() {
     let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
     assert_eq!(o.waiting_reason.as_deref(), Some("bot_busy"));
     assert_eq!(turn_status(&e.app, &mine).await, "queued", "使用者排的那筆不被覆蓋或撤回");
+}
+
+#[tokio::test]
+async fn each_occurrence_keeps_the_bot_and_model_it_started_with() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE bots SET model = 'model-a', effort = 'high' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+    let first = pending(&e.app, &s).await;
+    assert!(runner::enqueue(&e.app, &first).await.unwrap());
+    let view = |id: String| { let app = e.app.clone(); async move { let o = store::get_occurrence(&app.db, &id).await.unwrap().unwrap(); store::occurrence_view(&app.db, &o).await.unwrap() } };
+    let v = view(first.clone()).await;
+    assert_eq!((v["runner"]["model"].as_str(), v["runner"]["effort"].as_str(), v["runner"]["source"].as_str()), (Some("model-a"), Some("high"), Some("bot")));
+    assert_eq!(v["runner"]["bot_name"], "sched-bot");
+    let turn: String = sqlx::query_scalar("SELECT turn_id FROM schedule_occurrences WHERE id=?").bind(&first).fetch_one(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE turns SET status='failed', delivery='ok' WHERE id=?").bind(&turn).execute(&e.app.db).await.unwrap();
+    store::settle_queued(&e.app.db, &db::now()).await.unwrap();
+    sqlx::query("UPDATE bots SET model = 'model-b', effort = 'low', name = 'renamed' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+    let second = pending(&e.app, &s).await;
+    assert!(runner::enqueue(&e.app, &second).await.unwrap());
+    let old = view(first.clone()).await;
+    let new = view(second.clone()).await;
+    assert_eq!(old["runner"]["model"], "model-a");
+    assert_eq!(old["attempts"][0]["runner"]["model"], "model-a");
+    assert_eq!((new["runner"]["model"].as_str(), new["runner"]["bot_name"].as_str()), (Some("model-b"), Some("renamed")));
+    sqlx::query("UPDATE schedule_occurrences SET runner_json = NULL WHERE id = ?").bind(&first).execute(&e.app.db).await.unwrap();
+    assert!(view(first).await["runner"].is_null(), "舊紀錄沒有快照就是 null，不用現值冒充");
 }
 
 #[tokio::test]
@@ -1407,7 +1433,7 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: future_time.clone(),
         updated_at: future_time,
     };
@@ -1437,7 +1463,7 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: past_time.clone(),
         updated_at: past_time,
     };
@@ -1472,7 +1498,7 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: past_none.clone(),
         updated_at: past_none,
     };
@@ -1501,7 +1527,7 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: past_dry.clone(),
         updated_at: past_dry,
     };

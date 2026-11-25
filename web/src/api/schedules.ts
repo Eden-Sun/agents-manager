@@ -4,7 +4,8 @@ import { t } from '../lib/i18n'
 export type ScheduleMode = 'once' | 'interval' | 'daily' | 'weekly'
 export type ScheduleNotify = 'failure' | 'all' | 'none'
 export type ScheduleOutcome = 'success' | 'failed' | 'refused' | 'unknown'
-export interface ScheduleAttempt { attempt_no: number; turn_id: string | null; reply_message_id: string | null; outcome: ScheduleOutcome; outcome_summary: string; started_at?: string | null; finished_at?: string | null; duration_ms?: number | null }
+export interface ScheduleRunner { bot_name: string; kind: string; model: string | null; effort: string | null; identity: string | null; source: 'run' | 'bot' }
+export interface ScheduleAttempt { runner?: ScheduleRunner | null; attempt_no: number; turn_id: string | null; reply_message_id: string | null; outcome: ScheduleOutcome; outcome_summary: string; started_at?: string | null; finished_at?: string | null; duration_ms?: number | null }
 
 export type OccurrenceStatus = 'pending' | 'queued' | 'done' | 'failed' | 'cancelled' | 'unknown'
 
@@ -42,6 +43,7 @@ export interface ScheduleOccurrence {
   attempt_no?: number
   next_retry_at?: string | null
   attempts?: ScheduleAttempt[]
+  runner?: ScheduleRunner | null
   started_at?: string | null
   duration_ms?: number | null
   running_since?: string | null

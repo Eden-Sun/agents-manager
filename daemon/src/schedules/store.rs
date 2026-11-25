@@ -97,6 +97,8 @@ pub struct Occurrence {
     pub first_started_at: Option<String>,
     /// 目前這次 attempt 的開始時間；attempt 結束要重試時清空。
     pub attempt_started_at: Option<String>,
+    #[serde(skip)]
+    pub runner_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -271,9 +273,32 @@ pub async fn set_next_due_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str
 /// 綁定 turn：與 turn／message 寫入同一個交易（呼叫端負責 begin／commit）。
 /// 這次 attempt 開始執行：只在還沒記過時寫（fork 重啟先記，之後綁 turn 不覆蓋）。第一次開始另存 `first_started_at`。
 pub async fn mark_started_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str, now: &str) -> Result<()> {
-    sqlx::query("UPDATE schedule_occurrences SET first_started_at = COALESCE(first_started_at, ?), attempt_started_at = COALESCE(attempt_started_at, ?) WHERE id = ? AND status = 'pending'")
-        .bind(now).bind(now).bind(occurrence_id).execute(&mut **tx).await?;
+    let runner = runner_snapshot_tx(tx, occurrence_id).await?;
+    sqlx::query("UPDATE schedule_occurrences SET first_started_at = COALESCE(first_started_at, ?), attempt_started_at = COALESCE(attempt_started_at, ?), runner_json = CASE WHEN attempt_started_at IS NULL THEN ? ELSE runner_json END WHERE id = ? AND status = 'pending'")
+        .bind(now).bind(now).bind(runner).bind(occurrence_id).execute(&mut **tx).await?;
     Ok(())
+}
+
+async fn runner_snapshot_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str) -> Result<Option<String>> {
+    type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT b.name, b.kind, b.model, b.effort, b.identity, r.id, r.runtime_model, r.runtime_effort, r.runtime_identity
+           FROM schedule_occurrences o JOIN bots b ON b.id = o.bot_id
+           LEFT JOIN runs r ON r.bot_id = b.id AND r.state IN ('starting','running','stopping')
+          WHERE o.id = ? LIMIT 1",
+    )
+    .bind(occurrence_id).fetch_optional(&mut **tx).await?;
+    let Some((name, kind, model, effort, identity, run_id, run_model, run_effort, run_identity)) = row else { return Ok(None) };
+    let live = run_id.is_some() && run_model.is_some();
+    let snap = serde_json::json!({
+        "bot_name": name,
+        "kind": kind,
+        "model": if live { run_model } else { model },
+        "effort": if live { run_effort.or(effort) } else { effort },
+        "identity": if live { run_identity.or(identity) } else { identity },
+        "source": if live { "run" } else { "bot" },
+    });
+    Ok(Some(snap.to_string()))
 }
 
 pub async fn mark_started(pool: &SqlitePool, occurrence_id: &str, now: &str) -> Result<()> {
@@ -365,9 +390,9 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
         if current_reply != reply { continue; }
         let last = reply.as_ref().map(|r| &r.0);
         let retry = retry_at(&sched, &cur, &outcome, now);
-        sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at) VALUES (?,?,?,?,?,?,?,?)")
-            .bind(&occ.id).bind(occ.attempt_no).bind(&occ.turn_id).bind(&last).bind(&outcome).bind(&summary).bind(now).bind(&cur.attempt_started_at).execute(&mut *tx).await?;
-        if retry.is_some() { sqlx::query("UPDATE schedule_occurrences SET attempt_started_at = NULL WHERE id = ?").bind(&occ.id).execute(&mut *tx).await?; }
+        sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at, runner_json) VALUES (?,?,?,?,?,?,?,?,?)")
+            .bind(&occ.id).bind(occ.attempt_no).bind(&occ.turn_id).bind(&last).bind(&outcome).bind(&summary).bind(now).bind(&cur.attempt_started_at).bind(&cur.runner_json).execute(&mut *tx).await?;
+        if retry.is_some() { sqlx::query("UPDATE schedule_occurrences SET attempt_started_at = NULL, runner_json = NULL WHERE id = ?").bind(&occ.id).execute(&mut *tx).await?; }
         sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, notified = ?, outcome = ?, outcome_summary = ?, reply_message_id = ?, next_retry_at = ?, attempt_no = ?, turn_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE turn_id END, updated_at = ? WHERE id = ?")
             .bind(if retry.is_some() { "pending" } else { next }).bind(error).bind(i64::from(retry.is_none())).bind(&outcome).bind(&summary).bind(if retry.is_some() { None } else { last })
             .bind(&retry).bind(occ.attempt_no + i64::from(retry.is_some())).bind(&retry).bind(now).bind(&occ.id).execute(&mut *tx).await?;
@@ -395,6 +420,10 @@ pub(super) fn retry_at(s: &Schedule, o: &Occurrence, outcome: &str, now: &str) -
     Some(retry.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
+pub fn runner_value(raw: Option<&str>) -> serde_json::Value {
+    raw.and_then(|r| serde_json::from_str(r).ok()).unwrap_or(serde_json::Value::Null)
+}
+
 /// 列表／詳情用：occurrence 加上綁定 turn 的真實狀態與 delivery，UI 才能分辨等待、執行中、需確認。
 pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serde_json::Value> {
     let turn: Option<(String, String, Option<String>, i64)> = match occ.turn_id.as_deref() {
@@ -402,18 +431,19 @@ pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serd
         None => None,
     };
     let mut v = serde_json::to_value(occ)?;
-    let attempts: Vec<(i64, Option<String>, Option<String>, String, String, String, Option<String>)> = sqlx::query_as("SELECT attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at FROM schedule_attempts WHERE occurrence_id = ? ORDER BY attempt_no")
+    let attempts: Vec<(i64, Option<String>, Option<String>, String, String, String, Option<String>, Option<String>)> = sqlx::query_as("SELECT attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at, runner_json FROM schedule_attempts WHERE occurrence_id = ? ORDER BY attempt_no")
         .bind(&occ.id).fetch_all(pool).await?;
     let mut done_ms: Option<i64> = None;
     let mut add = |ms: i64| done_ms = Some(done_ms.unwrap_or(0) + ms.max(0));
     let mut has_current_row = false;
-    let list: Vec<serde_json::Value> = attempts.into_iter().map(|(attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at)| {
+    let list: Vec<serde_json::Value> = attempts.into_iter().map(|(attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at, runner_json)| {
         let ms = started_at.as_deref().and_then(|s| span_ms(s, &finished_at));
         if let Some(ms) = ms { add(ms); }
         has_current_row |= attempt_no == occ.attempt_no;
-        serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary,"started_at":started_at,"finished_at":finished_at,"duration_ms":ms})
+        serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary,"started_at":started_at,"finished_at":finished_at,"duration_ms":ms,"runner":runner_value(runner_json.as_deref())})
     }).collect();
     v["attempts"] = serde_json::json!(list);
+    v["runner"] = runner_value(occ.runner_json.as_deref());
     let open = matches!(occ.status.as_str(), "pending" | "queued");
     let mut running_since: Option<String> = None;
     if let Some(start) = occ.attempt_started_at.as_deref() {

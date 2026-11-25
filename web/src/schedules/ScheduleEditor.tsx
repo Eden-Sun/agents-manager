@@ -26,6 +26,7 @@ import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { outcomeLabel, ScheduleResult } from './ScheduleResult'
+import { RunnerTag } from './RunnerTag'
 import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import { copyScheduleName } from './scheduleCopy'
 import { ScheduleWhenSlots } from './ScheduleWhenSlots'
@@ -708,6 +709,7 @@ export function ScheduleEditor({
                     {o.error ? t('（{error}）', { error: o.error }) : ''}
                     {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
                   </p>
+                  <RunnerTag runner={o.runner} />
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                 </li>
               ))}

@@ -574,7 +574,7 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None, runner_json: None,
         created_at: now.into(),
         updated_at: now.into(),
     };
