@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyUpstreamItem, loadUpstreamUpdates, parseUpstreamItem, upstreamNotice } from './upstreamUpdate.ts'
+import { setLangOverride } from '../lib/i18n'
+setLangOverride('zh-TW')
 
 const store = new Map<string, string>()
 Object.defineProperty(globalThis, 'localStorage', {
@@ -39,7 +41,7 @@ test('有新版跳一次，同一版同一個瀏覽器不再跳', () => {
   applyUpstreamItem({ ...CLAUDE, notify: null }, r.notify)
   assert.equal(r.got.length, 1)
   assert.equal(r.got[0].kind, 'info')
-  assert.match(r.got[0].text, /2\.1\.284/)
+  assert.match(r.got[0].text, /2\.1\.283 可更新/)
   applyUpstreamItem({ ...CLAUDE, latest_version: '2.1.284', text: 'claude 上游有新版 2.1.284' }, r.notify)
   assert.equal(r.got.length, 2, '下一版要再跳')
 })
@@ -60,7 +62,7 @@ test('沒有新版不跳；抓不到上游只在 daemon 推 error 的那一次�
   store.clear()
   assert.equal(upstreamNotice(parseUpstreamItem({ kind: 'codex', latest_version: '0.157.0', has_update: false, text: null })!, {}), null)
   const err = { kind: 'claude', latest_version: null, has_update: false, notify: 'error', text: '查 claude 上游最新版失敗（npm registry）：timeout' }
-  assert.deepEqual(upstreamNotice(parseUpstreamItem(err)!, {}), { kind: 'error', text: err.text, detail: err.text })
+  assert.deepEqual(upstreamNotice(parseUpstreamItem(err)!, {}), { kind: 'error', text: '查 claude 新版失敗', detail: err.text })
   assert.equal(upstreamNotice(parseUpstreamItem({ ...err, notify: null })!, {}), null, '沒有 notify 的快照不重複講錯')
 })
 
@@ -92,22 +94,40 @@ test('上游 latest 退回舊版（或字串比較順序不同）：同一瀏覽
   assert.equal(s.got.length, 1, '2.1.10 是第一次看到要跳；退回 2.1.9 不再跳')
 })
 
-test('toast 只講一行：有新版是「查看」開頁首晶片，抓不到是「詳情」再展開原因', () => {
-  store.clear()
+function toastRecorder() {
   const got: { kind: string; text: string; label?: string; run?: () => void }[] = []
   const notify = (kind: 'info' | 'error', text: string, action?: { label: string; run: () => void }) =>
     void got.push({ kind, text, label: action?.label, run: action?.run })
-  const opened: string[] = []
-  applyUpstreamItem({ ...CLAUDE, short_text: 'claude 2.1.283 可更新' }, notify, (kind) => opened.push(kind))
-  assert.equal(got[0].text, 'claude 2.1.283 可更新')
-  assert.equal(got[0].label, '查看')
-  got[0].run?.()
-  assert.deepEqual(opened, ['claude'])
-  const err = { kind: 'claude', latest_version: null, has_update: false, notify: 'error', short_text: '查 claude 新版失敗', text: '查 claude 上游最新版失敗（npm registry）：timeout' }
-  applyUpstreamItem(err, notify)
-  assert.equal(got[1].text, '查 claude 新版失敗')
-  assert.equal(got[1].label, '詳情')
-  got[1].run?.()
-  assert.equal(got[2].text, err.text)
-  assert.equal(got[2].label, undefined)
+  return { got, notify }
+}
+
+test('toast 只講一行，文字由前端組字：中文與英文都走 i18n，不顯示後端中文', () => {
+  store.clear()
+  setLangOverride('zh-TW')
+  const zh = toastRecorder()
+  applyUpstreamItem(CLAUDE, zh.notify)
+  assert.equal(zh.got[0].text, 'claude 2.1.283 可更新')
+  assert.equal(zh.got[0].label, '查看')
+  setLangOverride('en')
+  store.clear()
+  const en = toastRecorder()
+  applyUpstreamItem(CLAUDE, en.notify)
+  assert.equal(en.got[0].text, 'claude 2.1.283 available')
+  assert.equal(en.got[0].label, 'View')
+  assert.match(en.got[0].text, /^[\x00-\x7f]+$/, '英文 toast 不夾中文')
+  setLangOverride(null)
+})
+
+test('抓不到上游：toast 是一句失敗＋「詳情」，展開才看到原因', () => {
+  store.clear()
+  const err = { kind: 'claude', latest_version: null, has_update: false, notify: 'error', text: '查 claude 上游最新版失敗（npm registry）：timeout' }
+  setLangOverride('en')
+  const en = toastRecorder()
+  applyUpstreamItem(err, en.notify)
+  assert.equal(en.got[0].text, 'Could not check the latest claude version')
+  assert.equal(en.got[0].label, 'Details')
+  en.got[0].run?.()
+  assert.equal(en.got[1].text, err.text)
+  assert.equal(en.got[1].label, undefined)
+  setLangOverride(null)
 })

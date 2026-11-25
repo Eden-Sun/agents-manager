@@ -8,5 +8,5 @@ export function useUpdateChipRequest(accepts: (kind: string) => boolean, open: (
     if (!req || req.seq === seen.current) return
     seen.current = req.seq
     if (accepts(req.kind)) open()
-  }, [req])
+  }, [req, accepts, open])
 }

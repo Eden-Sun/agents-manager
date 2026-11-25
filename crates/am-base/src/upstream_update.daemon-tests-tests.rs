@@ -99,23 +99,6 @@
         assert!(!should_notify(&s, Some("2.1.284")), "npm latest 被退回舊版，不重報");
     }
 
-    #[test]
-    fn the_toast_line_is_one_short_sentence_and_the_detail_stays_in_text() {
-        let s = build_status("claude", &ok("2.1.284"), &[disk("local", "2.1.281"), disk("mac_builder", "2.1.281")], None);
-        let item = item_json(&s);
-        assert_eq!(item["short_text"], "claude 2.1.284 可更新");
-        let detail = item["text"].as_str().unwrap();
-        assert!(detail.contains("mac_builder：2.1.281 → 2.1.284") && detail.contains("claude install 2.1.284"), "{detail}");
-        assert!(!short_notice(&s).contains('\n') && !short_notice(&s).contains("install"));
-        let err = build_status("claude", &Err("連不上 npm registry：timeout".into()), &[disk("local", "2.1.281")], None);
-        let item = item_json(&err);
-        assert_eq!(item["short_text"], "查 claude 新版失敗");
-        assert!(item["text"].as_str().unwrap().contains("timeout"));
-        let quiet = build_status("claude", &ok("2.1.281"), &[disk("local", "2.1.281")], None);
-        let item = item_json(&quiet);
-        assert!(item["short_text"].is_null() && item["text"].is_null());
-    }
-
     /// 抓不到上游不是「沒有新版」：`latest_version` 空、`error` 講原因，不會被當成有更新或沒更新而默默帶過。
     #[test]
     fn an_unreachable_upstream_is_an_explicit_error() {

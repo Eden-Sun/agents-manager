@@ -2962,7 +2962,6 @@ prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、�
 - herdr 的磁碟版本不另跑指令：讀工具探測快取的 `herdr --version`（`hosts[].herdr.cli_version` 同一份，每 60 秒重探）；探不到 herdr 的主機不列。`target_version` 等於上游版，`text` 列出落後的主機並講明更新會重啟 herdr server。
 - 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`latest_version` 是上游版；`target_version` 是共同安裝目標。Codex 的目標等於上游版；Claude 取上游版與已安裝版本的最大值，避免把較新的主機降版。Claude `behind` 表示低於共同目標或目標已知但讀不到版本；`has_update` 在任一主機落後／讀取失敗或版本不一致時為 `true`。
 - Claude 目標需處理時，`text` 持續列出**每台**目前版本（或讀取錯誤）與共同目標，並列出 `claude install <target_version>`。網頁把此快照保存在 header；只有全部到目標版才收起。`notify`／toast 是另外的單次通知，不是持續提示本身。
-- **toast 用的一行**：`short_text`（有新版：`{kind} {新版} 可更新`；抓不到：`查 {kind} 新版失敗`；其他 `null`）。`text` 仍是完整說明（claude 的主機與指令、抓不到的原因），給頁首晶片 tooltip 與「詳情」用。
 - **抓不到上游**：`latest_version:null`、`error` 寫原因——不是「沒有新版」。Claude 若主機間仍不一致，仍以已知最高安裝版做目標並持續顯示；沒有可比較目標時 `has_update:false`。`text` 是給畫面的那一句（有待處理或抓不到時才有，否則 `null`）。
 - `notified_version`：上次推過通知的上游版本（`<data_dir>/upstream-update.last.json`，跨重啟保留）。
 

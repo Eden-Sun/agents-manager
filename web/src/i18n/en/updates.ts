@@ -429,4 +429,6 @@ export default {
   '安裝新版並重啟（{n} 項待辦）': 'Install the new version and restart ({n} to do)',
   '查看': 'View',
   '詳情': 'Details',
+  '{kind} {version} 可更新': '{kind} {version} available',
+  '查 {kind} 新版失敗': 'Could not check the latest {kind} version',
 } satisfies Dict

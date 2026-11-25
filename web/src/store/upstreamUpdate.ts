@@ -10,7 +10,6 @@ export interface UpstreamItem {
   hasUpdate: boolean
   hosts: { host: string; installedVersion: string | null; error: string | null; behind: boolean }[]
   notify: 'update' | 'error' | null
-  shortText?: string | null
   text: string | null
   autoUpdate?: boolean
 }
@@ -39,7 +38,6 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
         })
       : [],
     notify,
-    shortText: typeof raw.short_text === 'string' && raw.short_text ? raw.short_text : null,
     text: typeof raw.text === 'string' && raw.text ? raw.text : null,
     autoUpdate: raw.auto_update === true,
   }
@@ -70,11 +68,15 @@ export interface UpstreamNotice {
   detail: string
 }
 
+export function upstreamToastText(item: UpstreamItem): string {
+  if (item.notify === 'error') return t('查 {kind} 新版失敗', { kind: item.kind })
+  return t('{kind} {version} 可更新', { kind: item.kind, version: item.latest ?? '' })
+}
+
 export function upstreamNotice(item: UpstreamItem, seen: Record<string, string>): UpstreamNotice | null {
   if (!item.text) return null
-  const text = item.shortText ?? item.text
-  if (item.notify === 'error') return { kind: 'error', text, detail: item.text }
-  if (item.hasUpdate && item.latest && isNewerVersion(item.latest, seen[item.kind])) return { kind: 'info', text, detail: item.text }
+  if (item.notify === 'error') return { kind: 'error', text: upstreamToastText(item), detail: item.text }
+  if (item.hasUpdate && item.latest && isNewerVersion(item.latest, seen[item.kind])) return { kind: 'info', text: upstreamToastText(item), detail: item.text }
   return null
 }
 

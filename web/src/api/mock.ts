@@ -2994,7 +2994,7 @@ export class MockTransport implements Transport {
           return { ...entry, installed_version: to, error: null, behind: false }
         }) : []
         const hasUpdate = hosts.some((entry) => entry.behind === true || (entry.installed_version !== null && entry.installed_version !== to))
-        const item = { ...old, kind: 'claude', target_version: to, has_update: hasUpdate, hosts, text: hasUpdate ? old?.text ?? null : null, short_text: hasUpdate ? old?.short_text ?? null : null, notify: null }
+        const item = { ...old, kind: 'claude', target_version: to, has_update: hasUpdate, hosts, text: hasUpdate ? old?.text ?? null : null, notify: null }
         this.upstreamItems = [...this.upstreamItems.filter((entry) => entry.kind !== 'claude'), item]
         this.emit('upstream_update', item)
         this.emit('cli_update_done', { ...base, ok: true, from, to, notices_updated: targets.length, restart: null, restart_required: true, restart_status: 'manual' })
@@ -4306,7 +4306,7 @@ export class MockTransport implements Transport {
   emitUpstreamUpdate(kind: string, latest: string, disk: string) {
     const target = latest
     const item = {
-      kind, latest_version: latest, target_version: target, has_update: true, error: null, notify: 'update', notified_version: latest, short_text: `${kind} ${latest} 可更新`,
+      kind, latest_version: latest, target_version: target, has_update: true, error: null, notify: 'update', notified_version: latest,
       hosts: [{ host: 'local', installed_version: disk, error: null, behind: true }],
       text: kind === 'claude'
         ? `claude 需安裝 ${target}（local：${disk} → ${target}）：需安裝到共同版本。指令：\`claude install ${target}\``
@@ -4326,7 +4326,7 @@ export class MockTransport implements Transport {
     { host: 'buildbox', installed_version: null, error: 'timeout', behind: true },
   ]) {
     const item = {
-      kind: 'claude', latest_version: '2.1.283', target_version: target, has_update: true, error: null, notify: null, notified_version: '2.1.283', short_text: 'claude 2.1.283 可更新',
+      kind: 'claude', latest_version: '2.1.283', target_version: target, has_update: true, error: null, notify: null, notified_version: '2.1.283',
       hosts,
       text: `claude 需安裝 ${target}（${hosts.map((host) => `${host.host}：${host.installed_version ?? host.error} → ${target}`).join('；')}）：需安裝到共同版本。指令：\`claude install ${target}\``,
     }

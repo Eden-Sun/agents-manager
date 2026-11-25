@@ -1896,5 +1896,5 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **終端機連結**：xterm 預設的 OSC 8 連結處理會跳原生 confirm。HostShellXterm 設 `linkHandler`，只開 http／https（`window.open(…, '_blank', 'noopener,noreferrer')`），其他 scheme 直接忽略，不再確認。
 - **測試**：`terminalLink.test.ts`（https 直接開、非 http(s) 忽略、從不呼叫 confirm）；`nativeDialogGuard.test.ts`（每個 `new Terminal(` 都帶 `linkHandler` 與 `allowNonHttpProtocols: false`）。
 
-- **右下角升級通知只講一行（2026-11-25，使用者裁示）**：有上游新版時 toast 只顯示 `claude 2.1.284 可更新`（daemon 的 `short_text`），動作「查看」打開頁首升級晶片的確認框或選單（grok／agy／herdr 開各自的說明框；claude／codex 開安裝並重啟的確認框）。主機、版本對照與 `claude install` 指令不進 toast，只留在晶片 tooltip 與確認框（`text` 仍是完整說明）。抓不到上游是 `查 claude 新版失敗` ＋「詳情」，展開才看到原因。舊的 toast 長句（「需安裝到共同版本…」）與「重啟套用」字樣一併移除。
-- **測試**：`upstream_update` 的 `the_toast_line_is_one_short_sentence_and_the_detail_stays_in_text`（daemon 那頭的測試）；`web/src/store/upstreamUpdate.test.ts`（短句、「查看」「詳情」的動作）；`web/src/hooks/updateChipRequestDom.test.tsx`（晶片只響應自己的種類）。
+- **右下角升級通知只講一行（2026-11-25，使用者裁示）**：有上游新版時 toast 只顯示 `claude 2.1.284 可更新`（網頁用 `kind`／`latest_version` 組字、走 i18n，英文 `claude 2.1.284 available`；不直接顯示後端中文），動作「查看」打開頁首升級晶片的確認框或選單（grok／agy／herdr 開各自的說明框；claude／codex 開安裝並重啟的確認框）。主機、版本對照與 `claude install` 指令不進 toast，只留在晶片 tooltip 與確認框（`text` 仍是完整說明）。抓不到上游是 `查 claude 新版失敗`（同樣由網頁組字）＋「詳情」，展開才看到原因。舊的 toast 長句（「需安裝到共同版本…」）與「重啟套用」字樣一併移除。
+- **測試**：`web/src/store/upstreamUpdate.test.ts`（短句、「查看」「詳情」的動作）；`web/src/hooks/updateChipRequestDom.test.tsx`（晶片只響應自己的種類）。
