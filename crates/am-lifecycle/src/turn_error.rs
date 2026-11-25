@@ -830,6 +830,8 @@ mod tests {
             ("Resets in 45s", "2026-10-24T10:00:45.000Z"),
             ("Resets in 2h", "2026-10-24T12:00:00.000Z"),
             ("⚠ Individual quota reached. Resets in 1d 2h", "2026-10-25T12:00:00.000Z"),
+            ("Resets in 3d 3h 59m", "2026-10-27T13:59:00.000Z"),
+            ("Resets in 75h 59m", "2026-10-27T13:59:00.000Z"),
         ] {
             assert_eq!(agy_reset_until(tail, at).as_deref(), Some(want), "{tail}");
         }
