@@ -9,8 +9,6 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
-import { CodexInstallChip } from './CodexInstallChip'
-import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
 import { GrokUpdateChip } from './GrokUpdateChip'
 import { AgyUpdateChip } from './AgyUpdateChip'
@@ -20,34 +18,27 @@ import { useAgyPlan } from '../hooks/useAgyPlan'
 import { useHerdrUpdate } from '../store/herdrUpdate'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
-import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
+import { mergeUpdateChips } from '../lib/updateBatch'
+import { useInstallTodo } from '../hooks/useInstallTodo'
+import { CLI_UPDATE_PHASE_LABEL } from '../store/cliUpdate'
 import './updateQuotaChip.css'
 
 export function UpdateQuotaChip() {
   const phone = useMediaQuery(PHONE_QUERY)
+  const installShown = useInstallTodo()
   const restartShown = useStore((s) => {
     if (s.restartBatch) return true
     const c = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
     return c.ready.length > 0 || c.busy.some((b) => !b.install)
-  })
-  const codexShown = useStore(
-    (s) =>
-      s.cliUpdates.some((item) => item.kind === 'codex') ||
-      codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id), s.upstreamUpdates.codex) !== null,
-  )
-  const claudeShown = useStore((s) =>
-    Boolean(claudeInstallPlan(s.upstreamUpdates.claude)) || s.cliUpdates.some((item) => item.kind === 'claude'),
-  )
+  }) || installShown.count > 0 || installShown.active.length > 0
   const herdrPlan = useHerdrPlan() !== null
   const herdrShown = useHerdrUpdate((s) => s.active !== null || s.result !== null) || herdrPlan
   const grokShown = useGrokPlan() !== null
   const agyShown = useAgyPlan() !== null
-  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown, grokShown, agyShown)) return <MergedUpdateChip />
+  if (mergeUpdateChips(phone, restartShown, false, false, herdrShown, grokShown, agyShown)) return <MergedUpdateChip />
   return (
     <>
       <RestartChip />
-      <CodexInstallChip />
-      <ClaudeInstallChip />
       <HerdrUpdateChip />
       {}
       <GrokUpdateChip />
@@ -75,6 +66,9 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
   const sending = useStore((s) => Boolean(s.busy['restart-idle']))
+  const todo = useInstallTodo()
+  const startChain = useStore((s) => s.startUpdateChain)
+  const chain = useStore((s) => s.updateChain)
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const readyNames = useStore(
     useShallow((s) =>
@@ -105,35 +99,53 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const cancelUpdateRestart = useStore((s) => s.cancelUpdateRestart)
   const scheduledBusy = busyIds.filter((id) => scheduled.includes(id))
   const allScheduled = busyCount > 0 && scheduledBusy.length === busyCount
-  const [alsoBusy, setAlsoBusy] = useState(false)
   const restartBot = useStore((s) => s.restartBot)
   const [force, setForce] = useState<{ ids: string[]; names: string[] } | null>(null)
-  const busyOnly = readyCount === 0
+  const busyOnly = readyCount === 0 && todo.count === 0
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => {
-    if (!v) setAlsoBusy(false)
     return control ? !v && control.close() : setLocalOpen(v)
   }
-  const changelogHost = useStore((s) => {
+  const botHost = useStore((s) => {
     const first = firstTargetId(s)
     return projectHostName(s, s.bots.find((b) => b.id === first)?.project_id ?? null)
   })
-  const changelogKind = useStore((s) => {
+  const botKind = useStore((s) => {
     const first = firstTargetId(s)
     return s.bots.find((b) => b.id === first)?.kind ?? 'claude'
   })
-  const changelogFrom = useStore((s) => {
+  const botFrom = useStore((s) => {
     const first = firstTargetId(s)
     return first ? (s.runs[first]?.status?.version ?? null) : null
   })
-  const changelogNotice = useStore((s) => {
+  const botNotice = useStore((s) => {
     const first = firstTargetId(s)
     return first ? (s.runs[first]?.update_notice ?? null) : null
   })
-  const range = updateRange(changelogKind, changelogNotice, changelogFrom)
+  const installHost = todo.claude?.toInstall[0] ?? todo.codex?.host
+  const changelogKind = todo.claude && todo.claude.toInstall.length > 0 ? 'claude' : todo.codex ? 'codex' : botKind
+  const changelogHost = installHost ?? botHost
+  const claudeFrom = todo.claude?.hosts.find((h) => h.host === installHost)?.installedVersion ?? null
+  const range =
+    changelogKind === 'claude' && todo.claude && installHost
+      ? { from: claudeFrom, to: todo.claude.target }
+      : changelogKind === 'codex' && todo.codex
+        ? updateRange('codex', todo.codex.notice, null)
+        : updateRange(botKind, botNotice, botFrom)
   const canReview = changelogKind === 'claude' || changelogKind === 'codex'
   const review = useReviewAsk(changelogKind, changelogHost, range.from, range.to, false)
+
+  if (todo.active.length > 0 && !control) {
+    const cur = todo.active[0]
+    const label = t('{host} 的 {kind} {phase}…（裝完會自動重啟閒置的 Bot，在忙的排成閒下來再重啟）', { host: cur.host, kind: cur.kind, phase: t.tr(CLI_UPDATE_PHASE_LABEL[cur.phase]) })
+    return (
+      <button type="button" className="quota-update install running" disabled title={label} aria-label={label}>
+        <span aria-hidden="true"><UpgradeIcon /></span>
+        <span className="quota-update-n" aria-hidden="true">…</span>
+      </button>
+    )
+  }
 
   if (batch && !control) {
     const { total, done, ok, failed, finished } = batch
@@ -158,11 +170,20 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     )
   }
 
-  if (readyCount === 0 && busyCount === 0 && !control) return null
+  if (readyCount === 0 && busyCount === 0 && todo.count === 0 && !control) return null
+
+  const installLines = [
+    ...(todo.claude?.toInstall.map((host) => t('{host}：安裝 claude {target}', { host, target: todo.claude!.target })) ?? []),
+    ...(todo.codex ? [t('{host}：安裝 codex{target}', { host: todo.codex.host, target: todo.codex.target ? ` ${todo.codex.target}` : '' })] : []),
+  ]
+  const total = todo.count + readyCount + busyCount
 
   const busyNote = busyCount > 0 ? t('\n{n} 顆在忙，會先跳過：\n{names}', { n: busyCount, names: busyLines.join('\n') }) : ''
+  const installNote = installLines.length > 0 ? t('\n要安裝 {n} 台：\n{names}', { n: installLines.length, names: installLines.join('\n') }) : ''
   const label =
-    readyCount === 0
+    todo.count > 0
+      ? t('有 CLI 新版 · 點一下安裝並重啟（還有 {n} 項：安裝 {i}、重啟 {r}、在忙 {b}）', { n: total, i: todo.count, r: readyCount, b: busyCount })
+      : readyCount === 0
       ? scheduledBusy.length > 0
         ? t('{n} 顆在忙，已排程閒下來自動重啟（點開可查看或取消）', { n: busyCount })
         : t('{n} 顆在忙，點開可安排閒下來自動重啟', { n: busyCount })
@@ -172,21 +193,21 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     <>
       {control ? null : <button
         type="button"
-        className={`quota-update${readyCount === 0 ? ' waiting' : ''}${scheduledBusy.length > 0 ? ' scheduled' : ''}`}
-        disabled={sending}
-        title={`${label}${readyCount > 0 ? t('：\n{names}', { names: readyNames.join(t('、')) }) : ''}${busyNote}`}
+        className={`quota-update${todo.count > 0 ? ' install' : ''}${busyOnly ? ' waiting' : ''}${scheduledBusy.length > 0 ? ' scheduled' : ''}`}
+        disabled={sending || chain}
+        title={`${label}${installNote}${readyCount > 0 ? t('\n要重啟 {n} 顆：{names}', { n: readyCount, names: readyNames.join(t('、')) }) : ''}${busyNote}`}
         aria-label={label}
         onClick={() => setConfirming(true)}
       >
         <span aria-hidden="true"><UpgradeIcon /></span>
         <span className="quota-update-n" aria-hidden="true">
-          {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
+          {sending || chain ? '…' : total}
         </span>
         {scheduledBusy.length > 0 ? <span className="quota-update-clock" aria-hidden="true">⏱</span> : null}
       </button>}
       <ConfirmDialog
         open={confirming && force === null}
-        title={busyOnly ? (allScheduled ? t('這些 Bot 已排成閒下來自動重啟') : t('這些 Bot 都在忙：閒下來自動重啟？')) : t('重啟這些 Bot 來套用更新？')}
+        title={todo.count > 0 ? t('安裝新版並重啟？') : busyOnly ? (allScheduled ? t('這些 Bot 已排成閒下來自動重啟') : t('這些 Bot 都在忙：閒下來自動重啟？')) : t('重啟這些 Bot 來套用更新？')}
         body={
           <>
             {confirming ? (
@@ -197,6 +218,16 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                   <AgmReviewBox kind={changelogKind} host={changelogHost} from={range.from} to={range.to} refreshKey={review.reviewKey} />
                 ) : null}
               </div>
+            ) : null}
+            {todo.count > 0 ? (
+              <>
+                <p>{t('按下確認後依序：先在下列主機安裝新版，裝完自動重啟閒置的 Bot，在忙的排成閒下來自動重啟。任一台安裝失敗就不重啟任何一顆。')}</p>
+                <ul className="confirm-list">
+                  {installLines.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </>
             ) : null}
             {busyOnly ? (
               <p>
@@ -229,7 +260,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             ) : null}
             {busyCount > 0 ? (
               <>
-                {busyOnly ? null : <p className="confirm-note">{t('另外 {n} 顆在忙，這次會跳過：', { n: busyCount })}</p>}
+                {busyOnly ? null : <p className="confirm-note">{t('另外 {n} 顆在忙，會排成閒下來自動重啟：', { n: busyCount })}</p>}
                 <ul className="confirm-list dim">
                   {busyLines.map((n, i) => (
                     <li key={`${i}:${n}`}>
@@ -240,12 +271,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                     </li>
                   ))}
                 </ul>
-                {busyOnly ? null : (
-                  <label className="confirm-check">
-                    <input type="checkbox" checked={alsoBusy} onChange={(e) => setAlsoBusy(e.target.checked)} />{' '}
-                    {t('其餘 {n} 顆在忙的，閒下來也自動重啟', { n: busyCount })}
-                  </label>
-                )}
               </>
             ) : null}
             {readyCount + busyCount > 0 ? (
@@ -257,15 +282,22 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             ) : null}
           </>
         }
-        confirmLabel={busyOnly ? (allScheduled ? t('取消自動重啟') : t('閒下來自動重啟')) : t('重啟 {n} 顆', { n: readyCount })}
+        confirmLabel={todo.count > 0 ? t('安裝並重啟') : busyOnly ? (allScheduled ? t('取消自動重啟') : t('閒下來自動重啟')) : t('重啟 {n} 顆', { n: readyCount })}
         secondaryLabel={canReview ? (review.asking ? t('派工中…') : t('分析影響')) : undefined}
         secondaryDisabled={review.asking}
         onSecondary={canReview ? review.ask : undefined}
         width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
-          const alsoIds = alsoBusy ? busyIds.filter((id) => !scheduled.includes(id)) : []
+          const alsoIds = busyIds.filter((id) => !scheduled.includes(id))
           setConfirming(false)
+          if (todo.count > 0) {
+            void startChain({
+              ...(todo.claude && todo.claude.toInstall.length > 0 ? { claude: { hosts: todo.claude.toInstall, target: todo.claude.target } } : {}),
+              ...(todo.codex ? { codex: { host: todo.codex.host, target: todo.codex.target } } : {}),
+            })
+            return
+          }
           if (busyOnly) {
             void (allScheduled ? cancelUpdateRestart(busyIds) : scheduleUpdateRestart(busyIds))
             return

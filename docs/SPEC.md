@@ -3114,6 +3114,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 以上都不中 | — | 重啟 |
 
   **前端計數（#1911）**：子 agent（`Skip::Child`）與 default session（`Skip::DefaultSession`）是「永遠不會被一鍵重啟」，不是暫時在忙——`updateBatchCounts` 把它們放進獨立的 `passive`，不進 `ready`、也不進 `busy`，所以 header 灰色 `⇑N`（`RestartChip`／手機 `MergedUpdateChip`）只算符合資格、暫時在忙的；沒有 ready 也沒有 busy 時整顆隱藏。這兩種 bot 的新版資訊留在那一列自己的被動提示（`passiveUpdateHint`，掛在 `UpdateBadge` 的 tooltip）：子 agent 寫「新版已安裝，由父 Bot 安排重啟」。不通知 parent。
+  **一次升級一顆晶片、點一下一條龍（2026-11-25）**：網頁把安裝與重啟串起來：確認後 `startUpdateChain` 先對要裝的主機 `POST /api/hosts/{host}/cli-update`（claude 逐台、codex 一台；codex 的 daemon 裝完仍照舊自動重啟該主機閒置的 codex），`cli_update_done` 全部 `ok` 後 `finishUpdateChain` 重讀狀態、`POST /api/bots/restart-idle`，再把仍在忙（非「還沒裝」）的 bot 以 `POST /api/bots/update-restart` 排成閒下來自動重啟；任一台 `ok:false` 就放棄串接（不重啟、不排程）。串接只活在開著的網頁裡；網頁中途關掉時，裝好的新版仍會顯示成「重啟待辦」，再按一次即可。daemon 對 claude 安裝仍回 `restart_required`／`restart_status: manual`，沒有新增後端機制。
 
   **子 agent 不給重啟入口（#1911）**：daemon 的 `/api/bots/{id}/restart` 對子 agent 一律 409（`refuse_child_restart`，§6.5a）。前端以共用的 `isChildBot`（`managed_by=child` 或有 `parent_bot_id`，跟 `neverRestartedReason` 同一條判斷）關掉所有會打 `/restart` 的入口：`UpdateBadge` 的 dot／inline 改畫不可點的被動提示（chip 版不畫）、`RuntimeDriftBadge` 的 ⟳ 改被動「待父 Bot 重啟」（codex fast 當場套用走 PATCH，照舊）、`BotSettingsPanel` 的橫幅只留文字「設定要重啟才生效，由父 Bot 安排重啟」、不放「立即重啟」。
 
@@ -3282,7 +3283,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   - **觸發**：`runners/upstream_update.rs` 的偵測迴圈（`upstream_update::tick`）推出 `notify:"update"` 的那一筆時，`changelog_translate::kick_detected` 在背景對 installed→target 那一段送一次（`auto_kick`，不經 HTTP，跟 `POST` 走同一個 `decide()`）。from＝磁碟上最舊的已安裝版，to＝`target_version`（沒有就上游最新版）。
   - **kind 範圍**：五種都自動翻：`claude`、`codex`、`herdr`、`agy`、`grok`（都有 changelog 來源，見 `changelog::feed_url`）。某 kind 抓不到 changelog 就安靜不送，不算失敗。
   - **去重**：同一 `(kind, from→to)` 同一份內容只翻一次（指紋去重，完成不重送）。背景翻與開框補翻共用同一份帳本，不會各打一次。
-  - **開框補翻**：只有 install／upstream 類的框自動送（`ClaudeInstallChip`、`HerdrUpdateChip`、`UpstreamChangelogBox`，帶 `autoTranslate`）。`absent` 且 `auto` 開著、這個 key 還沒送過，前端自動 `POST` 一次，不必按。per-bot 的 badge（`UpdateBadge`、`UpdateQuotaChip`、`CodexInstallChip`、`CodexUpdateHint`，區間是 bot 正在跑的版本→磁碟上的版本）**不自動送**，只留手動按鈕，免得幾顆 bot 各付一次。`GET` 仍只讀。`GET`／`POST` 回應都帶 `auto`。
+  - **開框補翻**：只有 install／upstream 類的框自動送（`UpdateQuotaChip`（安裝＋重啟合一晶片）、`HerdrUpdateChip`、`UpstreamChangelogBox`，帶 `autoTranslate`）。`absent` 且 `auto` 開著、這個 key 還沒送過，前端自動 `POST` 一次，不必按。per-bot 的 badge（`UpdateBadge`、`UpdateQuotaChip`、`CodexInstallChip`、`CodexUpdateHint`，區間是 bot 正在跑的版本→磁碟上的版本）**不自動送**，只留手動按鈕，免得幾顆 bot 各付一次。`GET` 仍只讀。`GET`／`POST` 回應都帶 `auto`。
   - **背景被預算擋下（#1948 review）**：`in_flight`（同時只能翻一筆）或 `hourly` 擋下時，排**一次**延後重送，同一組 kind|from|to 只排一個、不疊；`in_flight` 等 60 秒（`retry_floor`），`hourly` 等到 `retry_after` 但不短於 60 秒。那一次又被擋就不再排。只存在記憶體，重啟不補。使用者自設上限（`attempts`）不排。
   - **在飛涵蓋（#1948 review）**：別的帳本正在翻（`reserved`／`in_flight`）且涵蓋本次每一版原文時，回 `in_flight`（不送、不記 attempt、不扣預算），前端照常輪詢；完成後 `GET` 變 `completed`（`reused:true`）。自己那筆是 `failed` 時也先找涵蓋（完成的較寬範圍），涵蓋就直接用，不再送。
   - **覆蓋重用（#1948 review）**：算出 plan 後若本指紋 `absent`，先找 scope 相同（prompt 版、kind、lang、model、effort、輸入上限）、已完成、而且請求的**每一個**版本原文 sha256 都相同、譯文都在的帳本，直接組出那些版本的 `sections` 回 `completed`（`reused:true`、`summary` 留空），不送 API、不記新 attempt、不扣 hourly／attempts／in_flight。部分涵蓋不算，任一段缺或正文改了就走原流程。背景翻 (A,C] 之後，前端 (B,C]、(A,B] 都直接用；多一個未翻的新版 (A,D] 照常送。舊帳本沒有 scope，不被重用。

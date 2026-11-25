@@ -54,6 +54,7 @@ import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostB
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
+import { updateBatchCounts } from '../lib/updateBatch'
 import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
@@ -515,6 +516,9 @@ export interface StoreState {
   startCliUpdate: (host: string, kind: 'codex' | 'claude', targetVersion: string) => Promise<void>
   installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
   installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
+  updateChain: boolean
+  startUpdateChain: (plan: { claude?: { hosts: string[]; target: string }; codex?: { host: string; target: string } }) => Promise<void>
+  finishUpdateChain: () => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
   restoreBot: (botId: string) => Promise<boolean>
   agmDeleteAsk: AgmDeleteAsk | null
@@ -844,6 +848,7 @@ export const useStore = create<StoreState>((set, get) => {
   busy: {},
   restartBatch: null,
   updateRestartScheduled: [],
+  updateChain: false,
   cliUpdates: [],
   upstreamUpdates: {},
 
@@ -1953,6 +1958,27 @@ export const useStore = create<StoreState>((set, get) => {
 
   async installClaudeUpdates(hosts, targetVersion) {
     await Promise.allSettled(hosts.map((host) => get().startCliUpdate(host, 'claude', targetVersion)))
+  },
+
+  async startUpdateChain(plan) {
+    set({ updateChain: true })
+    const jobs: Promise<unknown>[] = []
+    if (plan.claude?.hosts.length) jobs.push(get().installClaudeUpdates(plan.claude.hosts, plan.claude.target))
+    if (plan.codex) jobs.push(get().installCodexUpdate(plan.codex.host, plan.codex.target).catch(() => undefined))
+    await Promise.allSettled(jobs)
+    if (get().updateChain && !get().cliUpdates.some((item) => item.kind === 'claude' || item.kind === 'codex')) set({ updateChain: false })
+  },
+
+  async finishUpdateChain() {
+    if (!get().updateChain) return
+    set({ updateChain: false })
+    await get().refreshState()
+    await get().restartIdleBots()
+    const s = get()
+    const ids = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+      .busy.filter((b) => !b.install && !s.updateRestartScheduled.includes(b.botId))
+      .map((b) => b.botId)
+    if (ids.length > 0) await get().scheduleUpdateRestart(ids)
   },
 
   cancelAgmDelete() {
@@ -3200,6 +3226,13 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
             : s.restartBatch,
       }))
       get().notify(r.ok ? 'info' : 'error', r.message)
+      if (get().updateChain) {
+        if (!r.ok) set({ updateChain: false })
+        else if (!get().cliUpdates.some((item) => item.kind === 'claude' || item.kind === 'codex')) {
+          void get().finishUpdateChain()
+          return
+        }
+      }
       void get().refreshState()
       return
     }

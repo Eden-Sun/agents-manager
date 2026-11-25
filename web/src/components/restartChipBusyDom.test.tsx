@@ -101,26 +101,14 @@ test('已排程：晶片有時鐘角標，確認框改成「取消自動重啟�
   await until(() => useStore.getState().updateRestartScheduled.length === 0, 'store 清掉')
 })
 
-test('有閒置的也有忙的：照舊重啟閒置的，勾選才把其餘排成自動重啟', async () => {
+test('有閒置的也有忙的：一次重啟閒置的，並自動把忙的排成閒下來自動重啟', async () => {
   useStore.setState({ bots: [bot('ready'), bot('busy1')], runs: { ready: run('ready'), busy1: working('busy1') }, busy: {} })
   await open()
-  const box = document.querySelector<HTMLInputElement>('.confirm-check input')!
-  assert.ok(box, '有「其餘閒下來也自動重啟」勾選')
-  await click(box)
-  await settle()
+  assert.equal(document.querySelector('.confirm-check'), null, '不再有要勾的選項')
   await click(buttonByText('重啟 1 顆')!)
-  await until(() => calls.some((c) => c.url.includes('update-restart')), '勾了才排程')
-  assert.ok(calls.some((c) => c.url.includes('restart-idle')), '閒置的照舊重啟')
+  await until(() => calls.some((c) => c.url.includes('update-restart')), '自動排程')
+  assert.ok(calls.some((c) => c.url.includes('restart-idle')), '閒置的重啟')
   assert.deepEqual(calls.find((c) => c.url.includes('update-restart'))!.body, { bot_ids: ['busy1'] })
-})
-
-test('有閒置的也有忙的、沒勾選：不排程', async () => {
-  useStore.setState({ bots: [bot('ready'), bot('busy1')], runs: { ready: run('ready'), busy1: working('busy1') }, busy: {} })
-  await open()
-  await click(buttonByText('重啟 1 顆')!)
-  await until(() => calls.some((c) => c.url.includes('restart-idle')), '重啟')
-  await settle()
-  assert.ok(!calls.some((c) => c.method === 'POST' && c.url.includes('update-restart')))
 })
 
 const restartCalls = () => calls.filter((c) => /\/bots\/[^/]+\/restart/.test(c.url) && !c.url.includes('restart-idle'))

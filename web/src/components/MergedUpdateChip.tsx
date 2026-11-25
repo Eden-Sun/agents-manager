@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { claudeInstallPlan, codexInstallPlan, updateBatchCounts } from '../lib/updateBatch'
-import { updateRange } from '../lib/updateRange'
+import { inFlightTurn, useStore } from '../store/store'
+import { updateBatchCounts } from '../lib/updateBatch'
+import { useInstallTodo } from '../hooks/useInstallTodo'
 import { mergedUpdateLabels } from '../lib/mergedUpdateLabels'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { UpgradeIcon } from './UpgradeIcon'
-import { CodexInstallChip } from './CodexInstallChip'
-import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { RestartChip } from './UpdateQuotaChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
 import { GrokUpdateChip } from './GrokUpdateChip'
@@ -34,34 +32,7 @@ export function MergedUpdateChip() {
   const busyCount = useStore(
     (s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).busy.filter((b) => !b.install).length,
   )
-  const installCount = useStore(
-    (s) =>
-      codexInstallPlan(
-        s.bots,
-        s.runs,
-        (id) => inFlightTurn(s, id) !== null,
-        (b) => projectHostName(s, b.project_id),
-        s.upstreamUpdates.codex,
-      )?.installCount ?? 0,
-  )
-  const codexNotice = useStore(
-    (s) =>
-      codexInstallPlan(
-        s.bots,
-        s.runs,
-        (id) => inFlightTurn(s, id) !== null,
-        (b) => projectHostName(s, b.project_id),
-        s.upstreamUpdates.codex,
-      )?.notice ?? '',
-  )
-  const claudePlanKey = useStore((s) => {
-    const p = claudeInstallPlan(s.upstreamUpdates.claude)
-    return p ? JSON.stringify(p) : ''
-  })
-  const claudePlan = claudePlanKey ? (JSON.parse(claudePlanKey) as NonNullable<ReturnType<typeof claudeInstallPlan>>) : null
-  const activeClaudeHosts = new Set(cli.filter((item) => item.kind === 'claude').map((item) => item.host))
-  const claudeCanStart = Boolean(claudePlan?.installHosts.some((host) => !activeClaudeHosts.has(host)))
-  const claudeVisible = Boolean(claudePlan) || activeClaudeHosts.size > 0
+  const todo = useInstallTodo()
   const herdrPlan = useHerdrPlan()
   const herdrActive = useHerdrUpdate((s) => s.active)
   const herdrResult = useHerdrUpdate((s) => s.result)
@@ -73,7 +44,7 @@ export function MergedUpdateChip() {
   const agyItem = agyPlan ? agyMenuItem(agyPlan) : null
   const [open, setOpen] = useState(false)
   const [at, setAt] = useState<CSSProperties>({})
-  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | 'grok' | 'agy' | null>(null)
+  const [which, setWhich] = useState<'restart' | 'herdr' | 'grok' | 'agy' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
@@ -88,25 +59,28 @@ export function MergedUpdateChip() {
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
-  const restartShown = Boolean(batch) || readyCount > 0 || busyCount > 0
-  const codexShown = cli.some((item) => item.kind === 'codex') || codexNotice !== ''
-  const { restartItem, codexItem, claudeItem, label } = mergedUpdateLabels({
+  const restartShown = Boolean(batch) || readyCount > 0 || busyCount > 0 || todo.count > 0 || todo.active.length > 0
+  const labels = mergedUpdateLabels({
     batch,
     cli,
     readyCount,
     busyCount,
-    installCount,
-    to: updateRange('codex', codexNotice, null).to,
-    claudeInstallCount: claudePlan?.installHosts.length ?? 0,
-    claudeTarget: claudePlan?.target ?? null,
-    claudeShown: claudeVisible,
-    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? t('讀取失敗')} → ${claudePlan.target}`).join(t('；')),
+    installCount: 0,
+    to: null,
     restartShown,
-    codexShown,
+    codexShown: false,
+    claudeShown: false,
     herdrItem,
     grokItem,
     agyItem,
   })
+  const restartItem =
+    todo.active.length > 0
+      ? t('安裝中 {hosts}…（裝完自動重啟）', { hosts: todo.active.map((item) => `${item.host} ${item.kind}`).join(t('、')) })
+      : todo.count > 0 && !batch
+        ? t('安裝新版並重啟（{n} 項待辦）', { n: todo.count + readyCount + busyCount })
+        : labels.restartItem
+  const label = todo.count > 0 || todo.active.length > 0 ? labels.label.replace(labels.restartItem, restartItem) : labels.label
   const close = () => setWhich(null)
 
   return (
@@ -146,30 +120,10 @@ export function MergedUpdateChip() {
                 className="head-menu-item"
                 role="menuitem"
                 tabIndex={-1}
-                disabled={!batch && readyCount === 0 && busyCount === 0}
-                onClick={() => (batch ? clear() : setWhich('restart'))}
+                disabled={!batch && todo.active.length === 0 && readyCount === 0 && busyCount === 0 && todo.count === 0}
+                onClick={() => (batch ? clear() : todo.active.length > 0 ? undefined : setWhich('restart'))}
               >
                 {restartItem}
-              </button> : null}
-              {codexShown ? <button
-                type="button"
-                className="head-menu-item"
-                role="menuitem"
-                tabIndex={-1}
-                disabled={cli.some((item) => item.kind === 'codex')}
-                onClick={() => setWhich('codex')}
-              >
-                {codexItem}
-              </button> : null}
-              {claudeVisible ? <button
-                type="button"
-                className="head-menu-item"
-                role="menuitem"
-                tabIndex={-1}
-                disabled={!claudeCanStart}
-                onClick={() => setWhich('claude')}
-              >
-                {claudeItem}
               </button> : null}
               {herdrItem ? <button
                 type="button"
@@ -205,8 +159,6 @@ export function MergedUpdateChip() {
           )
         : null}
       <RestartChip control={{ open: which === 'restart', close }} />
-      <CodexInstallChip control={{ open: which === 'codex', close }} />
-      <ClaudeInstallChip control={{ open: which === 'claude', close }} />
       <HerdrUpdateChip control={{ open: which === 'herdr', close }} />
       <GrokUpdateChip control={{ open: which === 'grok', close }} />
       <AgyUpdateChip control={{ open: which === 'agy', close }} />
