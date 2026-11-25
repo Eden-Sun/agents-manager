@@ -590,7 +590,7 @@ pub fn spawn_agy_poller(app: Arc<App>) {
 /// 登入偵測的間隔：只對「裝了 agy、目前記成未登入」的主機做一次 stat（遠端是一個很小的 ssh），或補一次還沒有讀數的探測。
 pub const LOGIN_WATCH: Duration = Duration::from_secs(20);
 
-/// 使用者在 shell 裡把 agy 登好之後，不重啟、不等 5 分鐘輪詢：憑證檔一出現就**先探測** `/usage`，探測成功才把
+/// 使用者在 shell 裡把 agy 登好之後，不重啟、不等下一輪輪詢：憑證檔一出現就**先探測** `/usage`，探測成功才把
 /// `tools.agy.logged_in` 翻成已登入（兩條額度同時回到那一格）。憑證檔只證明有一份 credential，不證明 agy 還接受它
 /// （過期、被撤銷時檔案還在），所以不能先翻再說（issue #870）：
 /// - 明確 auth 失敗（`Authentication required`，含逾時前已印出的）：維持未登入，5 分鐘內不再因憑證檔還在而探測；

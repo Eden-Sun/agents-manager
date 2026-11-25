@@ -11,8 +11,8 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// 每次探測要起一個約 200 MB 的執行檔。
-pub const AGY_POLL: std::time::Duration = std::time::Duration::from_secs(300);
+/// 與 codex 狀態列輪詢（[`crate::quota::CODEX_PANE_POLL`]）同頻率（60 秒）。
+pub const AGY_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 /// 測試縮短（探測逾時的測試不必真的等 40 秒）。daemon 的測試是以 `test-hooks`（dev-dependency）編 am-base，`cfg(test)` 對 am-base 本身不成立，所以兩個都要認；正式建置不開 `test-hooks`。
 pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(any(test, feature = "test-hooks")) { std::time::Duration::from_secs(10) } else { std::time::Duration::from_secs(40) };
 
@@ -509,5 +509,11 @@ mod tests {
         assert!(res[0].1.limit_hit.is_none());
         assert!((res[0].1.five_hour.as_ref().unwrap().used_pct - 40.0).abs() < 1e-6);
         assert!((res[0].1.seven_day.as_ref().unwrap().used_pct - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn agy_poll_matches_codex_pane_poll() {
+        assert_eq!(AGY_POLL, std::time::Duration::from_secs(60));
+        assert_eq!(AGY_POLL, crate::quota::CODEX_PANE_POLL);
     }
 }
