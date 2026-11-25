@@ -838,6 +838,64 @@
         assert_eq!(got.fable.unwrap().used_pct, 66.0, "the Fable window the statusLine cannot see survives");
     }
 
+    #[tokio::test]
+    async fn agy_usage_without_argon_clears_stale_argon_weekly_while_limit_hit_keeps_it() {
+        let app = crate::testing::env().await.app.clone();
+        let argon = Window {
+            observed_at: Some("2026-11-23T20:13:34.000Z".into()),
+            used_pct: 98.7,
+            resets_at: Some("2026-11-29T16:19:09.000Z".into()),
+        };
+        let initial = Quota {
+            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }),
+            seven_day: Some(Window { observed_at: None, used_pct: 20.0, resets_at: None }),
+            fable: None,
+            argon_weekly: Some(Box::new(argon.clone())),
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: "2026-11-23T20:13:34.000Z".into(),
+            source: "agy-usage".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "agy:ag2", initial).await;
+        let key = quota_key(LOCAL_HOST, "agy:ag2");
+        assert!(app.quotas.lock().await[&key].argon_weekly.is_some());
+
+        let partial = Quota {
+            five_hour: Some(Window { observed_at: None, used_pct: 100.0, resets_at: None }),
+            seven_day: None,
+            fable: None,
+            argon_weekly: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: "2026-11-24T10:00:00.000Z".into(),
+            source: "agy-limit-hit".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "agy:ag2", partial).await;
+        assert_eq!(app.quotas.lock().await[&key].argon_weekly.as_deref(), Some(&argon));
+
+        let fresh = Quota {
+            five_hour: Some(Window { observed_at: None, used_pct: 23.0, resets_at: None }),
+            seven_day: Some(Window { observed_at: None, used_pct: 45.0, resets_at: None }),
+            fable: None,
+            argon_weekly: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: "2026-11-25T03:09:43.000Z".into(),
+            source: "agy-usage".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "agy:ag2", fresh).await;
+        assert!(app.quotas.lock().await[&key].argon_weekly.is_none());
+    }
+
     use super::*;
 
     /// review3 c3 H2：Fable 桶只擋跑 Fable 的 bot；5h／7d／沒有桶名的擋整個帳號；不知道 bot 在跑什麼模型時保守地擋。

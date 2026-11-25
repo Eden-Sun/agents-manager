@@ -961,7 +961,7 @@ async fn set_inner(
             q.fable = prev.fable.clone();
         }
     }
-    if q.argon_weekly.is_none() {
+    if q.argon_weekly.is_none() && q.source != "agy-usage" {
         if let Some(prev) = quotas.get(&key) {
             q.argon_weekly = prev.argon_weekly.clone();
         }
