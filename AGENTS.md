@@ -60,11 +60,13 @@
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。整合完成後移除自己的 worktree：`git worktree remove .claude/worktrees/<你的 agent 名>`。
 
 ## daemon 重啟
-預設**不要**自己重啟（其他 agent 與使用者正在用）。回報時寫「需要重啟 daemon 才生效」。派工者明確允許時才用：
+預設**不要**自己重啟（其他 agent 與使用者正在用）。回報時寫「需要重啟 daemon 才生效」。派工者或使用者明確允許時，**禁止**在 agent shell 裡直接 `nohup … & disown`（`agy` 的 `run_command` 結束會連坐 SIGKILL 子行程樹，且非預設身份的 `$HOME` 會錯）；優先走 `scripts/ops/daemon-swap.sh` 或透過 `systemd-run --user`（Linux）／`launchctl submit`（Mac）呼叫 `scripts/ops/daemon-start.py` 脫離父行程樹並清掉 bot 環境變數：
 ```sh
-OLD=$(lsof -nP -iTCP:7788 -sTCP:LISTEN -t | head -1); [ -n "$OLD" ] && kill $OLD; sleep 2
-nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.log 2>&1 & disown
+lsof -ti :7788 | xargs -r kill; sleep 2
+XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --collect -p Type=forking -p KillMode=process \
+  -- python3 scripts/ops/daemon-start.py "$(pwd)" /home/ubuntu/.config/agents-manager/daemon.log
 ```
+啟動完必須**另開一個獨立指令**確認 7788 仍在監聽（不在同一個啟動指令內驗完就算過）。
 部署（自動或立即）等換版窗口超過 3 分鐘，daemon 會通知使用者（側欄「⏳ 部署等 N 分」＋AGM），由使用者按「現在換版」或「先等」調度（SPEC §18.10）；agent 不要自己 kill daemon 繞過窗口。
 
 ## 用 herdr 開子 agent
