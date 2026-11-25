@@ -42,9 +42,10 @@ fn exhaustion_line(line: &str) -> bool {
     [Some(s), nested].into_iter().flatten().any(banner_shape)
 }
 
+/// 一行（已剝掉前導記號）是不是橫幅形狀。機器代碼（整行就是代碼，或整行是帶代碼欄位的 JSON 物件，
+/// `{"type":"usage_limit_reached"…}`）不是句子，不受長度限制；其餘要求不超過 [`BANNER_MAX_CHARS`]。
 fn banner_shape(s: &str) -> bool {
     let s = s.to_ascii_lowercase().replace('’', "'");
-    // 機器代碼：整行就是代碼，或整行是 JSON 物件且帶代碼欄位（`{"type":"usage_limit_reached"…}`）。不是句子，不受長度限制。
     let code = |w: &str| matches!(w, "usage_limit" | "usage_limit_reached" | "usage_limit_exceeded");
     if code(s.trim_end_matches('.')) || (s.starts_with('{') && s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(code)) {
         return true;
