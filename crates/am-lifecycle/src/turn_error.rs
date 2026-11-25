@@ -37,19 +37,39 @@ pub fn is_quota_exhaustion(detail: &str) -> bool {
 /// 一行是不是額度用完的橫幅：前導記號與 `API Error:`／`ERROR:` 剝掉後，整行就是橫幅的形狀。
 /// 句中提到 `usage limit`（一般回覆、hook 的長說明）不算；超過 [`BANNER_MAX_CHARS`] 的也不是橫幅。
 fn exhaustion_line(line: &str) -> bool {
-    let s = banner_start(line).to_ascii_lowercase();
+    let s = banner_start(line);
+    let nested = after_resource_exhausted(s).map(banner_start);
+    [Some(s), nested].into_iter().flatten().any(banner_shape)
+}
+
+fn banner_shape(s: &str) -> bool {
+    let s = s.to_ascii_lowercase().replace('’', "'");
+    // 機器代碼：整行就是代碼，或整行是 JSON 物件且帶代碼欄位（`{"type":"usage_limit_reached"…}`）。不是句子，不受長度限制。
+    let code = |w: &str| matches!(w, "usage_limit" | "usage_limit_reached" | "usage_limit_exceeded");
+    if code(s.trim_end_matches('.')) || (s.starts_with('{') && s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(code)) {
+        return true;
+    }
     if s.chars().count() > BANNER_MAX_CHARS {
         return false;
     }
-    agy_line(&s) || is_quota_limit_lower(&s) || usage_limit_banner(&s) || matches!(s.trim_end_matches('.'), "usage_limit" | "usage_limit_exceeded")
+    agy_line(&s) || is_quota_limit_lower(&s) || usage_limit_banner(&s)
+}
+
+/// agy 的 gRPC 錯誤把橫幅包在 `RESOURCE_EXHAUSTED (code N): ` 後面，取它之後的部分。
+fn after_resource_exhausted(s: &str) -> Option<&str> {
+    let lower = s.to_ascii_lowercase();
+    let at = lower.find("resource_exhausted (code ")?;
+    let rest = &s[at..];
+    let colon = rest.find("): ")?;
+    Some(&rest[colon + "): ".len()..])
 }
 
 const BANNER_MAX_CHARS: usize = 200;
 
-/// `usage limit` 桶的橫幅（`You've hit your usage limit. …`、`Claude usage limit reached. …`）：`limit` 之後要接橫幅收尾。
+/// `usage limit` 桶的橫幅（`You've hit your usage limit. …`、`Claude usage limit reached. …`、`Usage limit reached · …`）：`limit` 之後要接橫幅收尾。
 fn usage_limit_banner(lower: &str) -> bool {
-    if let Some(rest) = lower.strip_prefix("claude usage limit reached") {
-        return banner_tail(rest);
+    if let Some(rest) = lower.strip_prefix("claude usage limit reached").or_else(|| lower.strip_prefix("usage limit reached")) {
+        return banner_tail(rest.strip_prefix(" again").unwrap_or(rest));
     }
     lower.strip_prefix("you've hit your usage limit").or_else(|| lower.strip_prefix("you've reached your usage limit")).is_some_and(banner_tail)
 }
@@ -96,7 +116,7 @@ fn agy_banner_at(lines: &[&str], i: usize) -> Option<String> {
 fn is_quota_limit_lower(lower: &str) -> bool {
     let reached = lower.starts_with("you've reached your") && banner_sentence(lower);
     let agy = agy_line(lower);
-    let hit = lower.starts_with("you've hit your") && banner_sentence(lower) && limit_bucket(lower) != LimitBucket::Unknown;
+    let hit = (lower.starts_with("you've hit your") || lower.starts_with("you hit your")) && banner_sentence(lower) && limit_bucket(lower) != LimitBucket::Unknown;
     reached || hit || agy
 }
 
@@ -1385,4 +1405,41 @@ mod quota_limit_tests {
         assert!(is_quota_limit(line));
         assert!(!is_quota_limit("API Error: Connection lost mid-response. The response above may be incomplete."));
     }
+
+    /// 2026-11 歷史實錄（DB 訊息節錄，去除個資）：撞限的錯誤細節漏判的形狀。
+    /// codex 的橫幅用全形撇號 `’`、前綴 `ERROR:`；grok 是 `You hit your …` 沒有撇號；terminal 是 `Usage limit reached · …`；
+    /// agy 的 gRPC 錯誤把橫幅包在 `RESOURCE_EXHAUSTED (code N): ` 後面。
+    #[test]
+    fn real_limit_details_from_codex_grok_terminal_and_agy_are_quota_exhaustion() {
+        for detail in [
+            "ERROR: You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 3rd, 2:00 PM.",
+            "ERROR: You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits.",
+            "You hit your weekly limit.",
+            "⚠ Usage limit reached · limit resets 11am (Asia/Taipei)",
+            "Usage limit reached · continuing automatically at 3:00pm",
+            "Usage limit reached again · continuing automatically at 3:00pm",
+            "generating and executing: RESOURCE_EXHAUSTED (code 8): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13m11s.",
+            "generating and executing: transport error (ResourceExhausted, HTTP 429): RESOURCE_EXHAUSTED (code 8): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13m11s.",
+            "usage_limit_reached",
+            "{\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached. Your limit resets at 2026-11-25T10:00:00Z.\",\"resets_at\":1795000000,\"plan_type\":\"plus\",\"request_id\":\"req_0000000000000000000000000000000000000000000000000000000000000000\"}}",
+        ] {
+            assert!(is_quota_exhaustion(detail), "{detail}");
+        }
+    }
+
+    /// 同一批實錄裡提到額度、但不是橫幅的句子：不算撞限。
+    #[test]
+    fn real_mentions_of_limits_in_prose_are_not_quota_exhaustion() {
+        for mention in [
+            "/upgrade to increase your usage limit.",
+            "排進佇列等了 12 分鐘：目標身分沒有額度（ERROR: You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage）",
+            "- **辨識不能放寬：** 必須同時看到「N-hour usage limit」和兩個選項才算是這個選單",
+            "- **改法**：`is_quota_exhaustion` 改為逐行判。",
+            "codex 畫面上顯示「You have 2 usage limit reset available」",
+            "- 認出 usage_limit 代碼那條就好，句中提到不算",
+        ] {
+            assert!(!is_quota_exhaustion(mention), "{mention}");
+        }
+    }
 }
+
