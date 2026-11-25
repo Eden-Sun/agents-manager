@@ -12,7 +12,8 @@
 use super::runner;
 use super::store::{self, Occurrence, Schedule};
 use crate::db;
-use crate::lifecycle::{self, LcError, StartOpts};
+use crate::events::ports::TurnCommands;
+use crate::lifecycle::{self, LcError, QueueClass, StartOpts};
 use crate::state::App;
 use anyhow::Result;
 use axum::extract::{Path, State};
@@ -25,6 +26,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// fork 重啟後等新 run 進入 running 的上限。
+const SEED_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 240 });
+const SEED_TEXT: &str = "建立排程基準對話，請只回 OK";
 const READY_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 120 });
 
 fn up(e: impl std::fmt::Display) -> LcError {
@@ -125,6 +128,48 @@ async fn lock_latest(app: &Arc<App>, bot: &db::Bot, by: &str) -> Result<Snapshot
     get(&app.db, &bot.id).await.map_err(up)?.ok_or_else(|| up("snapshot vanished"))
 }
 
+/// 全新 agy 啟動後還沒有對話（第一則訊息送出才產生，hook 只回報狀態）：送一則 daemon 來源的種子訊息，等這一回合完成，
+/// 再把 pane 開著的對話綁到 run（`agy_session::load`，遠端經 ssh 讀那台的 /proc／lsof），讓 `runs.native_session_id` 有值。
+async fn seed_agy(app: &Arc<App>, bot: &db::Bot) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + SEED_TIMEOUT;
+    let crid = format!("base-seed-{}", db::ulid());
+    let sent = loop {
+        match app.prompt_relayed_queueable(&bot.id, SEED_TEXT, &crid, None, QueueClass::DaemonNotice).await {
+            Ok(out) => break out,
+            Err(LcError::Conflict(v)) if v.get("retryable").and_then(Value::as_bool) == Some(true) && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(if cfg!(test) { 50 } else { 2000 })).await;
+            }
+            Err(e) => return Err(format!("種子訊息送不出去（{e:?}）")),
+        }
+    };
+    loop {
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(&sent.turn_id).fetch_optional(&app.db).await.map_err(|e| e.to_string())?;
+        match status.as_deref() {
+            Some("completed" | "completed_fallback") => break,
+            Some("failed") | None => return Err("種子回合失敗或被撤回，agy 沒有建立對話".into()),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("等了 {} 秒，agy 還沒答完種子訊息（可能卡在登入或提問）", SEED_TIMEOUT.as_secs()));
+        }
+        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 500 })).await;
+    }
+    let bind_until = tokio::time::Instant::now() + Duration::from_secs(if cfg!(test) { 1 } else { 20 });
+    loop {
+        if latest_session(&app.db, &bot.id).await.map_err(|e| format!("{e:?}"))?.is_some() {
+            return Ok(());
+        }
+        if let Some(run) = db::active_run(&app.db, &bot.id).await.map_err(|e| e.to_string())? {
+            let host = db::bot_host(&app.db, &bot.id).await.map_err(|e| e.to_string())?;
+            let _ = lifecycle::agy_session::load(app.as_ref(), &run, &host).await;
+        }
+        if tokio::time::Instant::now() >= bind_until {
+            return Err("種子回合完成了，但讀不到 agy 的對話 id（pane 沒有開著對話檔）".into());
+        }
+        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 50 } else { 1000 })).await;
+    }
+}
+
 /// 勾 `from_base` 前：目標 bot 沒有基準就自動製作（不回 400）。有 native session 就鎖；完全沒有就照正常方式啟動一次、
 /// 等它回報 session 再鎖。bot 不合格（不是這個專案可接排程的 bot）時什麼都不做，由後續檢查回對的錯。
 pub(super) async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<(), LcError> {
@@ -145,6 +190,9 @@ pub(super) async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Re
     if latest_session(&app.db, bot_id).await?.is_none() {
         if db::active_run(&app.db, bot_id).await.map_err(up)?.is_none() {
             Box::pin(lifecycle::start_bot_with(app, bot_id, StartOpts::default())).await.map_err(|e| failed(format!("啟動失敗（{e:?}）")))?;
+        }
+        if bot.kind == "agy" {
+            seed_agy(app, &bot).await.map_err(failed)?;
         }
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         while latest_session(&app.db, bot_id).await?.is_none() {

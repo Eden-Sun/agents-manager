@@ -941,6 +941,50 @@ mod from_base {
     }
 
     #[tokio::test]
+    async fn a_fresh_agy_gets_a_seed_message_before_its_base_is_locked() {
+        let e = testing::env().await;
+        let ag = agy_bot(&e, "ag").await;
+        let src = agy_conversation();
+        let rule = "─".repeat(40);
+        e.herdr.set_screen("*", &format!("● hi\n{rule}\n>\n{rule}\n  Gemini 3.8 Flash · high\n"));
+        let (pool, id, conv_src) = (e.app.db.clone(), ag.id.clone(), src.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let conv = db::conversation_id(&pool, &id).await.unwrap();
+                let turn: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id = ? AND prompt_text LIKE '%建立排程基準對話%'").bind(&conv).fetch_optional(&pool).await.unwrap();
+                let Some(turn) = turn else { continue };
+                sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&turn).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE runs SET native_session_id = ? WHERE bot_id = ? AND ended_at IS NULL").bind(&conv_src).bind(&id).execute(&pool).await.unwrap();
+                break;
+            }
+        });
+        let mut body = daily(&ag.id, "x");
+        body.from_base = true;
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        let snap = base::get(&e.app.db, &ag.id).await.unwrap().expect("種子回合後鎖了基準");
+        assert_eq!(snap.locked_by, "schedule");
+        assert_ne!(snap.session_id, src, "鎖的是凍結複本");
+        assert_eq!(agy_cascade(&snap.session_id), snap.session_id);
+        let conv = db::conversation_id(&e.app.db, &ag.id).await.unwrap();
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user' AND content LIKE '%建立排程基準對話%'").bind(&conv).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n, 1, "只送一則種子");
+    }
+
+    #[tokio::test]
+    async fn an_agy_that_never_answers_the_seed_times_out_with_a_clear_reason() {
+        let e = testing::env().await;
+        let ag = agy_bot(&e, "ag").await;
+        let rule = "─".repeat(40);
+        e.herdr.set_screen("*", &format!("● hi\n{rule}\n>\n{rule}\n  Gemini 3.8 Flash · high\n"));
+        let mut body = daily(&ag.id, "x");
+        body.from_base = true;
+        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("沒答完要失敗");
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "base_snapshot_create_failed" && v["message"].as_str().unwrap().contains("還沒答完種子訊息")), "{err:?}");
+        assert!(base::get(&e.app.db, &ag.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn turning_on_from_base_builds_the_missing_base() {
         let e = testing::env().await;
         let cx = codex_bot(&e, "cx").await;
