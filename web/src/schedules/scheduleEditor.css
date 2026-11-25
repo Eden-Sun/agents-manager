@@ -1,3 +1,7 @@
+.schedule-editor {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 
 .schedule-editor .schedule-prompt {
   font-family: var(--font-mono);

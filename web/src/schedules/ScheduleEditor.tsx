@@ -30,7 +30,7 @@ import { RunnerTag } from './RunnerTag'
 import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import { copyScheduleName } from './scheduleCopy'
 import { ScheduleWhenSlots } from './ScheduleWhenSlots'
-import { msg, t, useT } from '../lib/i18n'
+import { msg, t, tr, useT } from '../lib/i18n'
 import './schedules.css'
 import './scheduleEditor.css'
 
@@ -705,7 +705,7 @@ export function ScheduleEditor({
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id} className="schedule-history-item">
                   <p className="schedule-history-meta">
-                    {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}{(() => { const d = totalDurationMs(o, recentNow); return d === null ? '' : ` · ${o.status === 'pending' || o.status === 'queued' ? t('已進行 {d}', { d: formatDuration(d) }) : formatDuration(d)}` })()}
+                    {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {tr(OCCURRENCE_LABEL[o.status])}{(() => { const d = totalDurationMs(o, recentNow); return d === null ? '' : ` · ${o.status === 'pending' || o.status === 'queued' ? t('已進行 {d}', { d: formatDuration(d) }) : formatDuration(d)}` })()}
                     {o.error ? t('（{error}）', { error: o.error }) : ''}
                     {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
                   </p>
