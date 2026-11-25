@@ -654,9 +654,9 @@ pub fn cold_resume_choice(screen: &str) -> Option<ResumeChoice> {
 
 /// 2.1.287 的 held message 框：別的 session 用 SendMessage 送來、但兩邊權限模式不同，訊息被扣住等使用者決定（#775）。
 /// 長這樣：實線下一行 `Held message from another session`、來源與說明、`Message body …:`、兩條 `╌` 虛線夾住訊息內文，
-/// 最底是**沒有編號**的兩個選項 `❯ Deny — …`／`Deliver this message to Claude`，[`open_choice_menu`] 認不到。
+/// 最底是**沒有編號**的選項 `❯ Deny — …`／`Deliver this message to Claude`（2.1.332 起可能再多一行 `Always deliver`），[`open_choice_menu`] 認不到。
 ///
-/// 要同時有：標題那一行（正上方是實線）、標題之後兩個選項各自成行而且剛好一個帶游標、最後一個選項底下只剩腳註
+/// 要同時有：標題那一行（正上方是實線）、標題之後 Deny、Deliver 兩個選項（有的話加上 Always deliver）各自成行而且剛好一個帶游標、最後一個選項底下只剩腳註
 /// （沒有對話輸出）、輸入列不是空的——回覆裡引用這段原文時底下一定還有空的輸入列。真畫面在
 /// `lifecycle/fixtures/claude-2.1.287-held-message.txt`、`claude-2.1.287-bash-with-held-queued.txt`（排在 Bash 框後面時不算開著）。
 pub fn held_message_prompt_start(screen: &str) -> Option<usize> {
@@ -685,8 +685,12 @@ fn held_message_prompt_start_inner(screen: &str) -> Option<usize> {
     };
     let Some(deny) = after.iter().rposition(|l| option(l, "deny").is_some()) else { return None };
     let Some(deliver) = after.iter().rposition(|l| option(l, "deliver this message").is_some()) else { return None };
-    let last = deny.max(deliver);
-    let cursors = usize::from(option(after[deny], "deny") == Some(true)) + usize::from(option(after[deliver], "deliver this message") == Some(true));
+    let always = after.iter().rposition(|l| option(l, "always deliver").is_some());
+    let last = always.map_or(deny.max(deliver), |a| a.max(deny).max(deliver));
+    let cursor_at = |i: usize, label: &str| usize::from(option(after[i], label) == Some(true));
+    let cursors = cursor_at(deny, "deny")
+        + cursor_at(deliver, "deliver this message")
+        + always.map_or(0, |a| cursor_at(a, "always deliver"));
     if cursors != 1 || after.len() - 1 - last > MENU_BELOW_LINES || after[last + 1..].iter().any(|l| is_agent_output_line(l)) {
         return None;
     }
@@ -1317,6 +1321,8 @@ pub mod screens {
     pub const PERMISSION_2287_READ_2_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.287-read-permission-2-of-3.txt");
     /// 別的 session（權限模式不同）SendMessage 進來，被扣住等使用者決定：選項沒有編號。
     pub const HELD_MESSAGE_2287: &str = include_str!("lifecycle/fixtures/claude-2.1.287-held-message.txt");
+    /// 2.1.332 在 held message 多了 `Always deliver`：合成（依 changelog，未在本機實錄），在 2.1.287 真畫面底下加一行。
+    pub const HELD_MESSAGE_2332_ALWAYS: &str = include_str!("lifecycle/fixtures/claude-2.1.332-held-message-always.txt");
     /// Bash 框開著時又來一則 held message：舊的 Bash 框在上，held message 只在對話裡記一行 `● Held peer message …`。
     pub const PERMISSION_2287_BASH_WITH_HELD_QUEUED: &str = include_str!("lifecycle/fixtures/claude-2.1.287-bash-with-held-queued.txt");
     /// 2026-10-02 grok 1.0.46 在沒信任過的目錄的真畫面（拋棄式 tmux；信任框置中，標題與選項各自成行，最底一行是版本）。
@@ -2185,6 +2191,23 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         );
         assert!(is_held_message_prompt(&payload_title), "payload 裡重複的標題列不該使真框消失");
         assert_eq!(permission_prompt(&payload_title).as_deref(), Some("Held message"));
+    }
+
+    #[test]
+    fn held_message_with_always_deliver_is_still_recognized() {
+        use super::screens::{HELD_MESSAGE_2287, HELD_MESSAGE_2332_ALWAYS};
+        assert!(is_held_message_prompt(HELD_MESSAGE_2332_ALWAYS), "Deny 游標在上、Always deliver 在底");
+        assert_eq!(permission_prompt(HELD_MESSAGE_2332_ALWAYS).as_deref(), Some("Held message"));
+        assert!(awaits_menu_choice(HELD_MESSAGE_2332_ALWAYS));
+        let on_always = HELD_MESSAGE_2332_ALWAYS.replace(" ❯ Deny", "   Deny").replace("   Always deliver", " ❯ Always deliver");
+        assert!(is_held_message_prompt(&on_always), "游標在 Always deliver 上仍算開著");
+        let on_deliver = HELD_MESSAGE_2332_ALWAYS.replace(" ❯ Deny", "   Deny").replace("   Deliver this message", " ❯ Deliver this message");
+        assert!(is_held_message_prompt(&on_deliver));
+        let two_cursors = HELD_MESSAGE_2332_ALWAYS.replace("   Always deliver", " ❯ Always deliver");
+        assert!(!is_held_message_prompt(&two_cursors), "兩個游標＝畫面讀壞，不判");
+        let no_cursor = HELD_MESSAGE_2332_ALWAYS.replace(" ❯ Deny", "   Deny");
+        assert!(!is_held_message_prompt(&no_cursor), "沒有游標不判");
+        assert!(is_held_message_prompt(HELD_MESSAGE_2287), "2.1.287 原樣照認");
     }
 
     #[test]
