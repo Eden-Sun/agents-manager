@@ -883,7 +883,7 @@ pub async fn type_text(
     };
     let read = || read_composer(client, &pane);
 
-    let before = match read().await {
+    let mut before = match read().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(run = %run.id, error = %e, "could not read the pane immediately before typing");
@@ -893,6 +893,14 @@ pub async fn type_text(
     if bot.kind == "agy" && crate::agy_screen::shortcuts_help_open(&before) {
         client.pane_send_keys(&pane, &["esc"]).await?;
         return Ok(Typing::Done(Delivered::NotAttempted { reason: "shortcuts_help_open", retry: true }));
+    }
+    if bot.kind == "agy" && crate::agy_screen::feedback_survey_open(&before) {
+        client.pane_send_keys(&pane, &["0"]).await?;
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+        before = read().await?;
+        if crate::agy_screen::feedback_survey_open(&before) {
+            return Ok(Typing::Done(Delivered::NotAttempted { reason: "feedback_survey_open", retry: true }));
+        }
     }
     if let Err(not) = composer_ready(app, run, &bot.kind, &before).await {
         return Ok(Typing::Done(not));
@@ -905,6 +913,11 @@ pub async fn type_text(
         client.pane_send_keys(&pane, &["esc"]).await?;
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         return Ok(Typing::Done(Delivered::NotAttempted { reason: "shortcuts_help_open", retry: true }));
+    }
+    if bot.kind == "agy" && crate::agy_screen::feedback_survey_open(&seen) {
+        client.pane_send_keys(&pane, &["0"]).await?;
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+        seen = read().await?;
     }
     if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&seen).is_some() {
         if super::claude_resume_menu::accept_on(app, run, client).await.is_err() {

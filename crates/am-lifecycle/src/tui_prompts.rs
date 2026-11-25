@@ -1116,7 +1116,28 @@ fn warn_survey_give_up(run: &db::Run, reason: &'static str) {
 }
 
 /// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
+async fn dismiss_agy_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), run: &db::Run) -> bool {
+    let Some(target) = current_survey_target(app, run).await else { return false };
+    let Ok(read) = target.client.pane_read(&target.pane, "visible", 80).await else { return false };
+    if read.pane_id != target.pane || read.source != "visible" || read.truncated || !am_base::agy_screen::feedback_survey_open(&read.text) {
+        return false;
+    }
+    let Ok(again) = target.client.pane_read(&target.pane, "visible", 80).await else { return false };
+    if !am_base::agy_screen::feedback_survey_open(&again.text) || !survey_target_is_current(app, &target).await {
+        return false;
+    }
+    if let Err(e) = target.client.pane_send_keys(&target.pane, &["0"]).await {
+        tracing::warn!(run = %run.id, error = %e, "agy 回饋問卷送 0 失敗");
+        return false;
+    }
+    tracing::info!(run = %run.id, bot = %run.bot_id, "agy 回饋問卷：自動選 0（Skip）");
+    true
+}
+
 pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyFingerprints), run: &db::Run) -> bool {
+    if matches!(db::bot(app.db(), &run.bot_id).await, Ok(Some(bot)) if bot.kind == "agy") {
+        return dismiss_agy_survey(app, run).await;
+    }
     let Some(target) = current_survey_target(app, run).await else { return false };
     let Some(read) = read_actionable_survey(&target, None).await else {
         app.survey_fingerprints().lock().await.remove(&run.id);

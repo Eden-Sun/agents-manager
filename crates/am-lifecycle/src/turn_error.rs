@@ -326,7 +326,11 @@ fn is_content_blocked_detail(lines: &[&str], at: usize) -> bool {
 pub fn api_error_line(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
+    let survey = crate::agy_screen::feedback_survey_span(screen);
     for (i, line) in lines.iter().enumerate().skip(start).rev() {
+        if survey.is_some_and(|(top, bottom)| (top..=bottom).contains(&i)) {
+            continue;
+        }
         let raw = undecorated(line);
         let body = body_of(raw);
         if is_api_error(body) {
@@ -717,6 +721,16 @@ mod tests {
     const AGY_JOINED: &str = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13m11s.";
 
     #[test]
+    fn an_agy_quota_banner_above_the_feedback_survey_is_still_the_turn_error() {
+        let screen = format!(
+            "❯ prompt\n{AGY_WRAPPED_HEAD}\n{AGY_WRAPPED_TAIL}\n How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n? for shortcuts\n"
+        );
+        assert_eq!(api_error_line(&screen).as_deref(), Some(AGY_JOINED));
+        let survey_only = "❯ prompt\n How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n? for shortcuts\n";
+        assert_eq!(api_error_line(survey_only), None);
+    }
+
+    #[test]
     fn a_wrapped_agy_banner_with_a_warning_glyph_is_detected_from_the_screen() {
         let screen = format!("❯ prompt\n{AGY_WRAPPED_HEAD}\n{AGY_WRAPPED_TAIL}\n─────\n❯\n");
         assert_eq!(api_error_line(&screen).as_deref(), Some(AGY_JOINED));
@@ -761,6 +775,8 @@ mod tests {
         assert_eq!(api_error_line(tail_only), None);
         let not_a_duration = "❯ x\n⚠ Individual quota reached. Resets in\nPlease wait a while.\n─────\n❯\n";
         assert_eq!(api_error_line(not_a_duration), None);
+        let survey_quoted_in_reply = "❯ x\nHow's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n─────\n>\n─────\n? for shortcuts\n";
+        assert_eq!(api_error_line(survey_quoted_in_reply), None);
         let prose = "The quota reached its limit; resets in spring.";
         assert!(!is_quota_limit(prose));
         assert!(!is_quota_exhaustion(prose));

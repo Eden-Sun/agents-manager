@@ -122,6 +122,51 @@ pub fn shortcuts_help_open(screen: &str) -> bool {
     })
 }
 
+const FEEDBACK_QUESTION: &str = "how's the cli experience so far?";
+const FEEDBACK_OPTION_ROWS: usize = 3;
+const FEEDBACK_FOOTER: &str = "? for shortcuts";
+
+fn words(line: &str) -> String {
+    norm(line).replace('’', "'").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
+    let rows: Vec<(usize, String)> = screen
+        .lines()
+        .enumerate()
+        .map(|(n, l)| (n, words(l)))
+        .filter(|(_, w)| !w.is_empty())
+        .collect();
+    for k in 0..rows.len() {
+        if !rows[k].1.contains(FEEDBACK_QUESTION) {
+            continue;
+        }
+        let mut options = String::new();
+        let mut last = None;
+        for j in k + 1..rows.len().min(k + 1 + FEEDBACK_OPTION_ROWS) {
+            let w = &rows[j].1;
+            if ["[0]", "[1]", "[2]", "[3]"].iter().any(|t| w.contains(*t)) {
+                options.push_str(w);
+                options.push(' ');
+                last = Some(j);
+            }
+        }
+        let Some(last) = last else { continue };
+        let others = ["[1] good", "[2] fine", "[3] bad"].iter().filter(|label| options.contains(**label)).count();
+        if !options.contains("[0] skip") || others < 2 {
+            continue;
+        }
+        if rows[last + 1..].iter().all(|(_, w)| w.contains(FEEDBACK_FOOTER)) {
+            return Some((rows[k].0, rows[last].0));
+        }
+    }
+    None
+}
+
+pub fn feedback_survey_open(screen: &str) -> bool {
+    feedback_survey_span(screen).is_some()
+}
+
 /// 一行是不是輸入框的上下框線（整行都是 `─`，至少 20 格）。
 fn is_rule(line: &str) -> bool {
     let t = crate::composer_parse::strip_ansi(line);
@@ -286,6 +331,22 @@ mod tests {
    No, exit
 ";
     const PERMISSION: &str = "\n ⚡ Run this command?\n\n   git status\n   Reason: check the tree\n\n > Allow once\n   Deny\n";
+    #[test]
+    fn feedback_survey_is_told_from_quoted_text() {
+        let survey = " How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n? for shortcuts      Gemini 4 Neon · high\n";
+        assert!(feedback_survey_open(survey));
+        assert_eq!(feedback_survey_span(survey), Some((0, 1)));
+        let under_banner = "❯ 幫我查\n⚠ Individual quota reached. Resets in\n13m11s.\n How’s the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n? for shortcuts\n";
+        assert_eq!(feedback_survey_span(under_banner), Some((3, 4)));
+        let quoted_then_composer = "❯ 幫我查\n你看到的是：\n How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n─────────────────────\n>\n─────────────────────\n? for shortcuts\n";
+        assert!(!feedback_survey_open(quoted_then_composer));
+        let quoted_then_prose = "How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n我剛剛把問卷原樣貼給你。\n";
+        assert!(!feedback_survey_open(quoted_then_prose));
+        let prose = "The survey asks How's the CLI experience so far? and [0] Skip is one choice.\nmore\n";
+        assert!(!feedback_survey_open(prose));
+        assert!(!feedback_survey_open("[1] Good  [2] Fine  [3] Bad  [0] Skip\n? for shortcuts\n"));
+    }
+
     #[test]
     fn shortcuts_help_is_told_from_the_composer() {
         let help = " Keyboard Shortcuts\n > /   Open slash commands\n  [1-14 of 27 items]\n Keyboard: ↑/↓ Navigate  ←/→ Switch View  esc Close\n";
