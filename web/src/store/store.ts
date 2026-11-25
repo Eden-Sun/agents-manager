@@ -3124,12 +3124,16 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'quota_updated': {
       if (!isRec(data)) return
       const before = get().quota
+      const keepSnooze = (k: string, q: QuotaMap[string], cur: QuotaMap): QuotaMap[string] =>
+        q && q.reset_offer_snoozed_until === undefined && cur[k]?.reset_offer_snoozed_until
+          ? { ...q, reset_offer_snoozed_until: cur[k]!.reset_offer_snoozed_until }
+          : q
       const kinds = pick(data, 'kinds')
       if (isRec(kinds)) {
         const entries = Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v, k)] as const)
         noteQuotaDirty(entries.map(([k]) => k))
         set((s) => ({
-          quota: { ...s.quota, ...Object.fromEntries(entries) },
+          quota: { ...s.quota, ...Object.fromEntries(entries.map(([k, q]) => [k, keepSnooze(k, q, s.quota)])) },
         }))
         if (quotaLimitChanged(before, entries)) void get().refreshState()
         return
@@ -3138,7 +3142,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!kind) return
       noteQuotaDirty([kind])
       const quota = toKindQuota(pick(data, 'quota'), kind)
-      set((s) => ({ quota: { ...s.quota, [kind]: quota } }))
+      set((s) => ({ quota: { ...s.quota, [kind]: keepSnooze(kind, quota, s.quota) } }))
       if (quotaLimitChanged(before, [[kind, quota]])) void get().refreshState()
       return
     }

@@ -981,6 +981,7 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     stale: bool(pick(v, 'stale'), false),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
     held_bots: toHeldBots(pick(v, 'held_bots')),
+    reset_offer_snoozed_until: 'reset_offer_snoozed_until' in v ? optStr(pick(v, 'reset_offer_snoozed_until')) : undefined,
   }
 }
 
