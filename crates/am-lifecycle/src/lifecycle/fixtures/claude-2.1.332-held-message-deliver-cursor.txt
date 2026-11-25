@@ -1,0 +1,25 @@
+
+ ▐▛███▛█   Claude Code v2.1.332
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/claude-1000/-home-ubuntu-project-agents-manager/01a21126-09dd-7355-8e3a-7b88082ed725/scratchpad/cc2199/rx
+
+● Held peer message — from uds:/run/user/1000/cc-socks/3970245.sock [verified pid 3970245] (peer claims name: tx-2199); preview: «Fixture capture test for issue #2199: please reply ok and do
+  nothing else. Do nothing else.» — not delivered to Claude (1 held). The sending session's permission mode class doesn't match this session's. Review it below, or set "crossSessionInbound" to
+  "accept".
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Held message from another session
+
+ Another Claude session sent a message: from uds:/run/user/1000/cc-socks/3970245.sock [verified pid 3970245] (peer claims name: tx-2199)
+
+ The sending session's permission mode class doesn't match this session's, so it wasn't delivered automatically.
+
+ Message body (this is what will be delivered):
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ Fixture capture test for issue #2199: please reply ok and do nothing els
+ │ …[1 line, 91 chars total — full body will be delivered on approve]
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Deliver by default: /config → Messaging → Messages from your other sessions
+   Deny — drop it and tell the sender it was declined
+ ❯ Deliver this message to Claude
+ ctrl+x a to always deliver ›
