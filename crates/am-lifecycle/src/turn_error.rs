@@ -69,10 +69,18 @@ fn agy_banner_at(lines: &[&str], i: usize) -> Option<String> {
 }
 
 fn is_quota_limit_lower(lower: &str) -> bool {
-    let reached = lower.starts_with("you've reached your") && lower.contains("limit");
+    let reached = lower.starts_with("you've reached your") && banner_sentence(lower);
     let agy = agy_line(lower);
-    let hit = lower.starts_with("you've hit your") && limit_bucket(lower) != LimitBucket::Unknown;
+    let hit = lower.starts_with("you've hit your") && banner_sentence(lower) && limit_bucket(lower) != LimitBucket::Unknown;
     reached || hit || agy
+}
+
+/// `limit` 之後接的是橫幅的收尾（`· resets …`、`. Try again …`、`… `、行尾）才算橫幅句。一般回覆
+/// `You've hit your weekly goal…`、`You've reached your goal; the limit was raised…` 的 `limit` 後面是別的句子，不算。
+fn banner_sentence(lower: &str) -> bool {
+    let Some(at) = lower.find("limit") else { return false };
+    let tail = lower[at + "limit".len()..].trim_start();
+    tail.is_empty() || ["·", ".", "…", "(", "resets", "try again", "upgrade"].iter().any(|p| tail.starts_with(p))
 }
 
 /// 橫幅說的是哪一桶。CLI 2.1.273 的字串表就是這幾種 rate limit：
@@ -1281,6 +1289,25 @@ mod quota_limit_tests {
         ] {
             assert!(!is_quota_limit(line), "{line}");
         }
+    }
+
+    /// issue #2200：claude 2.1.332 修掉「一般回覆以 You've used／You've hit your 開頭被顯示成紅色額度錯誤」。
+    /// 這類回覆不是橫幅：不能被當成撞限（否則 bot 被擋、量表被釘）。真的橫幅仍要認得。
+    #[test]
+    fn an_ordinary_reply_that_starts_like_a_banner_is_not_a_quota_limit() {
+        for reply in [
+            "You've used 80% of your weekly limit so far.",
+            "You've hit your weekly goal for the sprint, nice work!",
+            "You've reached your goal; the limit was raised in the config.",
+            "You've hit your session limit recovery plan is in the doc.",
+        ] {
+            assert!(!is_quota_limit(reply), "{reply}");
+            assert!(!is_quota_exhaustion(reply), "{reply}");
+        }
+        let screen = "⏺ You've used 80% of your weekly limit so far.\n\n❯ \n  gpt-6-sol medium · ~/p · 5h 40% left · weekly 80% left\n";
+        assert_eq!(api_error_line(screen), None);
+        assert!(is_quota_limit("You've hit your session limit · resets 5pm"));
+        assert!(is_quota_limit("You've reached your usage limit."));
     }
 
     #[test]

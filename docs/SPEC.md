@@ -754,7 +754,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **觸發**：同一個 `working → idle` 邊、同一次 `recent_unwrapped` 讀取；備援有沒有出手都要跑。
 - **判定**（`turn_error.rs`）：從畫面底部往上最多 30 行，剝框線與前導記號後，第一個非 chrome 行以 `API error`（不分大小寫）開頭，
   或是額度拒絕（`You've reached your Fable limit. Run /usage-credits …`）就命中。chrome = `is_noise`／`is_activity_shape` + 空輸入框列 + 更新通知行。
-  額度拒絕認兩種前綴（CLI 2.1.271 的橫幅前綴表同時有 `You've hit your` 與 `You've reached your`）：`reached your … limit` 照舊；`hit your … limit` 只認速率桶。
+  額度拒絕認兩種前綴（CLI 2.1.271 的橫幅前綴表同時有 `You've hit your` 與 `You've reached your`）：`reached your … limit` 照舊；`hit your … limit` 只認速率桶。兩者都要求 `limit` 後接橫幅收尾（`·`、`.`、`…`、`(`、`resets`、`try again`、`upgrade` 或行尾），所以一般回覆如 `You've used …`、`You've hit your weekly goal…` 不會被當成額度橫幅（issue #2200）。
   標成用完的桶照字面分（CLI 2.1.273 的字串表）：`session limit`→5h、`weekly limit`→7d、`Opus limit`／`Sonnet limit`→**模型自己的週桶**（`opus`／`sonnet`）、
   `Fable limit`→Fable 桶，認不出才先 5h 再 7d。模型桶不標任何量表（daemon 沒有那格），重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 跟 `weekly_all` 同一個週期；
   它們只擋跑那個模型的 bot（§18.8b），以前記成 7d 會讓同帳號所有 claude bot 停派到週重置（review3 c4 M1）。
