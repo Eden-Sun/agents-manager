@@ -82,7 +82,7 @@
 }
 
 .project-schedules .project-schedule-bot.warn {
-  color: var(--warn, #b7791f);
+  color: var(--warn);
 }
 
 .project-schedule-row {
@@ -123,24 +123,24 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--text-dim, #8a8f98);
+  background: var(--text-dim);
 }
 
 .project-schedule-dot.ok {
-  background: var(--ok, #2f855a);
+  background: var(--ok);
 }
 
 .project-schedule-dot.fail {
-  background: var(--danger, #b42318);
+  background: var(--danger);
 }
 
 .project-schedule-dot.waiting {
-  background: var(--warn, #8a6400);
+  background: var(--warn);
 }
 
 .project-schedule-dot.off {
   background: transparent;
-  border: 1.5px solid var(--text-dim, #8a8f98);
+  border: 1.5px solid var(--text-dim);
   box-sizing: border-box;
 }
 
@@ -187,7 +187,7 @@
 }
 
 .project-schedule-fact.needs-rebind .project-schedule-v {
-  color: var(--danger, #b42318);
+  color: var(--danger);
 }
 
 .schedule-editor .field {
