@@ -81,63 +81,72 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     let app = e.app.clone();
     let dir_a = e.dir.join("cc-a");
     let dir_b = e.dir.join("cc-b");
-    add_identity(&app, "cc-a", &dir_a).await;
-    add_identity(&app, "cc-b", &dir_b).await;
-    let bot = tt::claude_bot(&app, &e.project_id, "quota").await;
-    sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-    let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-
-    let run_a = start_bot(&app, &bot.id).await.unwrap();
-    assert_eq!(last_env(&e)["CLAUDE_CONFIG_DIR"], json!(dir_a.to_string_lossy()));
-    let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
-    std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
-    std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
-                                      "transcript_path": transcript_a.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    let quota_turn = db::ulid();
-    sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
-         VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
-    )
-    .bind(&quota_turn)
-    .bind(&conv)
-    .bind(&run_a)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
-    let limit = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
-                       "reason": "You've hit your usage limit · resets 5pm"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit.clone())).await.unwrap();
     let status = |id: String| {
         let app = app.clone();
         async move { sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
     };
-    assert_eq!(status(quota_turn.clone()).await, "failed", "撞額度的回合收成失敗，不是掛著等重送");
+    let limit = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
+                       "reason": "You've hit your usage limit · resets 5pm"});
 
-    sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-    let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
-    let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
-    assert_ne!(run_b, run_a);
-    let args = last_start_args(&e);
-    assert!(args.windows(2).any(|w| w == ["--resume", S]), "明確帶 DB 記的那個 session，不靠「最近一段」：{args:?}");
-    let env_b = last_env(&e);
-    assert_eq!(env_b["CLAUDE_CONFIG_DIR"], json!(dir_b.to_string_lossy()), "新行程跑在 B 的帳號底下");
-    assert_eq!(env_b["AM_RUN_ID"], json!(run_b), "新行程的 hook 會帶自己的 run id");
-    let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
-    assert_eq!(std::fs::read_to_string(&transcript_b).unwrap(), std::fs::read_to_string(&transcript_a).unwrap(), "對話檔搬進 B 的目錄");
-    let (resume_sid, outcome): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
-    assert_eq!((resume_sid.as_deref(), outcome), (Some(S), None), "要接的 session 記下來了，還沒有結論");
+    let (bot, conv, run_a, transcript_a, quota_turn) = Box::pin(async {
+        add_identity(&app, "cc-a", &dir_a).await;
+        add_identity(&app, "cc-b", &dir_b).await;
+        let bot = tt::claude_bot(&app, &e.project_id, "quota").await;
+        sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
 
-    let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
-    e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
-    db::set_pane_typed(&app.db, &run_b).await.unwrap();
+        let run_a = start_bot(&app, &bot.id).await.unwrap();
+        assert_eq!(last_env(&e)["CLAUDE_CONFIG_DIR"], json!(dir_a.to_string_lossy()));
+        let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+        std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
+        std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
+        crate::hookrecv::process(
+            &app,
+            &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
+                                          "transcript_path": transcript_a.to_string_lossy()})),
+        )
+        .await
+        .unwrap();
+        let quota_turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
+        )
+        .bind(&quota_turn)
+        .bind(&conv)
+        .bind(&run_a)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit.clone())).await.unwrap();
+        assert_eq!(status(quota_turn.clone()).await, "failed", "撞額度的回合收成失敗，不是掛著等重送");
+        (bot, conv, run_a, transcript_a, quota_turn)
+    })
+    .await;
+
+    let (run_b, transcript_b, pane_b) = Box::pin(async {
+        sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+        let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
+        assert_ne!(run_b, run_a);
+        let args = last_start_args(&e);
+        assert!(args.windows(2).any(|w| w == ["--resume", S]), "明確帶 DB 記的那個 session，不靠「最近一段」：{args:?}");
+        let env_b = last_env(&e);
+        assert_eq!(env_b["CLAUDE_CONFIG_DIR"], json!(dir_b.to_string_lossy()), "新行程跑在 B 的帳號底下");
+        assert_eq!(env_b["AM_RUN_ID"], json!(run_b), "新行程的 hook 會帶自己的 run id");
+        let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+        assert_eq!(std::fs::read_to_string(&transcript_b).unwrap(), std::fs::read_to_string(&transcript_a).unwrap(), "對話檔搬進 B 的目錄");
+        let (resume_sid, outcome): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+        assert_eq!((resume_sid.as_deref(), outcome), (Some(S), None), "要接的 session 記下來了，還沒有結論");
+
+        let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+        e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
+        db::set_pane_typed(&app.db, &run_b).await.unwrap();
+        (run_b, transcript_b, pane_b)
+    })
+    .await;
     let in_pane = |text: &str| e.herdr.pane(&pane_b).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(text)).count());
     let outcome_now = || {
         let app = app.clone();
@@ -151,76 +160,86 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
         }
     };
 
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
-                                      "transcript_path": transcript_a.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    assert_eq!(outcome_now().await, (Some(S.to_string()), None), "舊行程的回報不能冒充新行程接回了");
-
-    let dispatch = prompt_relayed_queueable(&app, &bot.id, "換身份之後的派工", "agm-after-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
+    let dispatch = Box::pin(async {
+        crate::hookrecv::process(
+            &app,
+            &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
+                                          "transcript_path": transcript_a.to_string_lossy()})),
+        )
         .await
         .unwrap();
-    assert_eq!(dispatch.delivery, "queued");
-    assert!(matches!(prompt(&app, &bot.id, "使用者插一句", "user-after-switch").await,
-                     Err(LcError::Conflict(ref v)) if v["reason"] == "resume_unverified"));
-    forget_queue_retry_timer(&bot.id);
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch.turn_id).fetch_one(&app.db).await.unwrap();
-    assert_eq!((t.status.as_str(), t.flush_retries, t.run_id.as_deref()), ("queued", 0, None), "驗證前不 claim、不花重試");
-    assert_eq!(in_pane("換身份之後的派工"), 0);
+        assert_eq!(outcome_now().await, (Some(S.to_string()), None), "舊行程的回報不能冒充新行程接回了");
 
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
-                                      "transcript_path": transcript_b.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    assert_eq!(outcome_now().await, (None, Some("verified".to_string())), "同一段 session 接回來了");
-    let native: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
-    assert_eq!(native.as_deref(), Some(S));
-    let lost: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system' AND content LIKE '%接不回%'")
-        .bind(&conv)
-        .fetch_one(&app.db)
+        let dispatch = prompt_relayed_queueable(&app, &bot.id, "換身份之後的派工", "agm-after-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
+            .await
+            .unwrap();
+        assert_eq!(dispatch.delivery, "queued");
+        assert!(matches!(prompt(&app, &bot.id, "使用者插一句", "user-after-switch").await,
+                         Err(LcError::Conflict(ref v)) if v["reason"] == "resume_unverified"));
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.flush_retries, t.run_id.as_deref()), ("queued", 0, None), "驗證前不 claim、不花重試");
+        assert_eq!(in_pane("換身份之後的派工"), 0);
+        dispatch
+    })
+    .await;
+
+    Box::pin(async {
+        crate::hookrecv::process(
+            &app,
+            &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
+                                          "transcript_path": transcript_b.to_string_lossy()})),
+        )
         .await
         .unwrap();
-    assert_eq!(lost, 0, "接回了就沒有 context_lost");
+        assert_eq!(outcome_now().await, (None, Some("verified".to_string())), "同一段 session 接回來了");
+        let native: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+        assert_eq!(native.as_deref(), Some(S));
+        let lost: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system' AND content LIKE '%接不回%'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(lost, 0, "接回了就沒有 context_lost");
 
-    forget_queue_retry_timer(&bot.id);
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch.turn_id).fetch_one(&app.db).await.unwrap();
-    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())), "驗證過了才送，送進 B 這一代");
-    assert_eq!(in_pane("換身份之後的派工"), 1);
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())), "驗證過了才送，送進 B 這一代");
+        assert_eq!(in_pane("換身份之後的派工"), 1);
+    })
+    .await;
 
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit)).await.unwrap();
-    let late_reply = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-a",
-                            "last_assistant_message": "身份 A 那一回合的半截回覆"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late_reply)).await.unwrap();
-    assert_eq!(status(dispatch.turn_id.clone()).await, "in_flight", "A 遲到的撞額度／回覆不准收掉 B 的回合");
-    let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b",
-                      "last_assistant_message": "B 接著原本的脈絡做完了"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
-    assert_eq!(status(dispatch.turn_id.clone()).await, "completed");
-    let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY created_at")
-        .bind(&conv)
-        .fetch_all(&app.db)
-        .await
-        .unwrap();
-    assert_eq!(replies, vec!["B 接著原本的脈絡做完了".to_string()], "A 的半截回覆沒有混進來");
+    Box::pin(async {
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit.clone())).await.unwrap();
+        let late_reply = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-a",
+                                "last_assistant_message": "身份 A 那一回合的半截回覆"});
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late_reply)).await.unwrap();
+        assert_eq!(status(dispatch.turn_id.clone()).await, "in_flight", "A 遲到的撞額度／回覆不准收掉 B 的回合");
+        let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b",
+                          "last_assistant_message": "B 接著原本的脈絡做完了"});
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
+        assert_eq!(status(dispatch.turn_id.clone()).await, "completed");
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY created_at")
+            .bind(&conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, vec!["B 接著原本的脈絡做完了".to_string()], "A 的半截回覆沒有混進來");
 
-    assert_eq!(in_pane("撞額度的那一句"), 0, "換身份、接回、放行都不可以把撞額度那一句再打一次");
-    assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")), "{:?}", typed(&e));
-    let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text LIKE '%撞額度的那一句%'")
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
-    assert_eq!(copies, 1);
-    assert_eq!(status(quota_turn).await, "failed", "沒有被翻回進行中");
-    forget_queue_retry_timer(&bot.id);
-    stop_bot(&app, &bot.id).await.unwrap();
+        assert_eq!(in_pane("撞額度的那一句"), 0, "換身份、接回、放行都不可以把撞額度那一句再打一次");
+        assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")), "{:?}", typed(&e));
+        let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text LIKE '%撞額度的那一句%'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(copies, 1);
+        assert_eq!(status(quota_turn.clone()).await, "failed", "沒有被翻回進行中");
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    })
+    .await;
 }
 
 /// issue #106：換身份**之前**就排著的 AGM 派工，重啟之後還在，接回驗證完才送，而且只送一次。
@@ -235,99 +254,116 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
     let app = e.app.clone();
     let dir_a = e.dir.join("cc-a");
     let dir_b = e.dir.join("cc-b");
-    add_identity(&app, "cc-a", &dir_a).await;
-    add_identity(&app, "cc-b", &dir_b).await;
-    let bot = tt::claude_bot(&app, &e.project_id, "queued-switch").await;
-    sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-    let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
     let turn = |id: String| {
         let app = app.clone();
         async move { sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
     };
 
-    let run_a = start_bot(&app, &bot.id).await.unwrap();
-    let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
-    std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
-    std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
-                                      "transcript_path": transcript_a.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    let quota_turn = db::ulid();
-    sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
-         VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
-    )
-    .bind(&quota_turn)
-    .bind(&conv)
-    .bind(&run_a)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
-    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
+    let (bot, run_a, quota_turn, dispatch) = Box::pin(async {
+        add_identity(&app, "cc-a", &dir_a).await;
+        add_identity(&app, "cc-b", &dir_b).await;
+        let bot = tt::claude_bot(&app, &e.project_id, "queued-switch").await;
+        sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+        let run_a = start_bot(&app, &bot.id).await.unwrap();
+        let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+        std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
+        std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
+        crate::hookrecv::process(
+            &app,
+            &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
+                                          "transcript_path": transcript_a.to_string_lossy()})),
+        )
         .await
         .unwrap();
-    assert_eq!(dispatch.delivery, "queued");
-
-    sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-    let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
-    let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
-    assert_eq!(turn(quota_turn.clone()).await.status, "failed", "被重啟打斷的那一回合收成失敗，不會被重送");
-    let t = turn(dispatch.turn_id.clone()).await;
-    assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "派工不是孤兒：重啟之後還排著");
-    let revoked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'")
-        .bind(&dispatch.turn_id)
-        .fetch_one(&app.db)
+        let quota_turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
+        )
+        .bind(&quota_turn)
+        .bind(&conv)
+        .bind(&run_a)
+        .bind(db::now())
+        .execute(&app.db)
         .await
         .unwrap();
-    assert_eq!(revoked, 0, "沒有「一併撤銷」的說明");
+        let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
+            .await
+            .unwrap();
+        assert_eq!(dispatch.delivery, "queued");
+        (bot, run_a, quota_turn, dispatch)
+    })
+    .await;
 
-    let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
-    let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
-    e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
-    db::set_pane_typed(&app.db, &run_b).await.unwrap();
+    let (run_b, pane_b) = Box::pin(async {
+        sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+        let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
+        assert_eq!(turn(quota_turn.clone()).await.status, "failed", "被重啟打斷的那一回合收成失敗，不會被重送");
+        let t = turn(dispatch.turn_id.clone()).await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "派工不是孤兒：重啟之後還排著");
+        let revoked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&dispatch.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(revoked, 0, "沒有「一併撤銷」的說明");
+
+        let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+        let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+        e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b), ..Default::default() });
+        db::set_pane_typed(&app.db, &run_b).await.unwrap();
+        (run_b, pane_b)
+    })
+    .await;
     let sent = || e.herdr.pane(&pane_b).map_or(0, |p| p.transcript.iter().filter(|l| l.contains("撞額度之前就排好的派工")).count());
-    forget_queue_retry_timer(&bot.id);
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    let t = turn(dispatch.turn_id.clone()).await;
-    assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "還沒驗證：等");
-    assert_eq!(sent(), 0);
 
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
-                                      "transcript_path": transcript_b.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    forget_queue_retry_timer(&bot.id);
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    let t = turn(dispatch.turn_id.clone()).await;
-    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
-    assert_eq!(sent(), 1);
+    Box::pin(async {
+        let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let t = turn(dispatch.turn_id.clone()).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "還沒驗證：等");
+        assert_eq!(sent(), 0);
 
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    let late = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
-                      "reason": "You've hit your usage limit · resets 5pm"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late)).await.unwrap();
-    assert_eq!(turn(dispatch.turn_id.clone()).await.status, "in_flight");
-    let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b", "last_assistant_message": "派工做完了"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
-    assert_eq!(turn(dispatch.turn_id.clone()).await.status, "completed");
-    flush_queued_locked(&app, &bot.id).await.unwrap();
-    assert_eq!(sent(), 1, "只送一次");
-    let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text = '撞額度之前就排好的派工'")
-        .fetch_one(&app.db)
+        crate::hookrecv::process(
+            &app,
+            &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
+                                          "transcript_path": transcript_b.to_string_lossy()})),
+        )
         .await
         .unwrap();
-    assert_eq!(copies, 1);
-    assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")));
-    forget_queue_retry_timer(&bot.id);
-    stop_bot(&app, &bot.id).await.unwrap();
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let t = turn(dispatch.turn_id.clone()).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
+        assert_eq!(sent(), 1);
+    })
+    .await;
+
+    Box::pin(async {
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let late = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
+                          "reason": "You've hit your usage limit · resets 5pm"});
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late)).await.unwrap();
+        assert_eq!(turn(dispatch.turn_id.clone()).await.status, "in_flight");
+        let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b", "last_assistant_message": "派工做完了"});
+        crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
+        assert_eq!(turn(dispatch.turn_id.clone()).await.status, "completed");
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        assert_eq!(sent(), 1, "只送一次");
+        let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text = '撞額度之前就排好的派工'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(copies, 1);
+        assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")));
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    })
+    .await;
 }
 
 /// 身份 A 起來、pane 可以打字，一回合在飛時 AGM 的派工排在後面。回傳 `(bot, run_a, pane_a, 派工的 turn)`。
@@ -337,38 +373,51 @@ async fn dispatch_queued_behind_a_turn(e: &tt::Env, name: &str) -> (db::Bot, Str
     add_identity(&app, "cc-b", &e.dir.join("cc-b")).await;
     let bot = tt::claude_bot(&app, &e.project_id, name).await;
     sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-    let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-    let run_a = start_bot(&app, &bot.id).await.unwrap();
-    let transcript_a = e.dir.join("cc-a").join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
-    std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
-    std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
-    crate::hookrecv::process(
-        &app,
-        &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
-                                      "transcript_path": transcript_a.to_string_lossy()})),
-    )
-    .await
-    .unwrap();
-    let pane_a: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_a).fetch_one(&app.db).await.unwrap();
-    e.herdr.live_pane(&pane_a, tt::LivePane { width: Some(120), transcript_file: Some(transcript_a.clone()), ..Default::default() });
-    db::set_pane_typed(&app.db, &run_a).await.unwrap();
-    sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
-         VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
-    )
-    .bind(db::ulid())
-    .bind(&conv)
-    .bind(&run_a)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    let run_a = Box::pin(identity_a_started(e, &bot.id)).await;
+    let pane_a = Box::pin(pane_a_typable_with_a_turn_in_flight(e, &bot.id, &run_a)).await;
     let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度後排著的派工", &format!("agm-{name}"), Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");
     let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
     (bot, run_a, pane_a, dispatch.turn_id)
+}
+
+async fn identity_a_started(e: &tt::Env, bot_id: &str) -> String {
+    let app = e.app.clone();
+    let run_a = start_bot(&app, bot_id).await.unwrap();
+    let transcript_a = e.dir.join("cc-a").join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
+    std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
+    crate::hookrecv::process(
+        &app,
+        &hook(bot_id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
+                                     "transcript_path": transcript_a.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    run_a
+}
+
+async fn pane_a_typable_with_a_turn_in_flight(e: &tt::Env, bot_id: &str, run_a: &str) -> String {
+    let app = e.app.clone();
+    let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+    let transcript_a = e.dir.join("cc-a").join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    let pane_a: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(run_a).fetch_one(&app.db).await.unwrap();
+    e.herdr.live_pane(&pane_a, tt::LivePane { width: Some(120), transcript_file: Some(transcript_a), ..Default::default() });
+    db::set_pane_typed(&app.db, run_a).await.unwrap();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+         VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
+    )
+    .bind(db::ulid())
+    .bind(&conv)
+    .bind(run_a)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    pane_a
 }
 
 /// A 撞額度的那一則 `StopFailure`。
@@ -586,6 +635,22 @@ async fn a_quota_hold_survives_a_daemon_restart_then_goes_out_once_when_a_new_re
 
 /// 換到 B、接回驗證完 flush：派工送進 B 一次，A 一次都沒有。
 async fn goes_to_b_exactly_once(e: &tt::Env, app: &Arc<App>, bot: &db::Bot, pane_a: &str, dispatch: &str) {
+    let (run_b, pane_b) = Box::pin(switched_to_b(e, app, bot)).await;
+    Box::pin(async {
+        for _ in 0..3 {
+            forget_queue_retry_timer(&bot.id);
+            flush_queued_locked(app, &bot.id).await.unwrap();
+        }
+        let t = turn_row(app, dispatch).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
+        assert_eq!((sent_to(e, &pane_b), sent_to(e, pane_a)), (1, 0), "送進 B、只送一次；A 一次都沒有");
+        forget_queue_retry_timer(&bot.id);
+    })
+    .await;
+    stop_bot(app, &bot.id).await.unwrap();
+}
+
+async fn switched_to_b(e: &tt::Env, app: &Arc<App>, bot: &db::Bot) -> (String, String) {
     sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     let run_b = restart_bot_with(app, &bot.id, strict).await.unwrap();
@@ -602,15 +667,7 @@ async fn goes_to_b_exactly_once(e: &tt::Env, app: &Arc<App>, bot: &db::Bot, pane
     )
     .await
     .unwrap();
-    for _ in 0..3 {
-        forget_queue_retry_timer(&bot.id);
-        flush_queued_locked(app, &bot.id).await.unwrap();
-    }
-    let t = turn_row(app, dispatch).await;
-    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
-    assert_eq!((sent_to(e, &pane_b), sent_to(e, pane_a)), (1, 0), "送進 B、只送一次；A 一次都沒有");
-    forget_queue_retry_timer(&bot.id);
-    stop_bot(app, &bot.id).await.unwrap();
+    (run_b, pane_b)
 }
 
 async fn limit_hits(app: &Arc<App>) -> Vec<String> {

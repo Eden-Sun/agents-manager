@@ -1391,9 +1391,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     let compact_ends = match &kind {
         HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. } => true,
         HookKind::CompactEnding { agent_id, agent_type } => agent_id.is_none() && agent_type.is_none(),
-        HookKind::Identity { agent_id, agent_type, .. } => {
+        HookKind::Identity { agent_id, agent_type, .. } => Box::pin(async move {
             agent_id.is_none() && agent_type.is_none() && body.payload.get("source").and_then(Value::as_str) == Some("compact")
-        }
+        }).await,
         _ => false,
     };
     if let (true, Some(r)) = (compact_ends, &run) {
@@ -1507,7 +1507,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             tracing::debug!("hook ignored");
             Ok(())
         }
-        HookKind::TurnFailed { session_id, turn_id, transcript_path, reason, detail } => {
+        HookKind::TurnFailed { session_id, turn_id, transcript_path, reason, detail } => Box::pin(async move {
             if reason == FailureReason::Interrupted {
                 app.settle_interruption(&bot.id, lifecycle::InterruptEvidence::Echo).await?;
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
@@ -1584,8 +1584,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             app.emit_turn(&t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
-        }
-        HookKind::StatusLine if provider == "agy" => {
+        }).await,
+        HookKind::StatusLine if provider == "agy" => Box::pin(async move {
             let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
             if let Some(r) = &run {
                 let mut emit = false;
@@ -1654,8 +1654,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
             Ok(())
-        }
-        HookKind::StatusLine => {
+        }).await,
+        HookKind::StatusLine => Box::pin(async move {
             let host = db::bot_host(app.db(), &bot.id).await?;
             let identity = crate::quota::identity_for_run(&bot, run.as_ref());
             let identity = identity.as_deref();
@@ -1712,7 +1712,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     .await;
             }
             Ok(())
-        }
+        }).await,
         HookKind::CompactStarting { agent_id, agent_type } => {
             if agent_id.is_some() || agent_type.is_some() {
                 return Ok(());
@@ -1799,7 +1799,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             .await?;
             Ok(())
         }
-        HookKind::Identity { session_id, transcript_path, agent_id, agent_type } => {
+        HookKind::Identity { session_id, transcript_path, agent_id, agent_type } => Box::pin(async move {
             if agent_id.is_some() || agent_type.is_some() {
                 return Ok(());
             }
@@ -1840,8 +1840,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
             Ok(())
-        }
-        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+        }).await,
+        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => Box::pin(async move {
             let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
             let transcript_read_path = if let Some(path) = transcript_path.as_deref() {
                 if app.local_transcript_allowed(&bot, path).await { Some(path.to_string()) } else { None }
@@ -1888,33 +1888,39 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
 
-            if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
-                let dup: Option<String> =
-                    sqlx::query_scalar(
-                        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-                          WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
-                    )
-                    .bind(&bot.id)
-                        .bind(sid)
-                        .bind(tid)
-                        .fetch_optional(app.db())
-                        .await?;
-                if let Some(existing) = dup {
-                    if bot.kind == "codex" && assistant.as_deref().unwrap_or("").is_empty() && admitted.is_some() {
-                        if let Some(r) = &run {
-                            if db::in_flight_turn(app.db(), &r.id).await?.is_some_and(|t| t.id == existing) {
-                                let mut tx = app.db().begin().await?;
-                                stamp_source_event(&mut tx, &existing, event_id).await?;
-                                tx.commit().await?;
-                                *accepted_turn_id = Some(existing.clone());
-                                app.arm_progress(&r.id, &bot.id, &existing).await;
-                                return Ok(());
+            let handled = Box::pin(async {
+                if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
+                    let dup: Option<String> =
+                        sqlx::query_scalar(
+                            "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                              WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
+                        )
+                        .bind(&bot.id)
+                            .bind(sid)
+                            .bind(tid)
+                            .fetch_optional(app.db())
+                            .await?;
+                    if let Some(existing) = dup {
+                        if bot.kind == "codex" && assistant.as_deref().unwrap_or("").is_empty() && admitted.is_some() {
+                            if let Some(r) = &run {
+                                if db::in_flight_turn(app.db(), &r.id).await?.is_some_and(|t| t.id == existing) {
+                                    let mut tx = app.db().begin().await?;
+                                    stamp_source_event(&mut tx, &existing, event_id).await?;
+                                    tx.commit().await?;
+                                    *accepted_turn_id = Some(existing.clone());
+                                    app.arm_progress(&r.id, &bot.id, &existing).await;
+                                    return Ok(true);
+                                }
                             }
                         }
+                        tracing::info!(turn = %existing, "duplicate hook ignored");
+                        return Ok(true);
                     }
-                    tracing::info!(turn = %existing, "duplicate hook ignored");
-                    return Ok(());
                 }
+                Ok::<bool, anyhow::Error>(false)
+            }).await?;
+            if handled {
+                return Ok(());
             }
 
             let target = match &run {
@@ -1969,86 +1975,98 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
 
-            if let (Some(t), Some(admitted)) = (target, &admitted) {
-                let resent_prompt = if t.origin == "external" && user.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
-                    human_started_prompt(&body.payload, transcript_read_path.as_deref()).await
-                } else { None };
-                let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
-                let mut tx = app.db().begin().await?;
-                #[cfg(feature = "test-hooks")]
-                crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
-                let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
-                match &claimed {
-                    lifecycle::turn_controller::Outcome::Applied => {
-                        stamp_source_event(&mut tx, &t.id, event_id).await?;
-                    }
-                    lifecycle::turn_controller::Outcome::Fenced(why) => {
-                        tracing::warn!(turn = %t.id, why, "hook 收尾：回合不屬於放行的那一代，不動");
-                        return Ok(());
-                    }
-                    lifecycle::turn_controller::Outcome::Raced { now } if now == "completed_fallback" => {
-                        tx.commit().await?;
-                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true, event_id).await?;
-                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
-                        *accepted_turn_id = Some(t.id.clone());
-                        return Ok(());
-                    }
-                    lifecycle::turn_controller::Outcome::Raced { .. } => {
-                        stamp_source_event(&mut tx, &t.id, event_id).await?;
-                    }
-                    _ => {}
-                }
-                let mut added = Vec::new();
-                if t.origin == "external" {
-                    if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        let have: Vec<String> =
-                            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at")
-                                .bind(&t.id)
-                                .fetch_all(&mut *tx)
-                                .await?;
-                        if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
-                            let from = relay_source(&mut *tx, run.as_ref(), u).await;
-                            let msg = tx
-                                .insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str()))
-                                .await?;
-                            crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
-                            added.push(msg);
-                        } else {
-                            added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
+            let handled = Box::pin(async {
+                if let (Some(t), Some(admitted)) = (target, &admitted) {
+                    let resent_prompt = if t.origin == "external" && user.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+                        human_started_prompt(&body.payload, transcript_read_path.as_deref()).await
+                    } else { None };
+                    let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
+                    let mut tx = app.db().begin().await?;
+                    #[cfg(feature = "test-hooks")]
+                    crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
+                    let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
+                    match &claimed {
+                        lifecycle::turn_controller::Outcome::Applied => {
+                            stamp_source_event(&mut tx, &t.id, event_id).await?;
                         }
-                    } else if let Some(text) = resent_prompt {
-                        added.extend(store_resent_prompt_tx(&mut tx, &conv, &t, run.as_ref(), &text.0, text.1.as_deref()).await?);
+                        lifecycle::turn_controller::Outcome::Fenced(why) => {
+                            tracing::warn!(turn = %t.id, why, "hook 收尾：回合不屬於放行的那一代，不動");
+                            return Ok(true);
+                        }
+                        lifecycle::turn_controller::Outcome::Raced { now } if now == "completed_fallback" => {
+                            tx.commit().await?;
+                            fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true, event_id).await?;
+                            store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
+                            *accepted_turn_id = Some(t.id.clone());
+                            return Ok(true);
+                        }
+                        lifecycle::turn_controller::Outcome::Raced { .. } => {
+                            stamp_source_event(&mut tx, &t.id, event_id).await?;
+                        }
+                        _ => {}
                     }
+                    let mut added = Vec::new();
+                    if t.origin == "external" {
+                        if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                            let have: Vec<String> =
+                                sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at")
+                                    .bind(&t.id)
+                                    .fetch_all(&mut *tx)
+                                    .await?;
+                            if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
+                                let from = relay_source(&mut *tx, run.as_ref(), u).await;
+                                let msg = tx
+                                    .insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str()))
+                                    .await?;
+                                crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+                                added.push(msg);
+                            } else {
+                                added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
+                            }
+                        } else if let Some(text) = resent_prompt {
+                            added.extend(store_resent_prompt_tx(&mut tx, &conv, &t, run.as_ref(), &text.0, text.1.as_deref()).await?);
+                        }
+                    }
+                    if !body_text.is_empty() {
+                        added.push(tx.insert_message_tx(&conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
+                    }
+                    tx.commit().await?;
+                    *accepted_turn_id = Some(t.id.clone());
+                    for m in added {
+                        app.emit_message_added(&bot.id, m).await;
+                    }
+                    app.emit_turn(&t.id).await;
+                    return Ok(true);
                 }
-                if !body_text.is_empty() {
-                    added.push(tx.insert_message_tx(&conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
-                }
-                tx.commit().await?;
-                *accepted_turn_id = Some(t.id.clone());
-                for m in added {
-                    app.emit_message_added(&bot.id, m).await;
-                }
-                app.emit_turn(&t.id).await;
+                Ok::<bool, anyhow::Error>(false)
+            }).await?;
+            if handled {
                 return Ok(());
             }
 
             let mut user = user;
-            if let Some(r) = &run {
-                let late = recent_fallback_turn(app, &r.id).await?;
-                if let Some(t) = late {
-                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
-                    let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
-                    if answers_none_of(prompt.as_deref(), seen.as_deref()) {
-                        tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
-                        user = user.or(seen);
-                    } else {
-                        let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
-                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same, event_id).await?;
-                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
-                        *accepted_turn_id = Some(t.id.clone());
-                        return Ok(());
+            let handled = Box::pin(async {
+                if let Some(r) = &run {
+                    let late = recent_fallback_turn(app, &r.id).await?;
+                    if let Some(t) = late {
+                        let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
+                        let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
+                        if answers_none_of(prompt.as_deref(), seen.as_deref()) {
+                            tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
+                            user = user.take().or(seen);
+                        } else {
+                            let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
+                            fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same, event_id).await?;
+                            store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
+                            *accepted_turn_id = Some(t.id.clone());
+                            return Ok(true);
+                        }
                     }
                 }
+                Ok::<bool, anyhow::Error>(false)
+            }).await?;
+            if handled {
+                return Ok(());
             }
 
             let tid = db::ulid();
@@ -2085,7 +2103,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             app.emit_turn(&tid).await;
             Ok(())
-        }
+        }).await,
     }
 }
 
