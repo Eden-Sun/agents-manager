@@ -89,7 +89,8 @@ mod agy_images_tests {
         let entry = body["files"].as_array().unwrap().iter().find(|f| f["source"] == "agy").expect("產圖在 outbox 清單裡");
         let name = entry["name"].as_str().unwrap().to_string();
         assert!(name.starts_with("agy-images/") && name.ends_with(".png"), "{name}");
-        assert!(entry["remaining_secs"].as_u64().unwrap() > 6 * 24 * 3600, "保留 7 天，不是 outbox 的 1 小時");
+        let left = entry["remaining_secs"].as_u64().unwrap();
+        assert!(left > 50 * 60 && left <= 3600, "跟 outbox 一樣保留 1 小時：{left}");
 
         let dl = crate::outbox::file_for(&app, c.bot_id.clone(), HashMap::from([("path".to_string(), name.clone())])).await.unwrap();
         let bytes = axum::body::to_bytes(dl.into_body(), usize::MAX).await.unwrap();
