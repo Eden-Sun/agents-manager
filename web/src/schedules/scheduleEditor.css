@@ -252,7 +252,7 @@
 }
 .sched-bot-state { display: flex; gap: 6px; align-items: center; font-size: 12px; flex-wrap: wrap; }
 .sched-bot-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); display: inline-block; }
-.sched-bot-dot[data-lamp='working'] { background: var(--ok); }
+.sched-bot-dot[data-lamp='working'] { background: var(--status-ok); }
 .sched-bot-dot[data-lamp='idle'] { background: var(--text-faint); }
 .sched-bot-dot[data-lamp='blocked'] { background: var(--warn); }
 .sched-bot-dot[data-lamp='disconnected'], .sched-bot-dot[data-lamp='offline'] { background: var(--danger); }

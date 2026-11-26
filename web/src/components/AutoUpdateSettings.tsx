@@ -62,7 +62,7 @@ export function AutoUpdateSettings() {
           </label>
         ))}
       </div>
-      {msg ? <p className="auto-update-settings-error" role="alert" style={{ color: 'var(--red, #e06c75)' }}>{msg}</p> : null}
+      {msg ? <p className="auto-update-settings-error" role="alert" style={{ color: 'var(--danger)' }}>{msg}</p> : null}
     </section>
   )
 }

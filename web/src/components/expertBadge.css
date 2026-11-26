@@ -450,7 +450,7 @@
   box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
 }
 .bot-unset-role-menu button { padding: 5px 10px; border: 0; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }
-.bot-unset-role-menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }
+.bot-unset-role-menu button:hover { background: var(--bg-hover); }
 
 .bot-cluster-chip-wrap {
   position: relative;

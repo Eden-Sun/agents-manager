@@ -13,7 +13,7 @@
   border-left: 3px solid var(--border-strong);
   background: var(--bg-sunken);
   border-radius: var(--radius);
-  font: 11.5px/1.5 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font: 11.5px/1.5 var(--font-mono);
   color: var(--text-dim);
   white-space: pre;
 }

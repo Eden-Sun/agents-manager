@@ -61,7 +61,7 @@
   font-size: 12px;
   border: 1px solid var(--border, #ccc);
   border-radius: 4px;
-  background: var(--bg-input, #fff);
+  background: var(--bg-panel);
   color: var(--text, inherit);
 }
 .api-balance-btn {
@@ -69,12 +69,12 @@
   font-size: 11px;
   border: 1px solid var(--border, #ccc);
   border-radius: 4px;
-  background: var(--bg-btn, #eee);
+  background: var(--btn-bg);
   color: var(--text, inherit);
   cursor: pointer;
 }
 .api-balance-btn:hover:not(:disabled) {
-  background: var(--bg-btn-hover, #ddd);
+  background: var(--btn-bg-hover);
 }
 .api-balance-btn.cancel {
   background: transparent;
@@ -96,7 +96,7 @@
   line-height: 1;
 }
 .api-usage-expand-btn:hover {
-  background: var(--bg-btn-hover, #eee);
+  background: var(--btn-bg-hover);
   color: var(--text, inherit);
 }
 
@@ -134,7 +134,7 @@
   font-weight: 650;
 }
 
-.api-usage-bar .api-cache-fresh .sl-v, .api-usage-bar .api-cache-hot .sl-v { color: var(--ok, #3fb950); }
+.api-usage-bar .api-cache-fresh .sl-v, .api-usage-bar .api-cache-hot .sl-v { color: var(--status-ok); }
 .api-usage-bar .api-cache-warn .sl-v { color: var(--warn, #d29922); }
-.api-usage-bar .api-cache-low .sl-v { color: var(--err, #f85149); }
+.api-usage-bar .api-cache-low .sl-v { color: var(--danger); }
 .api-usage-bar .api-cache-cold .sl-v { opacity: 0.7; }

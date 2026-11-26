@@ -66,7 +66,7 @@
   font-size: 12px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg-input, #fff);
+  background: var(--bg-panel);
   color: var(--text, inherit);
 }
 .claude-api-bot-limits-btn {
@@ -74,12 +74,12 @@
   font-size: 12px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg-btn);
+  background: var(--btn-bg);
   color: var(--text, inherit);
   cursor: pointer;
 }
 .claude-api-bot-limits-btn:hover:not(:disabled) {
-  background: var(--bg-btn-hover);
+  background: var(--btn-bg-hover);
 }
 .claude-api-bot-limits-btn.cancel {
   background: transparent;

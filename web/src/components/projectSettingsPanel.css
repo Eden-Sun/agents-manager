@@ -1,7 +1,7 @@
 .project-settings { padding: 24px; overflow: auto; }
 .project-settings h2 { margin-top: 0; }
 
-.project-expert-settings-section { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--bg-card); }
+.project-expert-settings-section { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--bg-panel); }
 .project-expert-settings-section h3 { margin-top: 0; margin-bottom: 8px; font-size: 15px; font-weight: 600; }
 .project-expert-settings-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .project-expert-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }

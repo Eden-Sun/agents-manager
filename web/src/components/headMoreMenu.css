@@ -52,7 +52,7 @@
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-dim);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
   user-select: none;
 }

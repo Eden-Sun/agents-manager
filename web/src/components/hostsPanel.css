@@ -442,6 +442,6 @@ details.env-fold summary {
 .host-baseline-fix-cmd {
   display: block;
   color: var(--muted);
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
