@@ -1110,7 +1110,13 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       processes: n(b.processes),
     })),
     machine: isRec(h.machine) && n(h.machine.total_bytes) > 0
-      ? { total_bytes: n(h.machine.total_bytes), available_bytes: n(h.machine.available_bytes) }
+      ? {
+          total_bytes: n(h.machine.total_bytes),
+          available_bytes: n(h.machine.available_bytes),
+          cpu_pct: typeof h.machine.cpu_pct === 'number' && Number.isFinite(h.machine.cpu_pct) && h.machine.cpu_pct >= 0
+            ? Math.min(100, h.machine.cpu_pct)
+            : null,
+        }
       : null,
   }))
   return {

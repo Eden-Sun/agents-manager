@@ -1,6 +1,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { toMemSnapshot } from '../api/normalize'
 import { resetStoreForTest, useStore } from '../store/store'
 
 before(setupDom)
@@ -18,7 +19,7 @@ test('MemBadge 與 MemPopover 顯示整機 CPU%，≥ 85% 標警示色，cpu_pct
     new Response(JSON.stringify({ host: 'local', sampled_at: new Date().toISOString(), processes: [] }), { status: 200 })) as unknown as typeof fetch
   try {
     useStore.setState({
-      mem: {
+      mem: toMemSnapshot({
         total_bytes: 2.4 * 1024 ** 3,
         herdr_bytes: 48 * 1024 ** 2,
         agents_bytes: 2.35 * 1024 ** 3,
@@ -56,7 +57,7 @@ test('MemBadge 與 MemPopover 顯示整機 CPU%，≥ 85% 標警示色，cpu_pct
             machine: { total_bytes: 16 * 1024 ** 3, available_bytes: 8 * 1024 ** 3, cpu_pct: null },
           },
         ],
-      },
+      }),
     } as never)
 
     const root = await mount(
