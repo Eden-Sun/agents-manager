@@ -2,7 +2,7 @@ import { useT } from '../lib/i18n'
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { DRAWER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { DRAWER_QUERY, TABLET_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { FileIcon } from './Attachments'
 import { formatSize, useDropTarget } from './attachmentsHelpers'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
@@ -40,6 +40,22 @@ function readOpen(fallback: boolean): boolean {
     return v === null ? fallback : v !== '0'
   } catch {
     return fallback
+  }
+}
+
+function hasStoredOpen(): boolean {
+  try {
+    return localStorage.getItem(OPEN_KEY) !== null
+  } catch {
+    return false
+  }
+}
+
+function matchesTablet(): boolean {
+  try {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(TABLET_QUERY).matches
+  } catch {
+    return false
   }
 }
 
@@ -83,13 +99,21 @@ export function ImageShelf() {
   const addToShelf = useShelf((s) => s.add)
   const clear = useShelf((s) => s.clear)
   const notify = useStore((s) => s.notify)
-  const [open, setOpen] = useState(() => readOpen(true))
+  const [open, setOpen] = useState(() => readOpen(!matchesTablet() || items.length > 0))
   const atBottom = useMediaQuery(DRAWER_QUERY)
+  const isTablet = useMediaQuery(TABLET_QUERY)
   const fileDrag = useFileDragActive()
   const picker = useRef<HTMLInputElement>(null)
   const shelfRef = useRef<HTMLElement>(null)
   const [peek, setPeek] = useState<PeekAt | null>(null)
   const peekTimer = useRef<number | null>(null)
+
+  const prevTablet = useRef(isTablet)
+  useEffect(() => {
+    if (prevTablet.current === isTablet) return
+    prevTablet.current = isTablet
+    if (!hasStoredOpen()) setOpen(!isTablet || items.length > 0)
+  }, [isTablet, items.length])
 
   const endPeek = useCallback(() => {
     if (peekTimer.current !== null) {

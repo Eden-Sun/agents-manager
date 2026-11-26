@@ -39,6 +39,30 @@
   }
 }
 
+@media (width >= 641px) and (width <= 1366px) {
+  .unread-bar:not(.expanded) {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .unread-bar:not(.expanded)::-webkit-scrollbar {
+    display: none;
+  }
+
+  .unread-bar:not(.expanded) .unread-group {
+    flex-basis: auto;
+    flex-shrink: 0;
+    flex-wrap: nowrap;
+    padding: 2px;
+  }
+
+  .unread-bar:not(.expanded) .unread-chip {
+    flex: 0 0 auto;
+  }
+}
+
 .unread-group[data-group='pinned'] + .unread-group[data-group='others'] {
   border-top: 1px dashed var(--border-strong);
   padding-top: 6px;

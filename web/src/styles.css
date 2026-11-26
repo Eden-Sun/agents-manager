@@ -275,6 +275,23 @@ button:disabled {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto;
   height: 100%;
   overflow: hidden;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+@media (width > 1024px) and (width <= 1366px) {
+  .app {
+    grid-template-columns: clamp(248px, 21vw, 280px) minmax(0, 1fr) auto;
+  }
+}
+
+@media (pointer: coarse) and (width >= 641px) and (width <= 1366px) {
+  .main-head .icon-btn,
+  .main-head .menu-btn,
+  .shelf-head .icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 .boot {
@@ -2138,9 +2155,20 @@ button.pane-toggle:hover:not(:disabled) {
   z-index: 1100;
   max-width: min(420px, calc(100vw - 32px));
   overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+@media (width <= 1366px) {
+  .notices {
+    top: calc(env(safe-area-inset-top) + 64px);
+    bottom: auto;
+    right: max(12px, env(safe-area-inset-right));
+    max-width: min(380px, calc(100vw - 24px));
+  }
 }
 
 .notice {
+  pointer-events: auto;
   display: flex;
   gap: 10px;
   align-items: flex-start;
