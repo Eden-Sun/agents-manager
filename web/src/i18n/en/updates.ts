@@ -296,6 +296,7 @@ export default {
   '{host} 的 {kind} {verb} {up}；全部安裝完會自動重啟閒置的 Bot': '{host}: {kind} {verb} {up}; idle Bots restart automatically once every install finishes',
   '{host} 的 {kind}：{why}': '{host} {kind}: {why}',
   '升級沒有完成，沒有重啟任何 Bot': 'The upgrade did not finish; no Bot was restarted',
+  '升級沒有全部完成，已裝好的重啟 {n} 顆閒置的 Bot': 'The upgrade did not fully finish; restarted {n} idle Bot(s) for what was installed',
   '{head}：{list}': '{head}: {list}',
   '升級完成，重啟 {n} 顆閒置的 Bot': 'Upgrade done; restarted {n} idle Bot(s)',
   '{n} 顆在忙，已排成閒下來自動重啟': '{n} busy; scheduled to restart when idle',

@@ -1,10 +1,13 @@
 //! 一次升級的「安裝 → 重啟閒置 → 忙的排閒下來重啟」串接（2026-11-25，使用者：網頁關掉也要照跑）。
 //!
-//! `POST /api/update-chain`：User-only。對每個 `{host, kind, target_version}` 走 [`crate::cli_update::start_chained`] 開安裝，
+//! `POST /api/update-chain`：User-only。對每個 `{host, kind, target_version}` 走 [`crate::cli_update::start_chained`] 開安裝；
+//! 同一台一次只開一筆（`cli_updates_one_running`），同台其餘的排在 `pending`，前一筆裝好才開下一筆。
 //! 全部 `done` 才對每個 `(kind, host)` 走既有一鍵重啟的範圍批次（`Runner::restart`），再把仍在忙的 bot 排進
-//! `bot_update_restart`（[`crate::update_restart::schedule_ids`]）；任一台沒裝成（或沒開起來）就一顆都不重啟、不排程，推 `update_chain_done`。
-//! 串接的狀態在 `cli_update_chains`（durable）：daemon 重啟後 [`recover_at_startup`] 接手——還在裝的等安裝收尾，已進到重啟階段的
-//! 重跑一次（候選與排程都由 bot 當下的更新通知決定，重跑不會重啟已套用的、也不會重複排）。
+//! `bot_update_restart`（[`crate::update_restart::schedule_ids`]）。任一筆沒裝成（或沒開起來）：不再開後面排著的，
+//! 等已開的收尾，只對已裝好的那幾個 `(kind, host)` 照樣重啟與排程（裝了新版不能沒人重啟），推 `update_chain_done` `ok:false`。
+//! 串接的狀態在 `cli_update_chains`（durable），成員以 `cli_update_chain_members` 為準：daemon 重啟後 [`recover_at_startup`] 接手——
+//! 還在裝的等安裝收尾，已進到重啟階段的重跑一次（候選與排程都由 bot 當下的更新通知決定，重跑不會重啟已套用的、也不會重複排）；
+//! 一個成員都沒有的（建立途中 daemon 掛掉）判失敗，不當成功。
 //! 進度走 WS `update_chain_progress`／`update_chain_done`，`GET /api/state` 的 `update_chains` 供網頁對帳。
 
 use crate::bulk_restart::{is_candidate, skip_reason, Scope, Skip};
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallIn {
     pub host: String,
     pub kind: String,
@@ -51,11 +54,20 @@ pub async fn migrate(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
            result TEXT,
            started_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
-           finished_at TEXT
+           finished_at TEXT,
+           pending TEXT NOT NULL DEFAULT '[]',
+           rejected TEXT NOT NULL DEFAULT '[]'
          )",
     )
     .execute(pool)
     .await?;
+    for col in ["pending", "rejected"] {
+        if !crate::db::has_column(pool, "cli_update_chains", col).await? {
+            sqlx::query(&format!("ALTER TABLE cli_update_chains ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'"))
+                .execute(pool)
+                .await?;
+        }
+    }
     sqlx::query("CREATE TABLE IF NOT EXISTS cli_update_chain_members (update_id TEXT PRIMARY KEY, chain_id TEXT NOT NULL)")
         .execute(pool)
         .await?;
@@ -84,6 +96,10 @@ fn message_of(e: &LcError) -> String {
     }
 }
 
+fn rejection(i: &InstallIn, e: &LcError) -> Value {
+    json!({"host": i.host, "kind": i.kind, "reason": "install_not_started", "error": message_of(e)})
+}
+
 /// `POST /api/update-chain`
 pub async fn post_chain(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json<ChainIn>) -> Result<Response, LcError> {
     let v = start(&app, &headers, body.installs, Arc::new(Real)).await?;
@@ -95,10 +111,19 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, installs: Vec<InstallIn>
     if installs.is_empty() {
         return Err(LcError::Bad("installs 不能是空的".into()));
     }
+    let (mut first, mut pending): (Vec<InstallIn>, Vec<InstallIn>) = (Vec::new(), Vec::new());
+    for i in installs {
+        if first.iter().any(|f| f.host == i.host) {
+            pending.push(i);
+        } else {
+            first.push(i);
+        }
+    }
     let chain_id = crate::db::ulid();
     let now = crate::db::now();
-    sqlx::query("INSERT INTO cli_update_chains (id, status, members, started_at, updated_at) VALUES (?, 'running', '[]', ?, ?)")
+    sqlx::query("INSERT INTO cli_update_chains (id, status, members, pending, started_at, updated_at) VALUES (?, 'running', '[]', ?, ?, ?)")
         .bind(&chain_id)
+        .bind(serde_json::to_string(&pending).unwrap_or_else(|_| "[]".into()))
         .bind(&now)
         .bind(&now)
         .execute(&app.db)
@@ -107,11 +132,11 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, installs: Vec<InstallIn>
     let mut members = Vec::new();
     let mut rejected = Vec::new();
     let mut first_err = None;
-    for i in installs {
+    for i in first {
         match start_chained(app, headers, &i.host, Some(&i.kind), Some(&i.target_version), runner.clone(), Some(&chain_id)).await {
             Ok(v) => members.push(Member { update_id: v["update_id"].as_str().unwrap_or_default().to_string(), host: i.host, kind: i.kind }),
             Err(e) => {
-                rejected.push(json!({"host": i.host, "kind": i.kind, "error": message_of(&e)}));
+                rejected.push(rejection(&i, &e));
                 first_err.get_or_insert(e);
             }
         }
@@ -120,16 +145,18 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, installs: Vec<InstallIn>
         let _ = sqlx::query("DELETE FROM cli_update_chains WHERE id = ?").bind(&chain_id).execute(&app.db).await;
         return Err(first_err.unwrap_or_else(|| LcError::Bad("沒有可安裝的項目".into())));
     }
-    let _ = sqlx::query("UPDATE cli_update_chains SET members = ? WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE cli_update_chains SET members = ?, rejected = ?, updated_at = ? WHERE id = ?")
         .bind(serde_json::to_string(&members).unwrap_or_else(|_| "[]".into()))
+        .bind(Value::from(rejected.clone()).to_string())
+        .bind(crate::db::now())
         .bind(&chain_id)
         .execute(&app.db)
-        .await;
-    let out = json!({"chain_id": chain_id, "started": members, "rejected": rejected});
-    if !rejected.is_empty() {
-        finish(app, &chain_id, false, json!({"reason": "install_not_started", "failed": rejected})).await;
-        return Ok(out);
+        .await
+    {
+        tracing::warn!(chain_id, error = %e, "could not record the update-chain members; the drive reads them from cli_update_chain_members");
     }
+    let queued: Vec<Value> = pending.iter().map(|p| json!({"host": p.host, "kind": p.kind})).collect();
+    let out = json!({"chain_id": chain_id, "started": members, "queued": queued, "rejected": rejected});
     app.emit("update_chain_progress", json!({"chain_id": chain_id, "phase": "installing", "members": members})).await;
     spawn_drive(app, runner, chain_id);
     Ok(out)
@@ -137,7 +164,7 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, installs: Vec<InstallIn>
 
 fn spawn_drive(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: String) {
     let app = app.clone();
-    tokio::spawn(async move { drive(&app, runner.as_ref(), &chain_id).await });
+    tokio::spawn(async move { drive(&app, runner, &chain_id).await });
 }
 
 async fn finish(app: &Arc<App>, chain_id: &str, ok: bool, extra: Value) {
@@ -156,64 +183,169 @@ async fn finish(app: &Arc<App>, chain_id: &str, ok: bool, extra: Value) {
     app.emit("update_chain_done", v).await;
 }
 
-async fn load(app: &Arc<App>, chain_id: &str) -> Option<(String, Vec<Member>)> {
-    let (status, members): (String, String) = sqlx::query_as("SELECT status, members FROM cli_update_chains WHERE id = ?")
+enum Install {
+    Running,
+    Done,
+    Failed(Value),
+}
+
+/// 串接當下的樣子：成員（以 `cli_update_chain_members` 為準）各自的安裝狀態、還排著的、開不起來的。
+struct Snapshot {
+    status: String,
+    members: Vec<(Member, Install)>,
+    pending: Vec<InstallIn>,
+    rejected: Vec<Value>,
+}
+
+impl Snapshot {
+    fn failures(&self) -> Vec<Value> {
+        let mut out = self.rejected.clone();
+        out.extend(self.members.iter().filter_map(|(_, s)| match s {
+            Install::Failed(v) => Some(v.clone()),
+            _ => None,
+        }));
+        out
+    }
+    fn running_on(&self, host: &str) -> bool {
+        self.members.iter().any(|(m, s)| m.host == host && matches!(s, Install::Running))
+    }
+    fn any_running(&self) -> bool {
+        self.members.iter().any(|(_, s)| matches!(s, Install::Running))
+    }
+    fn done(&self) -> Vec<Member> {
+        self.members.iter().filter(|(_, s)| matches!(s, Install::Done)).map(|(m, _)| m.clone()).collect()
+    }
+    fn plain_members(&self) -> Vec<Member> {
+        self.members.iter().map(|(m, _)| m.clone()).collect()
+    }
+}
+
+/// 讀不到（DB 暫時不通）回 `None`，串接不存在回 `Some(None)`。
+async fn snapshot(app: &Arc<App>, chain_id: &str) -> Option<Option<Snapshot>> {
+    let row: Option<(String, String, String)> = sqlx::query_as("SELECT status, pending, rejected FROM cli_update_chains WHERE id = ?")
         .bind(chain_id)
         .fetch_optional(&app.db)
         .await
-        .ok()
-        .flatten()?;
-    Some((status, serde_json::from_str(&members).unwrap_or_default()))
+        .ok()?;
+    let Some((status, pending, rejected)) = row else { return Some(None) };
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT m.update_id, u.host, u.kind, u.status, u.result FROM cli_update_chain_members m
+         LEFT JOIN cli_updates u ON u.id = m.update_id WHERE m.chain_id = ? ORDER BY u.started_at, m.update_id",
+    )
+    .bind(chain_id)
+    .fetch_all(&app.db)
+    .await
+    .ok()?;
+    let members = rows
+        .into_iter()
+        .map(|(update_id, host, kind, status, result)| {
+            let (host, kind) = (host.unwrap_or_default(), kind.unwrap_or_default());
+            let state = match status.as_deref() {
+                Some("running") => Install::Running,
+                Some("done") => Install::Done,
+                Some(_) => {
+                    let r: Value = result.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+                    Install::Failed(json!({"host": host, "kind": kind, "reason": r["reason"], "error": r["error"]}))
+                }
+                None => Install::Failed(json!({"host": host, "kind": kind, "reason": "missing", "error": "安裝紀錄不見了"})),
+            };
+            (Member { update_id, host, kind }, state)
+        })
+        .collect();
+    Some(Some(Snapshot {
+        status,
+        members,
+        pending: serde_json::from_str(&pending).unwrap_or_default(),
+        rejected: serde_json::from_str(&rejected).unwrap_or_default(),
+    }))
 }
 
-/// 等安裝都收尾，再決定重啟或放棄。DB 暫時讀不到就等下一輪，不當成失敗。
-pub async fn drive(app: &Arc<App>, runner: &dyn Runner, chain_id: &str) {
-    let Some((status, members)) = load(app, chain_id).await else { return };
-    if status == "failed" || status == "done" {
-        return;
+async fn save_queue(app: &Arc<App>, chain_id: &str, s: &Snapshot) -> bool {
+    sqlx::query("UPDATE cli_update_chains SET members = ?, pending = ?, rejected = ?, updated_at = ? WHERE id = ?")
+        .bind(serde_json::to_string(&s.plain_members()).unwrap_or_else(|_| "[]".into()))
+        .bind(serde_json::to_string(&s.pending).unwrap_or_else(|_| "[]".into()))
+        .bind(Value::from(s.rejected.clone()).to_string())
+        .bind(crate::db::now())
+        .bind(chain_id)
+        .execute(&app.db)
+        .await
+        .is_ok()
+}
+
+/// 還沒有失敗時，開某台排著的下一筆：那台已有成員裝好、目前沒有在裝。開了（或開不起來）就回 `true`，讓呼叫端重讀。
+/// 同一台同一種已經是成員的（開了之後 daemon 在記下 `pending` 前掛掉）直接拿掉，不重開。
+async fn start_next(app: &Arc<App>, runner: &Arc<dyn Runner>, chain_id: &str, s: &mut Snapshot) -> bool {
+    let Some(idx) = s.pending.iter().position(|p| {
+        !s.running_on(&p.host)
+            && s.members.iter().any(|(m, st)| m.host == p.host && matches!(st, Install::Done))
+    }) else {
+        return false;
+    };
+    let p = s.pending.remove(idx);
+    if s.members.iter().any(|(m, _)| m.host == p.host && m.kind == p.kind) {
+        return save_queue(app, chain_id, s).await;
     }
-    if status == "running" {
-        loop {
-            match failures(app, &members).await {
-                Some(failed) if failed.is_empty() => break,
-                Some(failed) => {
-                    finish(app, chain_id, false, json!({"reason": "install_failed", "failed": failed})).await;
-                    return;
-                }
-                None => tokio::time::sleep(POLL).await,
-            }
+    match start_chained(app, &HeaderMap::new(), &p.host, Some(&p.kind), Some(&p.target_version), runner.clone(), Some(chain_id)).await {
+        Ok(v) => {
+            let m = Member { update_id: v["update_id"].as_str().unwrap_or_default().to_string(), host: p.host, kind: p.kind };
+            s.members.push((m, Install::Running));
+        }
+        Err(e) => s.rejected.push(rejection(&p, &e)),
+    }
+    if !save_queue(app, chain_id, s).await {
+        tracing::warn!(chain_id, "could not record the update-chain queue; a restart will not reopen an install that is already a member");
+    }
+    app.emit("update_chain_progress", json!({"chain_id": chain_id, "phase": "installing", "members": s.plain_members()})).await;
+    true
+}
+
+/// 同一台的安裝一筆接一筆開，等全部收尾（或有一筆失敗後已開的收尾），再對裝好的範圍重啟。DB 暫時讀不到就等下一輪，不當成失敗。
+pub async fn drive(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: &str) {
+    let s = loop {
+        let Some(read) = snapshot(app, chain_id).await else {
+            tokio::time::sleep(POLL).await;
+            continue;
+        };
+        let Some(mut s) = read else { return };
+        if s.status == "failed" || s.status == "done" {
+            return;
+        }
+        if s.members.is_empty() {
+            let mut failed = s.rejected.clone();
+            failed.extend(s.pending.iter().map(|p| json!({"host": p.host, "kind": p.kind, "reason": "install_not_started", "error": "串接建立途中中斷，這一項沒有開始安裝"})));
+            finish(app, chain_id, false, json!({"reason": "no_members", "failed": failed})).await;
+            return;
+        }
+        if s.status == "restarting" {
+            break s;
+        }
+        if s.failures().is_empty() && start_next(app, &runner, chain_id, &mut s).await {
+            continue;
+        }
+        if s.any_running() {
+            tokio::time::sleep(POLL).await;
+            continue;
         }
         let _ = sqlx::query("UPDATE cli_update_chains SET status = 'restarting', updated_at = ? WHERE id = ? AND status = 'running'")
             .bind(crate::db::now())
             .bind(chain_id)
             .execute(&app.db)
             .await;
+        break s;
+    };
+    let mut failed = s.failures();
+    failed.extend(s.pending.iter().map(|p| json!({"host": p.host, "kind": p.kind, "reason": "install_not_started", "error": "前面的安裝沒有完成，這一項沒有開始"})));
+    let done = s.done();
+    app.emit("update_chain_progress", json!({"chain_id": chain_id, "phase": "restarting", "members": done})).await;
+    let mut out = restart_phase(app, runner.as_ref(), &done).await;
+    if failed.is_empty() {
+        finish(app, chain_id, true, out).await;
+        return;
     }
-    app.emit("update_chain_progress", json!({"chain_id": chain_id, "phase": "restarting", "members": members})).await;
-    let out = restart_phase(app, runner, &members).await;
-    finish(app, chain_id, true, out).await;
-}
-
-/// `None`＝還有安裝沒收尾（或讀不到）；`Some(空)`＝全部成功；否則是沒裝成的那幾台。
-async fn failures(app: &Arc<App>, members: &[Member]) -> Option<Vec<Value>> {
-    let mut failed = Vec::new();
-    for m in members {
-        let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT status, result FROM cli_updates WHERE id = ?")
-            .bind(&m.update_id)
-            .fetch_optional(&app.db)
-            .await
-            .ok()?;
-        match row {
-            Some((status, _)) if status == "running" => return None,
-            Some((status, _)) if status == "done" => {}
-            Some((_, result)) => {
-                let r: Value = result.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
-                failed.push(json!({"host": m.host, "kind": m.kind, "reason": r["reason"], "error": r["error"]}));
-            }
-            None => failed.push(json!({"host": m.host, "kind": m.kind, "reason": "missing", "error": "安裝紀錄不見了"})),
-        }
-    }
-    Some(failed)
+    let reason = if s.members.iter().any(|(_, st)| matches!(st, Install::Failed(_))) { "install_failed" } else { "install_not_started" };
+    out["reason"] = json!(reason);
+    out["failed"] = json!(failed);
+    finish(app, chain_id, false, out).await;
 }
 
 fn busy(skip: Skip) -> bool {
@@ -270,18 +402,20 @@ mod tests {
     use futures::future::BoxFuture;
     use std::sync::Mutex;
 
-    /// 安裝成功之後才讀得到新版；重啟只記帳。
+    /// 每種 CLI 各自安裝成功之後才讀得到新版；重啟只記帳。
     struct Fake {
-        before: &'static str,
-        after: &'static str,
-        install_ok: bool,
-        installed: Mutex<bool>,
+        versions: Vec<(&'static str, &'static str, &'static str)>,
+        failing: Vec<&'static str>,
+        installed: Mutex<Vec<String>>,
         restarts: Mutex<Vec<(String, String)>>,
     }
 
     impl Fake {
         fn new(before: &'static str, after: &'static str, install_ok: bool) -> Arc<Self> {
-            Arc::new(Self { before, after, install_ok, installed: Mutex::new(false), restarts: Mutex::new(Vec::new()) })
+            Self::per_kind(vec![("*", before, after)], if install_ok { vec![] } else { vec!["*"] })
+        }
+        fn per_kind(versions: Vec<(&'static str, &'static str, &'static str)>, failing: Vec<&'static str>) -> Arc<Self> {
+            Arc::new(Self { versions, failing, installed: Mutex::new(Vec::new()), restarts: Mutex::new(Vec::new()) })
         }
         fn restarts(&self) -> Vec<(String, String)> {
             self.restarts.lock().unwrap().clone()
@@ -289,20 +423,23 @@ mod tests {
     }
 
     impl Runner for Fake {
-        fn install<'a>(&'a self, _: &'a Arc<App>, _: &'a str, _: &'a str, _: &'a str, _: &'a HostFence) -> BoxFuture<'a, Result<String, InstallError>> {
+        fn install<'a>(&'a self, _: &'a Arc<App>, _: &'a str, kind: &'a str, _: &'a str, _: &'a HostFence) -> BoxFuture<'a, Result<String, InstallError>> {
             Box::pin(async move {
-                if !self.install_ok {
+                if self.failing.iter().any(|k| *k == "*" || *k == kind) {
                     return Err(InstallError::Failed("boom".into()));
                 }
-                *self.installed.lock().unwrap() = true;
+                self.installed.lock().unwrap().push(kind.to_string());
                 Ok("ok".into())
             })
         }
         fn installer_busy<'a>(&'a self, _: &'a Arc<App>, _: &'a str, _: &'a str, _: &'a HostFence) -> BoxFuture<'a, anyhow::Result<bool>> {
             Box::pin(async { Ok(false) })
         }
-        fn version<'a>(&'a self, _: &'a Arc<App>, _: &'a str, _: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
-            Box::pin(async move { Ok(if *self.installed.lock().unwrap() { self.after } else { self.before }.to_string()) })
+        fn version<'a>(&'a self, _: &'a Arc<App>, _: &'a str, kind: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
+            Box::pin(async move {
+                let (_, before, after) = *self.versions.iter().find(|(k, _, _)| *k == "*" || *k == kind).unwrap();
+                Ok(if self.installed.lock().unwrap().iter().any(|k| k == kind) { after } else { before }.to_string())
+            })
         }
         fn restart<'a>(&'a self, _: &'a Arc<App>, scope: Scope, _: &'a HostFence) -> BoxFuture<'a, anyhow::Result<Value>> {
             Box::pin(async move {
@@ -407,11 +544,7 @@ mod tests {
     #[tokio::test]
     async fn a_codex_install_in_a_chain_leaves_its_restart_to_the_chain() {
         let env = crate::testing::env().await;
-        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
-        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "cx").await;
-        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
-        let run = crate::testing::fake_run(&env.app, &bot.id).await;
-        sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(&pending).bind(run).execute(&env.app.db).await.unwrap();
+        codex_bot_with_notice(&env, "cx").await;
         let fake = Fake::new("codex-cli 0.155.1", "codex-cli 0.157.0", true);
         let mut rx = env.app.subscribe();
         let installs = vec![InstallIn { host: "local".into(), kind: "codex".into(), target_version: "0.157.0".into() }];
@@ -432,15 +565,87 @@ mod tests {
         let members = json!([{"update_id": "u1", "host": "local", "kind": "claude"}]).to_string();
         sqlx::query("INSERT INTO cli_update_chains (id, status, members, started_at, updated_at) VALUES ('c1','restarting',?,?,?)")
             .bind(members).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO cli_update_chain_members (update_id, chain_id) VALUES ('u1','c1')").execute(&env.app.db).await.unwrap();
         assert_eq!(running_list(&env.app).await.len(), 1);
         let fake = Fake::new("x", "y", true);
         let mut rx = env.app.subscribe();
-        drive(&env.app, fake.as_ref(), "c1").await;
+        drive(&env.app, fake.clone(), "c1").await;
         assert_eq!(done_event(&mut rx).await["ok"], true);
         assert_eq!(fake.restarts().len(), 1);
         assert_eq!(crate::db::update_restart::list(&env.app.db).await.unwrap(), vec![busy]);
-        drive(&env.app, fake.as_ref(), "c1").await;
+        drive(&env.app, fake.clone(), "c1").await;
         assert_eq!(fake.restarts().len(), 1, "收尾過的串接再被接手也不會重做");
+        assert!(running_list(&env.app).await.is_empty());
+    }
+
+    async fn codex_bot_with_notice(env: &crate::testing::Env, name: &str) -> String {
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(&pending).bind(run).execute(&env.app.db).await.unwrap();
+        bot.id
+    }
+
+    fn claude_and_codex_on_local() -> Vec<InstallIn> {
+        let mut v = claude_install();
+        v.push(InstallIn { host: "local".into(), kind: "codex".into(), target_version: "0.157.0".into() });
+        v
+    }
+
+    #[tokio::test]
+    async fn claude_and_codex_on_the_same_host_install_one_after_the_other_and_each_restart_once() {
+        let env = crate::testing::env().await;
+        claude_bot_with_notice(&env, "idle-one", "idle").await;
+        codex_bot_with_notice(&env, "cx").await;
+        claude_snapshot(&env).await;
+        let fake = Fake::per_kind(vec![("claude", "2.1.281 (Claude Code)", "2.1.284 (Claude Code)"), ("codex", "codex-cli 0.155.1", "codex-cli 0.157.0")], vec![]);
+        let mut rx = env.app.subscribe();
+        let out = start(&env.app, &HeaderMap::new(), claude_and_codex_on_local(), fake.clone()).await.unwrap();
+        assert_eq!(out["started"].as_array().unwrap().len(), 1, "同一台一次只開一筆：{out}");
+        assert_eq!(out["queued"], json!([{"host": "local", "kind": "codex"}]));
+        assert_eq!(out["rejected"], json!([]));
+        let done = done_event(&mut rx).await;
+        assert_eq!(done["ok"], true, "{done}");
+        let mut restarts = fake.restarts();
+        restarts.sort();
+        assert_eq!(restarts, vec![("claude".to_string(), "local".to_string()), ("codex".to_string(), "local".to_string())]);
+        assert_eq!(*fake.installed.lock().unwrap(), vec!["claude".to_string(), "codex".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn when_the_second_install_on_a_host_fails_the_first_one_is_still_restarted() {
+        let env = crate::testing::env().await;
+        claude_bot_with_notice(&env, "idle-one", "idle").await;
+        codex_bot_with_notice(&env, "cx").await;
+        claude_snapshot(&env).await;
+        let fake = Fake::per_kind(vec![("claude", "2.1.281 (Claude Code)", "2.1.284 (Claude Code)"), ("codex", "codex-cli 0.155.1", "codex-cli 0.157.0")], vec!["codex"]);
+        let mut rx = env.app.subscribe();
+        start(&env.app, &HeaderMap::new(), claude_and_codex_on_local(), fake.clone()).await.unwrap();
+        let done = done_event(&mut rx).await;
+        assert_eq!(done["ok"], false, "{done}");
+        assert_eq!(done["reason"], "install_failed");
+        assert_eq!(done["failed"][0]["kind"], "codex");
+        assert_eq!(fake.restarts(), vec![("claude".to_string(), "local".to_string())], "裝好的 claude 照樣重啟，沒裝成的 codex 不動");
+        assert_eq!(done["restarts"].as_array().unwrap().len(), 1);
+        assert!(running_list(&env.app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_chain_recovered_without_any_member_is_a_failure_not_a_success() {
+        let env = crate::testing::env().await;
+        let now = crate::db::now();
+        let pending = json!([{"host": "local", "kind": "codex", "target_version": "0.157.0"}]).to_string();
+        sqlx::query("INSERT INTO cli_update_chains (id, status, members, pending, started_at, updated_at) VALUES ('c0','running','[]',?,?,?)")
+            .bind(pending).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        let fake = Fake::new("x", "y", true);
+        let mut rx = env.app.subscribe();
+        drive(&env.app, fake.clone(), "c0").await;
+        let done = done_event(&mut rx).await;
+        assert_eq!(done["ok"], false, "{done}");
+        assert_eq!(done["reason"], "no_members");
+        assert_eq!(done["failed"][0]["kind"], "codex");
+        assert!(fake.restarts().is_empty());
         assert!(running_list(&env.app).await.is_empty());
     }
 }

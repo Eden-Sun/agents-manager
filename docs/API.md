@@ -2644,14 +2644,14 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
   它結束時 daemon 自己接著開這台 codex 的一批，不用再按）、`error`（批次開不起來：`restart:null`＋`restart_error`，新版已裝好，照一般重啟再按一次）。
 
 ### 12.7b 一條龍升級 `POST /api/update-chain`
-`{"installs":[{"host":"local","kind":"claude","target_version":"2.1.284"},{"host":"m4p","kind":"codex","target_version":"0.157.0"}]}`。User-only（帶 bot 身份 403 `ui_only`）。daemon 對每一項走 §12.7a 的安裝（同一套檢查與 409），全部成功才對每個 `(kind, host)` 走一鍵重啟的範圍批次（重啟閒置的舊版 bot），再把仍在忙（working／blocked／回合進行中／背景工作）的 bot 排進 `update-restart`（§10.3b）；子 agent 不動。任一項沒開起來或沒裝成：一顆都不重啟、不排程，推 `update_chain_done` `ok:false`。串接的 codex 裝完**不**自己重啟（`cli_update_done` 的 `restart_status:"chained"`，claude 同），由串接統一做一次，不重複。
+`{"installs":[{"host":"local","kind":"claude","target_version":"2.1.284"},{"host":"m4p","kind":"codex","target_version":"0.157.0"}]}`。User-only（帶 bot 身份 403 `ui_only`）。daemon 對每一項走 §12.7a 的安裝（同一套檢查與 409），同一台一次只開一筆（`cli_updates` 每台只准一筆 running），同台其餘的依請求順序排隊，前一筆裝好才開下一筆。全部成功才對每個 `(kind, host)` 走一鍵重啟的範圍批次（重啟閒置的舊版 bot），再把仍在忙（working／blocked／回合進行中／背景工作）的 bot 排進 `update-restart`（§10.3b）；子 agent 不動。任一項沒開起來或沒裝成：後面排著的不再開，等已開的收尾，只對**已裝好**的那幾個 `(kind, host)` 照樣重啟與排程（裝了新版不會沒人重啟），推 `update_chain_done` `ok:false`。串接的 codex 裝完**不**自己重啟（`cli_update_done` 的 `restart_status:"chained"`，claude 同），由串接統一做一次，不重複。
 
 ```json
-202 {"chain_id":"01M…","started":[{"update_id":"01M…","host":"local","kind":"claude"}],"rejected":[]}
+202 {"chain_id":"01M…","started":[{"update_id":"01M…","host":"local","kind":"claude"}],"queued":[{"host":"local","kind":"codex"}],"rejected":[]}
 ```
-- 一項都開不起來：回該項的錯誤（例 409 `stale_target`、`cli_update_in_progress`），不留串接。部分開起來、部分被拒：202，`rejected` 列原因，串接立刻以 `install_not_started` 收尾（已開的安裝照跑，但不重啟）。
-- 進度 WS：`update_chain_progress` `{"chain_id","phase":"installing"|"restarting","members"}`；結束 `update_chain_done` `{"chain_id","ok":true,"restarts":[<restart-idle 計畫>],"scheduled":[bot_id],"errors":[{"host","kind","error"}]}` 或 `{"ok":false,"reason":"install_failed"|"install_not_started","failed":[{"host","kind","reason","error"}]}`。每一項安裝的細節照舊走 `cli_update_progress`／`cli_update_done`。
-- 狀態存 DB（`cli_update_chains`）：daemon 在安裝途中或重啟階段重啟，開機後 `recover_at_startup` 接手——還在裝的等安裝收尾、已進到重啟階段的重跑一次（候選與排程都以 bot 當下的更新通知為準，已套用的不會再被重啟、已排的不會重複排）；收尾過的不重做。
+- 一項都開不起來：回該項的錯誤（例 409 `stale_target`、`cli_update_in_progress`），不留串接。部分開起來、部分被拒：202，`rejected` 列原因，排隊的不再開，已開的裝完照樣重啟，最後以 `ok:false` `install_not_started` 收尾。`queued`＝同台排在後面、前一筆裝好才開的項目。
+- 進度 WS：`update_chain_progress` `{"chain_id","phase":"installing"|"restarting","members"}`；結束 `update_chain_done` `{"chain_id","ok":true,"restarts":[<restart-idle 計畫>],"scheduled":[bot_id],"errors":[{"host","kind","error"}]}` 或 `{"ok":false,"reason":"install_failed"|"install_not_started"|"no_members","failed":[{"host","kind","reason","error"}],"restarts","scheduled","errors"}`（`restarts`／`scheduled`／`errors` 是已裝好那幾項的重啟結果，沒有就是空的；排隊沒開的項目以 `reason:"install_not_started"` 列在 `failed`）。每一項安裝的細節照舊走 `cli_update_progress`／`cli_update_done`。
+- 狀態存 DB（`cli_update_chains`）：daemon 在安裝途中或重啟階段重啟，開機後 `recover_at_startup` 接手——成員以 `cli_update_chain_members` 為準（不信 `members` 欄）；一個成員都沒有的（建立途中 daemon 掛掉）以 `no_members` `ok:false` 收尾，不當成功；還在裝的等安裝收尾並接著開同台排隊的、已進到重啟階段的重跑一次（候選與排程都以 bot 當下的更新通知為準，已套用的不會再被重啟、已排的不會重複排）；收尾過的不重做。
 
 ### 12.7b header 一鍵更新 herdr `POST /api/hosts/{name}/herdr-update`
 `{"target_version":"0.9.3"}`。只由使用者在 header 確認框送出。下載驗版 → 等閒置 → 維護窗口裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回（SPEC §6.9b）。

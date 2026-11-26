@@ -162,11 +162,6 @@ export interface UpdateChainResult {
 }
 
 export function updateChainDone(data: Rec): UpdateChainResult {
-  if (pick(data, 'ok') !== true) {
-    const failed = arr(pick(data, 'failed')).flatMap((v) => (isRec(v) ? [t('{host} 的 {kind}：{why}', { host: str(pick(v, 'host')), kind: str(pick(v, 'kind')), why: str(pick(v, 'error')) || failureReason(str(pick(v, 'kind')), str(pick(v, 'reason'))) })] : []))
-    const head = t('升級沒有完成，沒有重啟任何 Bot')
-    return { ok: false, message: failed.length > 0 ? t('{head}：{list}', { head, list: failed.join('；') }) : head, batch: null, joinBatchId: null }
-  }
   const plans = arr(pick(data, 'restarts')).flatMap((v) => {
     const p = toPlan(v)
     return p ? [p] : []
@@ -176,8 +171,16 @@ export function updateChainDone(data: Rec): UpdateChainResult {
   const started = plans.find((p) => p.total > 0 && !p.already_running)
   const joined = plans.find((p) => p.already_running && p.batch_id)
   const restarted = plans.reduce((n, p) => n + (p.already_running ? 0 : p.total), 0)
-  const parts = [t('升級完成，重啟 {n} 顆閒置的 Bot', { n: restarted })]
-  if (scheduled > 0) parts.push(t('{n} 顆在忙，已排成閒下來自動重啟', { n: scheduled }))
-  if (errors > 0) parts.push(t('{n} 項重啟沒排起來，請再按一次 header 的更新按鈕', { n: errors }))
-  return { ok: errors === 0, message: parts.join('；'), batch: started ? batchFromPlan(started) : null, joinBatchId: !started && joined ? joined.batch_id : null }
+  const batch = started ? batchFromPlan(started) : null
+  const joinBatchId = !started && joined ? joined.batch_id : null
+  const restartParts = [scheduled > 0 ? t('{n} 顆在忙，已排成閒下來自動重啟', { n: scheduled }) : '', errors > 0 ? t('{n} 項重啟沒排起來，請再按一次 header 的更新按鈕', { n: errors }) : ''].filter(Boolean)
+  if (pick(data, 'ok') !== true) {
+    const failed = arr(pick(data, 'failed')).flatMap((v) => (isRec(v) ? [t('{host} 的 {kind}：{why}', { host: str(pick(v, 'host')), kind: str(pick(v, 'kind')), why: str(pick(v, 'error')) || failureReason(str(pick(v, 'kind')), str(pick(v, 'reason'))) })] : []))
+    const partial = plans.length > 0 || scheduled > 0
+    const head = partial ? t('升級沒有全部完成，已裝好的重啟 {n} 顆閒置的 Bot', { n: restarted }) : t('升級沒有完成，沒有重啟任何 Bot')
+    const parts = [failed.length > 0 ? t('{head}：{list}', { head, list: failed.join('；') }) : head, ...restartParts]
+    return { ok: false, message: parts.join('；'), batch, joinBatchId }
+  }
+  const parts = [t('升級完成，重啟 {n} 顆閒置的 Bot', { n: restarted }), ...restartParts]
+  return { ok: errors === 0, message: parts.join('；'), batch, joinBatchId }
 }

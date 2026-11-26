@@ -721,6 +721,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (106, "38c5ec0d631f7a40"),
     // 排程每次執行的 bot／模型快照（2026-11-25）：`schedule_occurrences.runner_json`、`schedule_attempts.runner_json`。
     (107, "b490bf1089d0f868"),
+    // 一條龍升級同台依序安裝（2026-11-26）：`cli_update_chains.pending`、`cli_update_chains.rejected`。
+    (108, "4feb69a023e760d7"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

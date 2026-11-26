@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgress, cliUpdateProgressMany, reconcileCliUpdate, reconcileCliUpdates, type CliUpdate } from './cliUpdate.ts'
+import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgress, cliUpdateProgressMany, reconcileCliUpdate, reconcileCliUpdates, updateChainDone, type CliUpdate } from './cliUpdate.ts'
 
 const base = { update_id: 'u1', host: 'local', kind: 'codex' }
 
@@ -145,4 +145,24 @@ test('磁碟本來就是目標版本（沒跑安裝指令）：講「本來就�
   assert.equal(r.batch?.id, 'b2')
   assert.match(r.message, /本來就是 0\.157\.0/)
   assert.doesNotMatch(r.message, /→/)
+})
+
+test('串接部分失敗：講哪一項沒裝成，已裝好的照樣重啟並接手重啟進度', () => {
+  const r = updateChainDone({
+    chain_id: 'c1',
+    ok: false,
+    reason: 'install_failed',
+    failed: [{ host: 'local', kind: 'codex', error: 'boom' }],
+    restarts: [{ batch_id: 'b1', total: 2, planned: [], skipped: [] }],
+    scheduled: ['busy1'],
+    errors: [],
+  })
+  assert.equal(r.ok, false)
+  assert.equal(r.batch?.id, 'b1')
+  assert.match(r.message, /已裝好的重啟 2 顆閒置的 Bot：local 的 codex：boom/)
+  assert.match(r.message, /1 顆在忙/)
+  assert.doesNotMatch(r.message, /沒有重啟任何 Bot/)
+  const none = updateChainDone({ chain_id: 'c1', ok: false, reason: 'install_failed', failed: [{ host: 'local', kind: 'claude', error: 'boom' }] })
+  assert.match(none.message, /沒有重啟任何 Bot/)
+  assert.equal(none.batch, null)
 })
