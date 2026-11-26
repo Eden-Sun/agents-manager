@@ -188,3 +188,186 @@
 - 需要使用者確認：#4（html 同源）、#5（最近刪除的替代入口）、#7（編輯後送出會清掉終端草稿）。
 - 待驗證：#—（窄側欄排程名稱）需要有排程資料的 mock 才能在瀏覽器確認。
 - 仍未完成：窄螢幕的其他版面（聊天、設定面板）沒有逐段讀；草稿與附件的其餘 commit（`0f95cb08b` 的完整行為）只看了 diff，沒有在瀏覽器實際操作。
+
+## 7. 網頁後半最後一批（#2214 收尾，2026-11-26，唯讀）
+
+### 覆蓋
+
+- **精讀**：`9e5d9d06a`（群集「全部刪除」，連到 store `removeBot`、`api.deleteBot`、daemon `delete_bot` 與 `projection::delete_from_config`）；複盤系列 `fabdd9748`、`e8766990d`、`85a564f41`、`42219a58e`（權限矩陣、寫入路徑、快取與清單）；`07753571b`（host baseline 的寫入與安裝路徑、auto gate）；`9c718e3af`＋`3dc3d1ef3`（agy 自動壓縮）；`fb80eb9e8`（Claude 到期偵測與推播路徑）；`d380c3569`（agy GUI 登入自動選單的守門）。
+- **抽讀（關鍵行）**：`663260b48`（openai-api 預設模型）、`7e559a4a4`（ops-alerts 收窄）、`20a0674a2`、`86949766b`、`687dd9522`、`f2c6640f5`、`88e23f53b`。
+- **只讀 web 標籤**：`459e72090`（ledger 待部署／已部署）。daemon 的 `ledger_deploy.rs`（156 行）**未逐段讀**。
+- **只看標題**：其餘 85 個 web commit（`1bef36e26..a14d7e58e`，扣掉前面各節已提及者），列於本節附錄。這 85 個**未審**。
+
+### 發現
+
+| # | 位置 | 類別 | 觸發情境 | 嚴重度／信心 | 處理 |
+|---|---|---|---|---|---|
+| 1 | 9e5d9d06a（`ExpertClusterRow.tsx` `deleteAll`＋`store.ts` `removeBot`） | 功能（會靜默少刪） | 群集成員在 AGM 專案裡（`supervisor_owned::load` 把整個 AGM 專案的 bot 都算 AGM 的）。每顆都回 409 `supervisor_owned`，`agmDeleteAsk` 是單一欄位、後到的覆蓋先到的，對話框只剩一顆；這條路徑不 `notify`，其餘幾顆既沒刪也沒提示；確認框卻寫「全部 N 顆」。 | 中／高 | **已開 #2221** |
+| 2 | 1e11d9d37＋ec95c9678＋fb80eb9e8（登入到期提醒） | 功能（一次性通知永久漏送） | `apply_host_expiry` 先 `admit_login_expiry` 把 stage 記成已送，之後 `broadcast` 因手機前景被丟，stage 不會再送。手機在前景時剛好跨過 3 天／1 天門檻，該次提醒就沒了（`expired` 會再送一次）。 | 低～中／高 | **已開 #2222**（延伸 §5 #2） |
+| 3 | 07753571b（host baseline auto） | 安全（需使用者裁示） | `[host_baseline.sync]` 設 `auto` 的主機，缺工具會**不經逐次確認**執行 `curl … \| sh`／`… \| bash` 類安裝（bun、rtk；rtk 指向 `master` 未釘版）。sudo 項只列手動，缺檔寫入只在檔案不存在時寫且有備份，這兩點看過沒問題。預設是 off，要使用者主動開。 | 中／高（風險是設計選擇） | 不開 issue；請使用者裁示是否接受、rtk 是否釘版 |
+| 4 | 9c718e3af＋3dc3d1ef3（agy 自動壓縮） | 功能（自動送出指令） | agy 的 bot **不限 primary**（`plan` 條件加了 `kind == "agy"`），預設 400k；已用量超過就在 idle 且輸入框空時送 `/compact` 進 agy 的 pane，不寫續行註記。**未驗**：agy 是否真的支援 `/compact`；`context_window.total_input_tokens` 是目前上下文還是累計值（若累計，會反覆觸發）。 | 中／低（需實機） | 不開 issue；請裁示預設是否開、並安排實機確認 |
+| 5 | 28131f39c（去除 `i18n-ignore`） | 工具一致性 | 見下節「28131f39c 的 i18n-ignore 結論」。 | 低／高 | 不補回；需決定機制（見結論） |
+| 6 | 663260b48（openai-api 預設模型改 `gpt-6.2-astra`） | 確認項 | 新建 openai-api bot 的預設模型與 effort 改了。既有 bot 是否被改寫未驗。 | 低／中 | 不開 issue；請確認這是預期 |
+| 7 | 9e5d9d06a 附帶 | nit | 每顆刪除都各發一則「已刪除 X ［復原］」通知，N 顆就 N 則，沒有批次摘要。`selectedBotId` 以批次前的快照算 `next`，並行回應順序不定，可能留下指向已刪 bot 的選取（UI 後果未在瀏覽器驗證）。 | 低／中 | 不開 issue |
+| 8 | 42219a58e、e8766990d（複盤存原文／譯文前 1500 字） | 隱私（已是既有快取） | 複盤寫在譯文快取檔（0600，同一個檔）。新增的是明文文字副本，但檔案本身原本就存譯文；沒有新的外流路徑。 | 無 | 不列為問題 |
+
+### 已確認無問題
+
+- **權限**：`fabdd9748`、`e8766990d` 的 `GET /api/translate-records`、`/api/translate-retros`、`/api/messages/{id}/translate-record` 在 `BOT_ROUTE_POLICIES` 與 `bot_scope_matrix` 都是 UserOnly／Forbidden（與 API.md 同步）。
+- **寫入**：複盤存檔在翻譯 single-flight 鎖內讀改寫；`save` 重寫時沿用既有 `retros`（有測試）。快取 key 是 `sha256(id + 內容)`，不同訊息不會互相覆寫。
+- **baseline 寫入**：`WRITE_FILE` 只在目標不存在時寫（`[ -e ] → present`），有 `ba_backup`，目標是符號連結就跳過。
+- **GUI 登入（`d380c3569`）**：只在畫面**精確**是「Select login method」選單時才送鍵；授權網址只收 `https://accounts.google.com/o/oauth2/…`（有反例測試）。
+- **ops-alerts 收窄（`7e559a4a4`）**：一般 bot 403 `role_required`；`scripts/ops/*` 走 service principal。與 API.md／SPEC.md 一致。
+- **分享 bot 預設 400k（`20a0674a2`）**：只補 `context_tokens` 的門檻；`runtime_overlay` 用的是不含 kind 預設的 `effective`，所以不會多出啟動參數。
+- **agy 自動壓縮的 anchor（`3dc3d1ef3`）**：改為上一個完成回合（排除保溫 crid），同一回合不重複壓縮。
+- **ledger（`459e72090`）**：只改標籤與資料欄位，web 有 DOM 測試。
+
+### 28131f39c 的 i18n-ignore 結論：**不補回**
+
+- `AGENTS.md` 第 13 行：禁止在程式碼寫註解，**功能性指示除外**，列舉的清單裡沒有 `i18n-ignore`。`28131f39c` 照這條規則刪掉 64 行，是符合政策的。
+- 補回會直接違反 `AGENTS.md`，所以我沒有推 main。
+- 但工具端還在依賴它：`web/src/lib/i18n/i18nScan.ts:94` 與 `docs/FRONTEND.md:131,136,170` 都寫明用 `i18n-ignore` 排除，`i18n-report` 現在會把那 64 行（假資料、協定字串、regex）全列為「寫死中文」。`i18n-report` 不是 gate，影響只在報表。
+- **需要決定**（三擇一）：(a) 把 `i18n-ignore` 加進 `AGENTS.md` 的功能性指示清單，再把 64 行補回（小改，可立即做）；(b) 把排除清單移到資料檔（例如 `web/scripts/i18n-allow.txt`），程式碼保持無註解；(c) 接受報表雜訊，改掉 `FRONTEND.md` 那幾段。我傾向 (b)，這樣程式碼與政策都不用改。
+
+### 本節小結
+
+- 開 issue：#2221（群集全部刪除靜默少刪）、#2222（登入到期提醒永久漏送）。
+- 需使用者裁示：#3（auto baseline 的 `curl | sh`，rtk 是否釘版）、#4（agy 預設自動 `/compact`，待實機）、28131f39c 的 i18n-ignore 機制（三擇一）、#6（openai-api 預設模型）。
+- 未完成：附錄 85 個 commit 只看標題；`ledger_deploy.rs` 未逐段讀。
+
+## 附錄：未審的 web commit（只看標題，2026-11-26）
+
+- `2fdc129ea` feat(web): API 餘額在額度列與選單上全域可見�
+- `81594406f` fix(web): Claude 餘額晶片標籤改 Claude、金額不�
+- `663260b48` feat(api-bot): openai-api 模型擴充為 gpt-6.2-astra（
+- `66892d3b6` fix(web): 手機對話區水平超版（openai token 拆�
+- `f14e9e33c` feat(web): 餘額列改用圖示、openai-api 側欄同 co
+- `c2267fbc6` feat(reset-credit): 重置券提示可「不再提醒」1 
+- `42a6e355e` feat(web): claude-api 與 openai-api 圖示改用實心 AP
+- `54102b6d5` feat(web): claude-api 與 openai-api 圖示改用右側實
+- `bfe8b4883` refactor(web): share inert file methods in share page test
+- `7b4bb6560` feat(web): 統一 codex 與 openai-api 模型命名並依�
+- `8df02e2ca` refactor(sidebar): 合併側欄 bot 列渲染與重複的 
+- `24e30af31` refactor(web): 收斂選單與彈出框點擊外圍/按Esc
+- `a1dc7d069` feat(identities): 新增帳號對話框（建議目錄、�
+- `5e7498690` refactor(web): 身份頁版面骨架：主機分頁＋CLI 
+- `deeb02ed6` feat(identities): 動作命名、「⋯」選單與確認�
+- `f68c5f16a` feat(web): agy 模型清單依價格由便宜到貴排序�
+- `a737c2c7c` feat(identities): 新增帳號對話框接上身份頁（�
+- `79f071933` fix(identities): 收尾文案與手機排版
+- `c9c2b8c7f` fix(web): agy 目前模型不在清單時補全顯示並�
+- `4f9886d89` fix(web): 模型清單備用提示涵蓋 other-host 與 st
+- `9724d2d26` feat(web): 訊息翻譯切換改為微移淡入與圖示�
+- `5bbb8b01f` feat(agy): prompt cache 倒數（12 分 TTL），不進保
+- `c83e90007` fix(agy): 進行中泡泡顯示 agy 活動列（讀檔／�
+- `b1047a48f` feat(translate): 訊息翻譯「重新翻譯」按鈕＋�
+- `d3880bd24` fix(agy): Gemini 4 Argon 週額度不再蓋掉 Gemini 週�
+- `d27177e3d` feat(web): agy Argon 改為血條列與 Ar 標籤
+- `9c7596ed7` refactor(web): 刪除死碼 dateTimeLabel 與 dropBefore�
+- `2b8c0646e` refactor(web): 測試 harness 共用化：未讀規則、m
+- `c00748a10` refactor(web): 抽 CapEditor 共用總花費上限編輯�
+- `81d37e282` fix(agy): Orchestrator slug（gemini-pro-orchestrator-*）
+- `e8eb454bf` feat(web): 手機額度列改緊湊卡片（方案 1，390
+- `00b09397b` feat(web): 手機 agy Argon（Ar）比照 Fable：low／cr
+- `0cc630f95` chore(web): 額度彈窗移除 agy 登出鈕（使用者�
+- `fc76cd8fc` fix(web): agy popover 只有 Argon 有讀數時不寫「�
+- `3f794e477` chore(web): 移除 agy 登出鈕後的孤兒 i18n 字串
+- `e75cfd00c` feat(web): agy 模型選單拆成「模型＋強度」兩�
+- `7fddc5940` test(web): blobUrlCache／outboxPreviewCache 測試不再�
+- `c450a0103` fix(web): 額度列餘額晶片數字一律 toFixed(1)
+- `d8cadea59` feat(translate): 譯文「複盤」——完成的譯文�
+- `c2ee11a18` feat(web): 使用者訊息旁逐項帳本進度列，支�
+- `885aefdd2` fix(web): 手機底部輸入列在 safe-area 之外不再�
+- `bf8b42cbd` fix(web): 單筆未分流的帳本進度列改顯示「加
+- `814476e0e` fix(web): 手機換版橫幅與通知改到螢幕垂直中
+- `6a6af606f` fix(web): 手機輸入列左右內距避開 iPhone 螢幕�
+- `94fecdaab` feat(web): 帳本追蹤任務 UI 重做（白話摘要＋�
+- `c3e49701c` feat(web): 對話窗上方的「追蹤中」列（本專�
+- `c6dba5659` fix(ledger): 預設不自動收件；使用者訊息可手
+- `1eeca5e9e` feat(ledger): 待驗收（answered）：管理者交件、
+- `3bb0a67b0` Revert "fix(web): 手機輸入列左右內距避開 iPhone
+- `773c0f3cf` feat(web): 專案血統清單與快取節省顯示及統�
+- `fb69cb281` fix(ledger): 待驗收的「還沒好」改為「不知道
+- `ae511749a` fix(agy): 背景工作數改讀底部狀態列，側欄能
+- `f7b11ebc3` fix(web): 手機追蹤任務面板改掛到 body，不再�
+- `fb80eb9e8` feat(auth): detect Claude OAuth refresh token expiry and p
+- `df663a090` fix(web): center Claude expiry notice on mobile and locali
+- `771b5a03b` fix(web): 自動翻譯只有選取文字時保留原文，
+- `a923fa66c` fix(web): 加入追蹤選單改用不透明面板底色與
+- `e4297bd1c` feat(web): 事項代碼改為左側固定寬度膠囊並�
+- `1c8f97379` fix(web): 側欄專案卡改為顯示被停用的身份名
+- `d7af5803a` feat(hosts): 移除 Grok baseline 項目，補 darwin 去�
+- `9c718e3af` feat(daemon,web): support context_tokens and automatic com
+- `9dd623538` fix(hosts): #719 auto 投影到 web、移除舊 accessor�
+- `88e23f53b` fix(agy): 身份登入後立即重新探額度、未登入
+- `0e6296e91` fix(identities): 遠端同步納管 coN/gkN/agN alias，�
+- `3dc3d1ef3` fix(agy): agy 沒設 context 時預設 400k（自動壓縮
+- `d380c3569` feat(agy): 網頁 GUI 登入輔助——登入 pane 自動
+- `459e72090` feat(ledger): 待驗收分待部署與已部署（deploy_s
+- `5d738b155` feat(web): 側欄執行者 Wkr 精簡（單行群集、活
+- `77cc819fd` fix(web): 英文回覆的表格列不再壓低「主要是
+- `86949766b` feat(cache): 將 agy prompt cache TTL 改為 1 小時（36
+- `d8c99894d` feat(web): 手機版通知改為輸入列上方輕量膠�
+- `20a0674a2` feat(daemon,web): 分享功能 bot 於 bot menu 標示且�
+- `afee7d3be` feat(web): 側欄 Worker 區執行者群集改卡片＋kin
+- `d132e8202` feat(web): 專家模式把分享 bot 獨立成「分享用
+- `11a009778` fix(web): 終端機連結不再跳原生 confirm，並禁�
+- `07753571b` feat(baseline): 缺檔照模板寫入、缺工具用官方
+- `687dd9522` fix(web): 保留 reset_offer_snoozed_until，修正重置�
+- `f2c6640f5` feat(schedules): 排程基準快照支援 agy，無基準�
+- `c56079f55` fix(web): 右下角升級通知精簡成一行，細節留
+- `60eb85094` fix(web): 升級通知文字改由前端 i18n 組字，英
+- `bad3b6e17` feat(web): 排程最近執行顯示每次執行當時的 b
+- `e493ad282` fix(web): 排程編輯器窄螢幕不再橫向溢出，最
+- `925d803c4` fix(web): 排程編輯器深色主題改用主題 token，
+- `7d0e3c35b` fix(update): 一條龍升級同一台的 claude 與 codex 
+- `7e559a4a4` fix: fb-scan 第 4、6、8 條（血統區塊主題 token�
+
+## 結論（最終版，#2214 收尾，2026-11-26）
+
+**這份報告取代前面所有「結論」段**（前文各段保留原樣，不改寫）。
+
+### 已開 issue（#2214 全部批次）
+
+| issue | 內容 | 狀態 |
+|---|---|---|
+| #2216 | 待套用橫幅內文英文仍中文 | 已修（742ae9568）並關閉 |
+| #2217 | 成本總覽分類色寫死 hex | 已關閉 |
+| #2218 | 排程回合撞 API 上限可能被判「任務成功」（797a8f2fd） | 開啟 |
+| #2219 | 排程回合繞過每小時請求數上限（41172e5f0） | 開啟 |
+| #2220 | 排程停用時，執行中狀態被蓋掉 | 開啟 |
+| #2221 | 群集「全部刪除」在 AGM 專案內只刪到一顆（9e5d9d06a） | 開啟 |
+| #2222 | 手機前景抑制推播，一次性的登入到期提醒永久漏送（fb80eb9e8 × ec95c9678） | 開啟 |
+
+### 需使用者裁示
+
+- **html 同源執行**（121ba320a）：使用者 2026-11-18 已接受風險，請再確認威脅模型，必要時改回沙箱或分來源。
+- **「最近刪除」頁移除後的還原入口**（3205b0116、aec4ef485）：目前網頁上沒有還原路徑。
+- **Opus 5.5 每回合帶 adaptive thinking**（2bcc1aa07）：計費與延遲會變，commit 訊息未提。
+- **claude-api／openai-api 每回合與每小時上限預設不設**（1801dad13、41172e5f0）：總上限已確認存在（`cap.rs total_cap`）；每小時上限與預設不設的部分，請標在文件。
+- **host baseline 的 auto 模式**（07753571b）：會不經逐次確認執行 `curl | sh` 類安裝；rtk 指向未釘版的 `master`。預設 off。
+- **agy 預設自動 `/compact`**（9c718e3af、3dc3d1ef3）：所有 agy bot 預設 400k，超過就送 `/compact`；未實機驗證。
+- **28131f39c 的 i18n-ignore**：不補回（違反 `AGENTS.md` 的註解政策），需從 (a)(b)(c) 三擇一決定工具機制，見 §7。
+- **openai-api 預設模型改 gpt-6.2-astra**（663260b48）：請確認是預期。
+
+### 待實機
+
+- 手機前景推播抑制（§5 #2、#2222）：鎖屏後是否仍抑制、是否吞掉一次性通知。
+- plan 卡片與 queued 的 2.1.326 實機 fixture（§7，前半）。
+- agy 的 `/compact` 是否可用，以及 `total_input_tokens` 的語意（§7 #4）。
+- 額度列改版、窄側欄排程名稱：桌機窄寬與手機 390px 截圖。
+
+### 候選（低，不開 issue）
+
+- 93ac0fb18 SQL 判準寬；68eb5cc55 游標不可見時仍送 Down；`has_prompt_cue` 的 PageUp／PageDown 寬鬆規則（前半）。
+- 9e5d9d06a 的通知逐顆一則、選取可能指向已刪 bot（§7 #7）。
+- 28131f39c 遺失 64 行 `i18n-ignore`（§7，需決定機制）；7953bcc71 縮寫；43e7507f8 文案；bb3baa388 門檻；f3c957e63 rm 路徑。
+
+### 未完成（#2214 關閉時的誠實範圍）
+
+- **網頁後半 85 個 commit 只看標題**（附錄，§7）。優先的 `9e5d9d06a` 與複盤系列已精讀；其餘依風險抽讀，多數沒有看 diff。
+- `ledger_deploy.rs`（459e72090，156 行）未逐段讀。
+- api_bot：`f6243f1b2`、`b48e818ce`、`62ab6d042` 未逐段讀（§6 已標）。
+- 網頁前半的草稿與附件、窄螢幕各版面只做了 diff 層級的審查（§4、§5 補審）。
+
+這些未完成項目都列在上面，沒有遺漏；若需要另一批審查，請從附錄開始。
