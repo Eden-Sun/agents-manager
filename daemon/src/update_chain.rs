@@ -8,6 +8,7 @@
 //! 串接的狀態在 `cli_update_chains`（durable），成員以 `cli_update_chain_members` 為準：daemon 重啟後 [`recover_at_startup`] 接手——
 //! 還在裝的等安裝收尾，已進到重啟階段的重跑一次（候選與排程都由 bot 當下的更新通知決定，重跑不會重啟已套用的、也不會重複排）；
 //! 一個成員都沒有的（建立途中 daemon 掛掉）判失敗，不當成功。
+//! 串接從 `started_at` 起算有總時限（[`CHAIN_LIMIT`]）：超過還有安裝沒結束就收尾 `ok:false` `chain_timeout`，已 done 的照樣重啟。
 //! 進度走 WS `update_chain_progress`／`update_chain_done`，`GET /api/state` 的 `update_chains` 供網頁對帳。
 
 use crate::bulk_restart::{is_candidate, skip_reason, Scope, Skip};
@@ -24,6 +25,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(500);
+
+/// 串接從 `started_at`（DB）起算的總時限。超過還有安裝在跑就收尾為失敗；daemon 重啟後接手也以同一個開始時間計。
+const CHAIN_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallIn {
@@ -192,6 +196,7 @@ enum Install {
 /// 串接當下的樣子：成員（以 `cli_update_chain_members` 為準）各自的安裝狀態、還排著的、開不起來的。
 struct Snapshot {
     status: String,
+    started_at: String,
     members: Vec<(Member, Install)>,
     pending: Vec<InstallIn>,
     rejected: Vec<Value>,
@@ -222,12 +227,12 @@ impl Snapshot {
 
 /// 讀不到（DB 暫時不通）回 `None`，串接不存在回 `Some(None)`。
 async fn snapshot(app: &Arc<App>, chain_id: &str) -> Option<Option<Snapshot>> {
-    let row: Option<(String, String, String)> = sqlx::query_as("SELECT status, pending, rejected FROM cli_update_chains WHERE id = ?")
+    let row: Option<(String, String, String, String)> = sqlx::query_as("SELECT status, pending, rejected, started_at FROM cli_update_chains WHERE id = ?")
         .bind(chain_id)
         .fetch_optional(&app.db)
         .await
         .ok()?;
-    let Some((status, pending, rejected)) = row else { return Some(None) };
+    let Some((status, pending, rejected, started_at)) = row else { return Some(None) };
     let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT m.update_id, u.host, u.kind, u.status, u.result FROM cli_update_chain_members m
          LEFT JOIN cli_updates u ON u.id = m.update_id WHERE m.chain_id = ? ORDER BY u.started_at, m.update_id",
@@ -254,6 +259,7 @@ async fn snapshot(app: &Arc<App>, chain_id: &str) -> Option<Option<Snapshot>> {
         .collect();
     Some(Some(Snapshot {
         status,
+        started_at,
         members,
         pending: serde_json::from_str(&pending).unwrap_or_default(),
         rejected: serde_json::from_str(&rejected).unwrap_or_default(),
@@ -301,7 +307,12 @@ async fn start_next(app: &Arc<App>, runner: &Arc<dyn Runner>, chain_id: &str, s:
 
 /// 同一台的安裝一筆接一筆開，等全部收尾（或有一筆失敗後已開的收尾），再對裝好的範圍重啟。DB 暫時讀不到就等下一輪，不當成失敗。
 pub async fn drive(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: &str) {
-    let s = loop {
+    drive_with_limit(app, runner, chain_id, CHAIN_LIMIT).await
+}
+
+/// 同 [`drive`]，時限可換（測試用）。時限到時還有安裝沒結束：不再開新的，已 done 的照樣重啟，還在跑的與排著的都算失敗（`chain_timeout`）。
+pub async fn drive_with_limit(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: &str, limit: Duration) {
+    let (s, timed_out) = loop {
         let Some(read) = snapshot(app, chain_id).await else {
             tokio::time::sleep(POLL).await;
             continue;
@@ -317,12 +328,15 @@ pub async fn drive(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: &str) {
             return;
         }
         if s.status == "restarting" {
-            break s;
+            break (s, false);
         }
         if s.failures().is_empty() && start_next(app, &runner, chain_id, &mut s).await {
             continue;
         }
         if s.any_running() {
+            if past_limit(&s.started_at, limit) {
+                break (s, true);
+            }
             tokio::time::sleep(POLL).await;
             continue;
         }
@@ -331,21 +345,38 @@ pub async fn drive(app: &Arc<App>, runner: Arc<dyn Runner>, chain_id: &str) {
             .bind(chain_id)
             .execute(&app.db)
             .await;
-        break s;
+        break (s, false);
     };
     let mut failed = s.failures();
-    failed.extend(s.pending.iter().map(|p| json!({"host": p.host, "kind": p.kind, "reason": "install_not_started", "error": "前面的安裝沒有完成，這一項沒有開始"})));
+    if timed_out {
+        failed.extend(s.members.iter().filter(|(_, st)| matches!(st, Install::Running)).map(|(m, _)| json!({"host": m.host, "kind": m.kind, "reason": "chain_timeout", "error": "安裝超過串接時限，還沒有結束"})));
+    }
+    failed.extend(s.pending.iter().map(|p| json!({"host": p.host, "kind": p.kind, "reason": "install_not_started", "error": if timed_out { "串接超過時限，這一項沒有開始" } else { "前面的安裝沒有完成，這一項沒有開始" }})));
     let done = s.done();
     app.emit("update_chain_progress", json!({"chain_id": chain_id, "phase": "restarting", "members": done})).await;
     let mut out = restart_phase(app, runner.as_ref(), &done).await;
-    if failed.is_empty() {
+    if failed.is_empty() && !timed_out {
         finish(app, chain_id, true, out).await;
         return;
     }
-    let reason = if s.members.iter().any(|(_, st)| matches!(st, Install::Failed(_))) { "install_failed" } else { "install_not_started" };
+    let reason = if timed_out {
+        "chain_timeout"
+    } else if s.members.iter().any(|(_, st)| matches!(st, Install::Failed(_))) {
+        "install_failed"
+    } else {
+        "install_not_started"
+    };
     out["reason"] = json!(reason);
     out["failed"] = json!(failed);
     finish(app, chain_id, false, out).await;
+}
+
+/// `started_at`（RFC 3339，[`crate::db::now`] 寫的）到現在是否已經過了 `limit`。讀不懂時器不動，不當成逾時。
+fn past_limit(started_at: &str, limit: Duration) -> bool {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .ok()
+        .and_then(|start| (chrono::Utc::now() - start.with_timezone(&chrono::Utc)).to_std().ok())
+        .is_some_and(|elapsed| elapsed >= limit)
 }
 
 fn busy(skip: Skip) -> bool {
@@ -646,6 +677,67 @@ mod tests {
         assert_eq!(done["reason"], "no_members");
         assert_eq!(done["failed"][0]["kind"], "codex");
         assert!(fake.restarts().is_empty());
+        assert!(running_list(&env.app).await.is_empty());
+    }
+
+    /// 直接寫一條串接與它的成員（host 都是 local）：`(update_id, kind, cli_updates 的 status)`。
+    async fn seed_chain(env: &crate::testing::Env, chain: &str, started_at: &str, members: &[(&str, &str, &str)]) {
+        let now = crate::db::now();
+        let rows: Vec<Member> = members.iter().map(|(u, k, _)| Member { update_id: u.to_string(), host: "local".into(), kind: k.to_string() }).collect();
+        sqlx::query("INSERT INTO cli_update_chains (id, status, members, started_at, updated_at) VALUES (?, 'running', ?, ?, ?)")
+            .bind(chain)
+            .bind(serde_json::to_string(&rows).unwrap())
+            .bind(started_at)
+            .bind(&now)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        for (u, k, st) in members {
+            let result = if *st == "done" { Some("{\"ok\":true}") } else { None };
+            sqlx::query("INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at, result) VALUES (?, 'local', ?, 'x', ?, 'finishing', 'old', ?, ?, ?)")
+                .bind(u)
+                .bind(k)
+                .bind(st)
+                .bind(&now)
+                .bind(&now)
+                .bind(result)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO cli_update_chain_members (update_id, chain_id) VALUES (?, ?)").bind(u).bind(chain).execute(&env.app.db).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_stuck_running_past_the_limit_finishes_chain_timeout_and_restarts_the_done_ones() {
+        let env = crate::testing::env().await;
+        let now = crate::db::now();
+        seed_chain(&env, "c-timeout", &now, &[("u-claude", "claude", "done"), ("u-codex", "codex", "running")]).await;
+        let fake = Fake::per_kind(vec![("claude", "x", "y"), ("codex", "x", "y")], vec![]);
+        let mut rx = env.app.subscribe();
+        drive_with_limit(&env.app, fake.clone(), "c-timeout", Duration::from_millis(50)).await;
+        let done = done_event(&mut rx).await;
+        assert_eq!(done["ok"], false, "{done}");
+        assert_eq!(done["reason"], "chain_timeout", "{done}");
+        assert_eq!(done["failed"][0]["kind"], "codex");
+        assert_eq!(done["failed"][0]["reason"], "chain_timeout");
+        assert_eq!(fake.restarts(), vec![("claude".to_string(), "local".to_string())], "已 done 的照樣重啟，還在跑的不動");
+        assert!(running_list(&env.app).await.is_empty(), "收尾後不再列在 state");
+        let status: String = sqlx::query_scalar("SELECT status FROM cli_update_chains WHERE id = 'c-timeout'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn a_chain_recovered_after_its_persisted_start_passed_the_limit_times_out_at_once() {
+        let env = crate::testing::env().await;
+        seed_chain(&env, "c-old", "2020-01-01T00:00:00.000Z", &[("u-stuck", "claude", "running")]).await;
+        let fake = Fake::new("x", "y", true);
+        let mut rx = env.app.subscribe();
+        drive(&env.app, fake.clone(), "c-old").await;
+        let done = done_event(&mut rx).await;
+        assert_eq!(done["ok"], false, "{done}");
+        assert_eq!(done["reason"], "chain_timeout", "{done}");
+        assert!(fake.restarts().is_empty(), "沒有已 done 的就不重啟");
         assert!(running_list(&env.app).await.is_empty());
     }
 }
