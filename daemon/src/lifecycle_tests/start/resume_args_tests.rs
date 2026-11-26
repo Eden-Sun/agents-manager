@@ -660,6 +660,7 @@ async fn agy_start_pins_permissions_model_env_trust_and_hooks_in_the_fake_home()
     let env_of = |method: &str| e.herdr.calls_to(method).into_iter().find_map(|p| p.get("env").cloned());
     let pane_env = env_of("tab.create").or_else(|| env_of("pane.split")).or_else(|| env_of("workspace.create")).expect("a pane was created with env");
     assert_eq!(pane_env["AGY_CLI_DISABLE_AUTO_UPDATE"], "true", "agy 的自我更新每個 pane 都關掉：{pane_env}");
+    assert!(pane_env.get("CLAUDE_CODE_RETRY_WATCHDOG").is_none(), "{pane_env}");
 
     let home = crate::home::dir().unwrap();
     let settings: Value = serde_json::from_str(&std::fs::read_to_string(crate::agy_support::settings_path(&home)).unwrap()).unwrap();
@@ -2390,4 +2391,17 @@ fn fresh_session_id_is_a_valid_uuid_and_yields_to_explicit_session_flags() {
     for flag in ["--resume", "-c", "--session-id=x", "--fork-session"] {
         assert!(claude_fresh_session_id(&[flag.to_string()]).is_none(), "{flag}");
     }
+}
+
+/// claude 啟動：pane env 帶 `CLAUDE_CODE_RETRY_WATCHDOG` 與等待上限（#2229），agy 不帶。
+#[tokio::test]
+async fn claude_start_enables_the_retry_watchdog_with_wait_caps() {
+    let e = env().await;
+    let bot = claude_bot(&e.app, &e.project_id, "watchdog").await;
+    start_bot(&e.app, &bot.id).await.unwrap();
+    let env_of = |method: &str| e.herdr.calls_to(method).into_iter().find_map(|p| p.get("env").cloned());
+    let pane_env = env_of("tab.create").or_else(|| env_of("pane.split")).or_else(|| env_of("workspace.create")).expect("a pane was created with env");
+    assert_eq!(pane_env["CLAUDE_CODE_RETRY_WATCHDOG"], "1", "{pane_env}");
+    assert_eq!(pane_env["CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS"], "600000", "{pane_env}");
+    assert_eq!(pane_env["CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS"], "60000", "{pane_env}");
 }

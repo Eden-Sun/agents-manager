@@ -1080,6 +1080,14 @@ fn shell_join(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// claude 自己重試暫時性 API 錯誤（529／5xx／斷線，issue #2229）：互動 TUI 實測生效（畫面顯示 `attempt N/300`）。
+/// 總等待上限 10 分鐘，之後才照舊收成 failed 交給 `api_error_nudge`；額度重置超過 1 分鐘就不等，照舊走額度暫停。
+pub const CLAUDE_RETRY_WATCHDOG_ENV: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_RETRY_WATCHDOG", "1"),
+    ("CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS", "600000"),
+    ("CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS", "60000"),
+];
+
 /// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins); `$HOME` / `~` expand against that host's home.
 pub async fn pane_env(
     app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
@@ -1148,6 +1156,11 @@ pub async fn pane_env_for_fence(
     env.insert("CLAUDECODE".into(), json!(""));
     if bot.kind == "agy" {
         env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), json!("true"));
+    }
+    if bot.kind == "claude" {
+        for (k, v) in CLAUDE_RETRY_WATCHDOG_ENV {
+            env.insert((*k).into(), json!(v));
+        }
     }
 
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {

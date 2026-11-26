@@ -771,6 +771,10 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **清除**：下一回合開始（`arm_progress`）設回 NULL 並推 `bot_status`。寫不進去就由那一回合的輪詢器再清（#193）：留著的話，
   這一回合斷在同一句錯誤上會被「同一行只記一次」吞掉。
 - UI：側欄「⚠ 中斷」、標題列紅 chip，點開看原文與「重送上一則」（走既有 prompt API）。浮層是 `role="dialog"`：打開時焦點進浮層，Esc 或重送成功收起時焦點回到徽章鈕（#1590）。
+- **claude 自己重試暫時性 API 錯誤**（#2229，2026-11-26）：kind=claude 的 pane env 帶 `CLAUDE_CODE_RETRY_WATCHDOG=1`、
+  `CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=600000`（529／5xx／斷線最多重試 10 分鐘）、`CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=60000`
+  （額度重置超過 1 分鐘就不等，照舊結束回合交給額度暫停）。互動 TUI 實測生效（2.1.332，mock 回 529：畫面 `529 Overloaded · retrying in Ns · attempt N/300`、
+  到上限才印 `API Error` 結束回合）。重試期間畫面是 working（esc to interrupt），卡住偵測只看 idle，不受影響。等滿上限仍失敗才走下面的續行後備。
 - **暫時性 API 錯誤自動續行**（`api_error_nudge.rs`，2026-11-04）：kind=claude（本機、遠端皆可，只靠畫面與 DB）的回合被**暫時性**錯誤截斷時，
   `capture` 之後 daemon 在記憶體 arm 一個等待，30 秒後才確認。暫時性＝`Connection lost`／`connection error`／`Overloaded`／529／500／502／503／504／
   `timeout`／`timed out`／`ECONNRESET`；額度撞限、模型滿載、資安過濾、任何 4xx（400／401／403／404／429、`invalid_request`）一律不補。
