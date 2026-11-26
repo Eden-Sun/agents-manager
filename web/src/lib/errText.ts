@@ -33,5 +33,6 @@ export const BASE_SNAPSHOT_REASON_TEXT = [
   ['base_snapshot_unsupported_kind', msg('基準快照只支援 codex、agy Bot')],
   ['base_snapshot_create_failed', msg('自動製作基準快照失敗，請確認 Bot 能正常啟動並有對話後再試')],
   ['base_snapshot_copy_failed', msg('複製 agy 對話失敗，無法建立基準快照')],
+  ['agy_sqlite3_missing', msg('agy 所在主機沒有 sqlite3 指令，無法複製對話；請先在該主機安裝 sqlite3')],
   ['base_fork_failed', msg('agy 對話分岔失敗，這次沒有在舊 context 執行')],
 ] as const

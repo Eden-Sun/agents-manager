@@ -108,9 +108,11 @@ async fn lock_latest(app: &Arc<App>, bot: &db::Bot, by: &str) -> Result<Snapshot
     };
     if bot.kind == "agy" {
         let host = db::bot_host(&app.db, &bot.id).await.map_err(up)?;
-        session_id = lifecycle::agy_session::clone_conversation(app.as_ref(), &host, bot.identity.as_deref(), &session_id)
-            .await
-            .map_err(|e| LcError::conflict("base_snapshot_copy_failed", json!({"reason": "base_snapshot_copy_failed", "bot_id": bot.id, "cause": e.to_string()})))?;
+        session_id = lifecycle::agy_session::clone_conversation(app.as_ref(), &host, bot.identity.as_deref(), &session_id).await.map_err(|e| {
+            let reason = if lifecycle::agy_session::is_sqlite3_missing(&e) { lifecycle::agy_session::SQLITE3_MISSING } else { "base_snapshot_copy_failed" };
+            LcError::conflict(reason, json!({"bot_id": bot.id, "host": host, "cause": e.to_string()}))
+        })?;
+        lifecycle::agy_session::record_copy(&app.db, &session_id, &bot.id, &host, bot.identity.as_deref(), "base", None).await.map_err(up)?;
         transcript = None;
     }
     sqlx::query(
@@ -125,7 +127,29 @@ async fn lock_latest(app: &Arc<App>, bot: &db::Bot, by: &str) -> Result<Snapshot
     .execute(&app.db)
     .await
     .map_err(up)?;
+    if bot.kind == "agy" {
+        spawn_sweep(app, Some(&bot.id));
+    }
     get(&app.db, &bot.id).await.map_err(up)?.ok_or_else(|| up("snapshot vanished"))
+}
+
+/// 背景清掉用不到的 agy 對話複本（`agy_session::sweep_copies`）；遠端要 ssh，不擋呼叫端。
+pub fn spawn_sweep(app: &Arc<App>, bot_id: Option<&str>) {
+    let (app, bot_id) = (app.clone(), bot_id.map(str::to_owned));
+    tokio::spawn(async move {
+        if let Err(e) = lifecycle::agy_session::sweep_copies(app.as_ref(), bot_id.as_deref()).await {
+            tracing::warn!(bot = ?bot_id, error = ?e, "agy copies: sweep failed");
+        }
+    });
+}
+
+fn ensure_locks() -> &'static Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
+async fn progress(app: &Arc<App>, bot_id: &str, state: &str, message: Option<&str>) {
+    app.emit("base_snapshot_progress", json!({"bot_id": bot_id, "state": state, "message": message})).await;
 }
 
 /// 全新 agy 啟動後還沒有對話（第一則訊息送出才產生，hook 只回報狀態）：送一則 daemon 來源的種子訊息，等這一回合完成，
@@ -172,20 +196,45 @@ async fn seed_agy(app: &Arc<App>, bot: &db::Bot) -> Result<(), String> {
 
 /// 勾 `from_base` 前：目標 bot 沒有基準就自動製作（不回 400）。有 native session 就鎖；完全沒有就照正常方式啟動一次、
 /// 等它回報 session 再鎖。bot 不合格（不是這個專案可接排程的 bot）時什麼都不做，由後續檢查回對的錯。
+/// 同一顆 bot 同時只有一份在做：後到的請求等前一份的結果，有基準了就直接用，不再送第二則種子。
+/// 開始與結束推 `base_snapshot_progress`（building／ready／failed），網頁據此顯示進度。
 pub(super) async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<(), LcError> {
     if get(&app.db, bot_id).await.map_err(up)?.is_some() {
         return Ok(());
     }
+    let lock = ensure_locks().lock().unwrap().entry(bot_id.to_string()).or_default().clone();
+    let _one = lock.lock().await;
+    if get(&app.db, bot_id).await.map_err(up)?.is_some() {
+        return Ok(());
+    }
+    let out = ensure_once(app, bot_id, project_id).await;
+    match &out {
+        Ok(true) => progress(app, bot_id, "ready", None).await,
+        Ok(false) => {}
+        Err(e) => {
+            let msg = match e {
+                LcError::Conflict(v) | LcError::BadValue(v) => v.get("message").and_then(Value::as_str).or_else(|| v.get("reason").and_then(Value::as_str)).map(str::to_owned),
+                other => Some(format!("{other:?}")),
+            };
+            progress(app, bot_id, "failed", msg.as_deref()).await;
+        }
+    }
+    out.map(|_| ())
+}
+
+/// 回 true＝這次做了基準。
+async fn ensure_once(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<bool, LcError> {
     {
         let mut tx = app.db.begin().await.map_err(up)?;
         if runner::eligible_bot_tx(&mut tx, bot_id, Some(project_id)).await.map_err(up)?.is_none() {
-            return Ok(());
+            return Ok(false);
         }
     }
-    let Some(bot) = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()) else { return Ok(()) };
+    let Some(bot) = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()) else { return Ok(false) };
     if !supported(&bot.kind) {
         return Err(unsupported(bot_id));
     }
+    progress(app, bot_id, "building", None).await;
     let failed = |why: String| LcError::conflict("base_snapshot_create_failed", json!({"reason": "base_snapshot_create_failed", "bot_id": bot_id, "message": format!("找不到 {} 的基準快照，自動製作也失敗：{why}", bot.name)}));
     if latest_session(&app.db, bot_id).await?.is_none() {
         if db::active_run(&app.db, bot_id).await.map_err(up)?.is_none() {
@@ -202,13 +251,14 @@ pub(super) async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Re
             tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 500 })).await;
         }
     }
-    lock_latest(app, &bot, "schedule").await.map(|_| ())
+    lock_latest(app, &bot, "schedule").await.map(|_| true)
 }
 
 /// `DELETE /api/bots/{id}/base-snapshot`：清除基準（沒有也回成功）。仍勾著 `from_base` 的排程之後會 failed（`base_snapshot_missing`）。
 pub async fn clear(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(p): Extension<crate::api::RequestPrincipal>) -> Result<Response, LcError> {
     authorize(&app, &p, &id).await?;
     sqlx::query("DELETE FROM bot_base_snapshots WHERE bot_id = ?").bind(&id).execute(&app.db).await.map_err(up)?;
+    spawn_sweep(&app, Some(&id));
     Ok((StatusCode::OK, Json(json!({"locked": false}))).into_response())
 }
 
@@ -287,7 +337,8 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
             return Ok(false);
         }
         Err(LcError::Conflict(v)) if v.get("reason").and_then(Value::as_str) == Some("base_fork_failed") => {
-            fail(app, &sched, &occ, "base_fork_failed", &format!("agy 對話分岔失敗：{v}"), true).await?;
+            let code = if v.get("code").and_then(Value::as_str) == Some(lifecycle::agy_session::SQLITE3_MISSING) { lifecycle::agy_session::SQLITE3_MISSING } else { "base_fork_failed" };
+            fail(app, &sched, &occ, code, &format!("agy 對話分岔失敗：{v}"), code == "base_fork_failed").await?;
             return Ok(false);
         }
         Err(e) => {
@@ -298,6 +349,9 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
     if let Err((code, why)) = wait_running(pool, &run_id).await {
         fail(app, &sched, &occ, code, why, true).await?;
         return Ok(false);
+    }
+    if bot.kind == "agy" {
+        spawn_sweep(app, Some(&bot.id));
     }
     runner::enqueue_now(app, occurrence_id).await
 }

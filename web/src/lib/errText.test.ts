@@ -23,5 +23,6 @@ test('isLegacyDaemonError', () => {
 test('reason tables', () => {
   assert.equal(reasonTextBySubstring('x api_retire_busy y', RETIRE_REASON_TEXT), 'bot 仍有進行中的回合或關閉尚未完成，請稍後再試')
   assert.equal(reasonTextBySubstring('base_snapshot_not_codex', BASE_SNAPSHOT_REASON_TEXT), '基準快照只支援 codex、agy Bot')
+  assert.equal(reasonTextBySubstring('base_fork_failed agy_sqlite3_missing', BASE_SNAPSHOT_REASON_TEXT), 'agy 所在主機沒有 sqlite3 指令，無法複製對話；請先在該主機安裝 sqlite3')
   assert.equal(reasonTextBySubstring('other', RETIRE_REASON_TEXT), null)
 })

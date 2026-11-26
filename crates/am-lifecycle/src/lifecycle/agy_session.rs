@@ -199,7 +199,7 @@ pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAcces
 
 /// 排程基準快照的「分岔」（agy 沒有原生 fork，1.5.16 實測）：把對話資料庫 `conversations/<id>.db` 複成新 id、
 /// 改掉庫裡 `trajectory_meta.cascade_id`，連同 `brain/<id>/` 一起複製，再 `--conversation=<新 id>` 接續；來源檔不動。
-/// 回新對話 id。本機與遠端都在 agy 那台主機上跑（身份 HOME 與 [`Site`] 同一套）。
+/// 回新對話 id。本機與遠端都在 agy 那台主機上跑（身份 HOME 與 [`Site`] 同一套）。主機沒有 `sqlite3` 指令時錯誤以 [`SQLITE3_MISSING`] 開頭。
 pub async fn clone_conversation(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>, src: &str) -> anyhow::Result<String> {
     if !valid_session_id(src) {
         anyhow::bail!("bad conversation id `{src}`");
@@ -207,23 +207,48 @@ pub async fn clone_conversation(app: &(impl crate::hosts::HostsAccess + crate::l
     let site = Site::of(app, host, identity, None).await.ok_or_else(|| anyhow::anyhow!("agy home on `{host}` is unknown or the host is not connected"))?;
     let new = new_conversation_id();
     let script = clone_script(&site.agy_dir().to_string_lossy(), src, &new);
-    let out = match &site {
-        Site::Local { .. } => {
-            let o = tokio::process::Command::new("sh").arg("-c").arg(&script).output().await?;
-            if !o.status.success() {
-                anyhow::bail!("{}", String::from_utf8_lossy(&o.stderr).trim());
-            }
-            String::from_utf8_lossy(&o.stdout).into_owned()
-        }
-        Site::Remote { conn, .. } => conn.ssh_exec_path(&script).await?,
-    };
+    let out = run_on(&site, &script).await.map_err(|e| sqlite3_missing(host, e))?;
+    if out.contains(SQLITE3_MARK) {
+        return Err(sqlite3_missing(host, anyhow::anyhow!("{out}")));
+    }
     if !out.contains(CLONE_OK) {
         anyhow::bail!("conversation copy did not finish: {}", out.trim());
     }
     Ok(new)
 }
 
+async fn run_on(site: &Site, script: &str) -> anyhow::Result<String> {
+    match site {
+        Site::Local { .. } => {
+            let o = tokio::process::Command::new("sh").arg("-c").arg(script).output().await?;
+            let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+            if !o.status.success() {
+                anyhow::bail!("{}{}", stdout, String::from_utf8_lossy(&o.stderr).trim());
+            }
+            Ok(stdout)
+        }
+        Site::Remote { conn, .. } => conn.ssh_exec_path(script).await,
+    }
+}
+
+fn sqlite3_missing(host: &str, e: anyhow::Error) -> anyhow::Error {
+    if format!("{e:#}").contains(SQLITE3_MARK) {
+        anyhow::anyhow!("{SQLITE3_MISSING}: `{host}` 上沒有 sqlite3 指令，無法複製 agy 對話")
+    } else {
+        e
+    }
+}
+
+/// 錯誤碼：agy 那台主機沒有 `sqlite3` 指令。
+pub const SQLITE3_MISSING: &str = "agy_sqlite3_missing";
+
+pub fn is_sqlite3_missing(e: &anyhow::Error) -> bool {
+    e.to_string().starts_with(SQLITE3_MISSING)
+}
+
 const CLONE_OK: &str = "AGY_CLONE_OK";
+const SQLITE3_MARK: &str = "AGY_SQLITE3_MISSING";
+const GONE: &str = "AGY_GONE";
 
 pub fn new_conversation_id() -> String {
     let mut b = ulid::Ulid::new().0.to_be_bytes();
@@ -233,14 +258,105 @@ pub fn new_conversation_id() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
+fn sql_text(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 pub fn clone_script(agy_dir: &str, src: &str, new: &str) -> String {
     let d = crate::hosts::sh_quote(agy_dir);
+    let target = format!("{}/conversations/{new}.db", agy_dir.trim_end_matches('/'));
+    let vacuum = crate::hosts::sh_quote(&format!("VACUUM INTO {}", sql_text(&target)));
+    let relabel = crate::hosts::sh_quote(&format!("UPDATE trajectory_meta SET cascade_id={}", sql_text(new)));
     format!(
-        "set -e; D={d}; S={src}; N={new}; [ -f \"$D/conversations/$S.db\" ] || {{ echo \"no conversation $S\" >&2; exit 3; }}; \
-         sqlite3 \"$D/conversations/$S.db\" \"VACUUM INTO '$D/conversations/$N.db'\"; \
-         sqlite3 \"$D/conversations/$N.db\" \"UPDATE trajectory_meta SET cascade_id='$N'\"; \
-         if [ -d \"$D/brain/$S\" ]; then cp -R \"$D/brain/$S\" \"$D/brain/$N\"; fi; echo {CLONE_OK}"
+        "set -e; D={d}; S={src}; N={new}; command -v sqlite3 >/dev/null 2>&1 || {{ echo {SQLITE3_MARK}; echo {SQLITE3_MARK} >&2; exit 4; }}; \
+         [ -f \"$D/conversations/$S.db\" ] || {{ echo \"no conversation $S\" >&2; exit 3; }}; \
+         trap 'rm -f \"$D/conversations/$N.db\"; rm -rf \"$D/brain/$N\"' EXIT; \
+         sqlite3 \"$D/conversations/$S.db\" {vacuum}; \
+         sqlite3 \"$D/conversations/$N.db\" {relabel}; \
+         if [ -d \"$D/brain/$S\" ]; then cp -R \"$D/brain/$S\" \"$D/brain/$N\"; fi; trap - EXIT; echo {CLONE_OK}"
     )
+}
+
+/// 刪掉 agy 目錄底下這些對話（`conversations/<id>.db` 與其 WAL、`brain/<id>/`）；符號連結不跟、不刪。印出刪完的 id。
+pub fn remove_script(agy_dir: &str, ids: &[String]) -> String {
+    let d = crate::hosts::sh_quote(agy_dir);
+    let list = ids.iter().filter(|id| valid_session_id(id)).cloned().collect::<Vec<_>>().join(" ");
+    format!(
+        "D={d}; for N in {list}; do C=\"$D/conversations/$N.db\"; B=\"$D/brain/$N\"; \
+         if [ -L \"$C\" ] || [ -L \"$B\" ]; then continue; fi; \
+         rm -f \"$C\" \"$C-wal\" \"$C-shm\" && {{ [ ! -d \"$B\" ] || rm -rf \"$B\"; }} && echo \"{GONE} $N\"; done; :"
+    )
+}
+
+/// 記下 AG Man 複出來的對話（清除只刪這裡記的）。
+pub async fn record_copy(pool: &sqlx::SqlitePool, id: &str, bot_id: &str, host: &str, identity: Option<&str>, purpose: &str, run_id: Option<&str>) -> anyhow::Result<()> {
+    sqlx::query("INSERT OR REPLACE INTO agy_conversation_copies (id, bot_id, host, identity, purpose, run_id, created_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(id)
+        .bind(bot_id)
+        .bind(host)
+        .bind(identity)
+        .bind(purpose)
+        .bind(run_id)
+        .bind(db::now())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct Copy {
+    id: String,
+    host: String,
+    identity: Option<String>,
+}
+
+/// 用不到的複本：bot 已刪除；不是目前基準的 base 複本；不是該 bot 最新、也沒有在跑的 run 綁著的 run 複本。
+async fn stale_copies(pool: &sqlx::SqlitePool, bot_id: Option<&str>) -> anyhow::Result<Vec<Copy>> {
+    Ok(sqlx::query_as(
+        "SELECT c.id, c.host, c.identity FROM agy_conversation_copies c LEFT JOIN bots b ON b.id = c.bot_id
+          WHERE (?1 IS NULL OR c.bot_id = ?1)
+            AND (b.id IS NULL OR b.deleted_at IS NOT NULL
+              OR (c.purpose = 'base' AND NOT EXISTS (SELECT 1 FROM bot_base_snapshots s WHERE s.bot_id = c.bot_id AND s.session_id = c.id))
+              OR (c.purpose = 'run'
+                  AND c.id <> (SELECT n.id FROM agy_conversation_copies n WHERE n.bot_id = c.bot_id AND n.purpose = 'run' ORDER BY n.created_at DESC, n.rowid DESC LIMIT 1)
+                  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.state = 'running' AND r.ended_at IS NULL AND (r.native_session_id = c.id OR r.resume_session_id = c.id))))",
+    )
+    .bind(bot_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// 刪掉用不到的複本（[`stale_copies`]），回刪掉幾份。主機連不上的先留著，下次再清。`bot_id = None`＝全部（啟動時）。
+pub async fn sweep_copies(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), bot_id: Option<&str>) -> anyhow::Result<usize> {
+    let mut groups: std::collections::BTreeMap<(String, Option<String>), Vec<String>> = Default::default();
+    for c in stale_copies(app.db(), bot_id).await? {
+        groups.entry((c.host, c.identity)).or_default().push(c.id);
+    }
+    let mut removed = 0;
+    for ((host, identity), ids) in groups {
+        let Some(site) = Site::of(app, &host, identity.as_deref(), None).await else { continue };
+        let bad: Vec<&String> = ids.iter().filter(|id| !valid_session_id(id)).collect();
+        for id in bad {
+            sqlx::query("DELETE FROM agy_conversation_copies WHERE id = ?").bind(id).execute(app.db()).await?;
+        }
+        let out = match run_on(&site, &remove_script(&site.agy_dir().to_string_lossy(), &ids)).await {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!(host, error = ?e, "agy copies: removal failed; will retry");
+                continue;
+            }
+        };
+        for id in out.lines().filter_map(|l| l.strip_prefix(GONE).map(str::trim)) {
+            if ids.iter().any(|i| i == id) {
+                sqlx::query("DELETE FROM agy_conversation_copies WHERE id = ?").bind(id).execute(app.db()).await?;
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, bot = ?bot_id, "agy copies: removed conversation copies no longer needed");
+    }
+    Ok(removed)
 }
 
 /// 讀到紀錄之後順手補網頁的 `status_json`（模型與 context token 數）。已經收過 statusLine 時以 statusLine 為準，不覆蓋；沒變也不寫。
@@ -295,6 +411,53 @@ mod tests {
         assert!(!missing.status.success());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn a_home_with_a_single_quote_still_clones_and_a_missing_sqlite3_says_so() {
+        let dir = crate::home::dir().unwrap().join(format!(".agy-o'clone-{}", new_conversation_id()));
+        let conv = dir.join("conversations");
+        std::fs::create_dir_all(&conv).unwrap();
+        let src = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let o = std::process::Command::new("sqlite3").arg(conv.join(format!("{src}.db"))).arg(format!("create table trajectory_meta (cascade_id text); insert into trajectory_meta values ('{src}')")).output().unwrap();
+        assert!(o.status.success());
+        let new = new_conversation_id();
+        let o = std::process::Command::new("sh").arg("-c").arg(clone_script(&dir.to_string_lossy(), src, &new)).output().unwrap();
+        assert!(String::from_utf8_lossy(&o.stdout).contains(CLONE_OK), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(conv.join(format!("{new}.db")).is_file());
+        let empty = dir.join("nobin");
+        std::fs::create_dir_all(&empty).unwrap();
+        let other = new_conversation_id();
+        let o = std::process::Command::new("/bin/sh").env("PATH", &empty).arg("-c").arg(clone_script(&dir.to_string_lossy(), src, &other)).output().unwrap();
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stdout).contains(SQLITE3_MARK));
+        assert!(is_sqlite3_missing(&sqlite3_missing("m4p", anyhow::anyhow!("{}", String::from_utf8_lossy(&o.stderr)))));
+        assert!(!conv.join(format!("{other}.db")).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn removal_only_touches_the_named_copies_and_never_follows_links() {
+        let dir = crate::home::dir().unwrap().join(format!(".agy-rm-{}", new_conversation_id()));
+        let (conv, brain) = (dir.join("conversations"), dir.join("brain"));
+        let (gone, kept, linked) = (new_conversation_id(), new_conversation_id(), new_conversation_id());
+        for id in [&gone, &kept] {
+            std::fs::create_dir_all(brain.join(id).join("x")).unwrap();
+            std::fs::create_dir_all(&conv).unwrap();
+            std::fs::write(conv.join(format!("{id}.db")), "db").unwrap();
+        }
+        std::fs::write(conv.join(format!("{gone}.db-wal")), "wal").unwrap();
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, brain.join(&linked)).unwrap();
+        let ids = vec![gone.clone(), linked.clone(), "../outside".to_string()];
+        let o = std::process::Command::new("sh").arg("-c").arg(remove_script(&dir.to_string_lossy(), &ids)).output().unwrap();
+        let out = String::from_utf8_lossy(&o.stdout).to_string();
+        assert_eq!(out.lines().collect::<Vec<_>>(), vec![format!("{GONE} {gone}")]);
+        assert!(!conv.join(format!("{gone}.db")).exists() && !conv.join(format!("{gone}.db-wal")).exists() && !brain.join(&gone).exists());
+        assert!(conv.join(format!("{kept}.db")).exists() && brain.join(&kept).exists());
+        assert!(outside.is_dir() && brain.join(&linked).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_known_conversation_wins_while_it_is_open_otherwise_the_newest_free_one() {
         let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));

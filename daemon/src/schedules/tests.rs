@@ -997,6 +997,93 @@ mod from_base {
         assert_eq!(n, 1, "只送一則種子");
     }
 
+    fn agy_exists(id: &str) -> bool {
+        agy_dir().join("conversations").join(format!("{id}.db")).exists() || agy_dir().join("brain").join(id).exists()
+    }
+
+    async fn copies_of(e: &testing::Env, bot: &str) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT id, purpose FROM agy_conversation_copies WHERE bot_id = ? ORDER BY created_at, rowid").bind(bot).fetch_all(&e.app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn agy_copies_are_removed_once_replaced_and_when_the_bot_is_deleted() {
+        let e = testing::env().await;
+        let bot = agy_bot(&e, "ag").await;
+        let src = agy_conversation();
+        ended_session(&e, &bot.id, &src, None).await;
+        let first = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap()["session_id"].as_str().unwrap().to_string();
+        let second = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap()["session_id"].as_str().unwrap().to_string();
+        lifecycle::agy_session::sweep_copies(e.app.as_ref(), Some(&bot.id)).await.unwrap();
+        assert!(!agy_exists(&first), "換基準時刪舊基準");
+        assert!(agy_exists(&second) && agy_exists(&src), "目前的基準與 bot 自己的原對話不動");
+
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let occ = pending(&e.app, &s).await;
+            assert!(base::dispatch(&e.app, &occ).await.unwrap());
+            runs.push(started_args(&e).pop().unwrap().iter().find_map(|a| a.strip_prefix("--conversation=")).unwrap().to_string());
+            sqlx::query("UPDATE schedule_occurrences SET status = 'done' WHERE id = ?").bind(&occ).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET status = 'in_flight' WHERE status = 'queued'").execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET status = 'completed' WHERE status = 'in_flight'").execute(&e.app.db).await.unwrap();
+        }
+        lifecycle::agy_session::sweep_copies(e.app.as_ref(), Some(&bot.id)).await.unwrap();
+        assert!(!agy_exists(&runs[0]), "下一次 from-base 取代後刪掉上一份");
+        assert!(agy_exists(&runs[1]), "正在用的這份留著");
+        let kept: Vec<String> = copies_of(&e, &bot.id).await.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(kept, vec![second.clone(), runs[1].clone()]);
+
+        lifecycle::stop_bot(&e.app, &bot.id).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&e.app.db).await.unwrap();
+        lifecycle::agy_session::sweep_copies(e.app.as_ref(), None).await.unwrap();
+        assert!(!agy_exists(&second) && !agy_exists(&runs[1]), "bot 刪除後清掉");
+        assert!(copies_of(&e, &bot.id).await.is_empty());
+        assert!(agy_exists(&src), "只刪 AG Man 自己複出來的");
+    }
+
+    #[tokio::test]
+    async fn two_saves_for_the_same_agy_bot_build_one_base() {
+        let e = testing::env().await;
+        let ag = agy_bot(&e, "ag").await;
+        let src = agy_conversation();
+        let rule = "─".repeat(40);
+        e.herdr.set_screen("*", &format!("● hi\n{rule}\n>\n{rule}\n  Gemini 3.8 Flash · high\n"));
+        let (pool, id, conv_src) = (e.app.db.clone(), ag.id.clone(), src.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let conv = db::conversation_id(&pool, &id).await.unwrap();
+                let turn: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id = ? AND prompt_text LIKE '%建立排程基準對話%'").bind(&conv).fetch_optional(&pool).await.unwrap();
+                let Some(turn) = turn else { continue };
+                sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&turn).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE runs SET native_session_id = ? WHERE bot_id = ? AND ended_at IS NULL").bind(&conv_src).bind(&id).execute(&pool).await.unwrap();
+                break;
+            }
+        });
+        let mut events = e.app.subscribe();
+        let save = |crid: &str| {
+            let mut body = daily(&ag.id, "x");
+            body.client_request_id = crid.into();
+            body.from_base = true;
+            api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body))
+        };
+        let (a, b) = tokio::join!(save("crid-a"), save("crid-b"));
+        a.unwrap();
+        b.unwrap();
+        let conv = db::conversation_id(&e.app.db, &ag.id).await.unwrap();
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user' AND content LIKE '%建立排程基準對話%'").bind(&conv).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n, 1, "第二個請求等第一個的結果，不再送種子");
+        assert_eq!(copies_of(&e, &ag.id).await.len(), 1, "只複製一份");
+        let mut states = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "base_snapshot_progress" {
+                states.push(ev.data["state"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        assert_eq!(states, ["building", "ready"]);
+    }
+
     #[tokio::test]
     async fn an_agy_that_never_answers_the_seed_times_out_with_a_clear_reason() {
         let e = testing::env().await;

@@ -304,6 +304,9 @@ const dict: Dict = {
   '自動製作基準快照失敗，請確認 Bot 能正常啟動並有對話後再試': 'Could not build the baseline snapshot automatically; make sure the Bot starts and has a conversation, then retry',
   '複製 agy 對話失敗，無法建立基準快照': 'Could not copy the agy conversation, so no baseline snapshot was made',
   'agy 對話分岔失敗，這次沒有在舊 context 執行': 'The agy conversation could not be forked; this run did not execute in the old context',
+  'agy 所在主機沒有 sqlite3 指令，無法複製對話；請先在該主機安裝 sqlite3': 'The agy host has no sqlite3 command, so the conversation cannot be copied; install sqlite3 on that host first',
+  '正在建立基準快照（agy 可能要幾分鐘）…': 'Building the baseline snapshot (agy may take a few minutes)…',
+  '基準快照已建立，正在儲存…': 'Baseline snapshot ready; saving…',
 }
 
 export default dict

@@ -279,6 +279,23 @@ export function ScheduleEditor({
   }, [loadLatestDetail, scheduleId])
 
   const effectiveBotId = form.botId || (scheduleId ? '' : (pickable[0]?.id ?? ''))
+  const [baseProgress, setBaseProgress] = useState<string | null>(null)
+  useEffect(() => {
+    if (!busy) {
+      setBaseProgress(null)
+      return
+    }
+    const onProgress = (ev: Event) => {
+      const d = (ev as CustomEvent<{ bot_id?: string; state?: string }>).detail
+      if (!d || d.bot_id !== effectiveBotId) return
+      if (d.state === 'building') setBaseProgress(t('正在建立基準快照（agy 可能要幾分鐘）…'))
+      else if (d.state === 'ready') setBaseProgress(t('基準快照已建立，正在儲存…'))
+      else setBaseProgress(null)
+    }
+    window.addEventListener('agm:base_snapshot_progress', onProgress)
+    return () => window.removeEventListener('agm:base_snapshot_progress', onProgress)
+  }, [busy, effectiveBotId, t])
+
   const boundBot = detail ? (bots.find((b) => b.id === detail.bot_id) ?? null) : null
   const refreshState = useStore((s) => s.refreshState)
   const convertToDedicated = async (botId: string) => {
@@ -669,6 +686,7 @@ export function ScheduleEditor({
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
+      {baseProgress ? <p className="hint" role="status">{baseProgress}</p> : null}
       {unsaved ? <p className="hint" role="status">{t('請先儲存變更，再立即執行。')}</p> : null}
       {!unsaved && botUnavailable ? <p className="hint" role="status">{t('已綁定的 Bot 無法使用，請選擇其他 Bot 並儲存。')}</p> : null}
 

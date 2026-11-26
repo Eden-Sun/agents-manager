@@ -2878,6 +2878,11 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       draftSync.remote({ key, text: str(pick(data, 'text')), rev, client_id: str(pick(data, 'client_id')) })
       return
     }
+    case 'base_snapshot_progress': {
+      if (!isRec(data)) return
+      window.dispatchEvent(new CustomEvent('agm:base_snapshot_progress', { detail: { bot_id: str(pick(data, 'bot_id')), state: str(pick(data, 'state')) } }))
+      return
+    }
     case 'schedules_changed': {
       window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: isRec(data) ? { project_id: str(pick(data, 'project_id')), id: str(pick(data, 'id')) } : {} }))
       return

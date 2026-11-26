@@ -1643,9 +1643,11 @@ async fn start_inner_body(
     };
     if let Some(from) = opts.fork_session.as_deref() {
         let fork = if bot.kind == "agy" {
-            let copy = super::agy_session::clone_conversation(app, &host, bot.identity.as_deref(), from)
-                .await
-                .map_err(|e| LcError::conflict("base_fork_failed", json!({"session_id": from, "cause": e.to_string()})))?;
+            let copy = super::agy_session::clone_conversation(app, &host, bot.identity.as_deref(), from).await.map_err(|e| {
+                let code = if super::agy_session::is_sqlite3_missing(&e) { super::agy_session::SQLITE3_MISSING } else { "base_fork_failed" };
+                LcError::conflict("base_fork_failed", json!({"session_id": from, "code": code, "cause": e.to_string()}))
+            })?;
+            super::agy_session::record_copy(app.db(), &copy, &bot.id, &host, bot.identity.as_deref(), "run", Some(run_id)).await.map_err(up)?;
             resume_args_by_kind("agy", &copy).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?
         } else {
             fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?

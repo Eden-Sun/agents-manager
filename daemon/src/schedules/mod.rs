@@ -23,10 +23,16 @@ use crate::state::App;
 use std::sync::Arc;
 
 /// 啟動排程 poller（tracked 的 periodic，關機時一起停）。啟動後 5 秒先跑一輪，等於啟動對帳。
+/// 另外每小時（啟動後 1 分鐘先一次）清掉用不到的 agy 對話複本，主機當時連不上的下一輪再清。
 pub fn spawn_poller(app: Arc<App>) {
     crate::background_loop::spawn_periodic(&app, "schedules", runner::TICK_EVERY, std::time::Duration::from_secs(5), |app| async move {
         if let Err(e) = runner::tick(&app).await {
             tracing::warn!(error = ?e, "schedules tick failed");
+        }
+    });
+    crate::background_loop::spawn_periodic(&app, "agy_copy_sweep", std::time::Duration::from_secs(3600), std::time::Duration::from_secs(60), |app| async move {
+        if let Err(e) = crate::lifecycle::agy_session::sweep_copies(app.as_ref(), None).await {
+            tracing::warn!(error = ?e, "agy copies: periodic sweep failed");
         }
     });
 }

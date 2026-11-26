@@ -3653,6 +3653,7 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
         return Err(e);
     }
     crate::api_bot::schedule_retention_after_delete(&app);
+    crate::schedules::base::spawn_sweep(&app, Some(&id));
     #[cfg(test)]
     crate::race_point::hit("delete_bot_after_decided", &id).await;
     let draft_keys: Vec<String> = std::iter::once(&id).chain(children.iter().map(|c| &c.id)).map(|b| format!("bot:{b}")).collect();

@@ -302,6 +302,11 @@ CREATE TABLE IF NOT EXISTS bot_base_snapshots (
   bot_id TEXT PRIMARY KEY REFERENCES bots(id), session_id TEXT NOT NULL, transcript_path TEXT,
   locked_at TEXT NOT NULL, locked_by TEXT NOT NULL
 );
+-- AG Man 為 agy 基準快照複製出來的對話（purpose：base＝凍結的基準、run＝每次 from-base 執行）。清除只刪這裡記的 id。
+CREATE TABLE IF NOT EXISTS agy_conversation_copies (
+  id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, host TEXT NOT NULL, identity TEXT,
+  purpose TEXT NOT NULL CHECK (purpose IN ('base','run')), run_id TEXT, created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at);
 CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
 CREATE TABLE IF NOT EXISTS schedule_occurrences (
@@ -723,6 +728,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (107, "b490bf1089d0f868"),
     // 一條龍升級同台依序安裝（2026-11-26）：`cli_update_chains.pending`、`cli_update_chains.rejected`。
     (108, "4feb69a023e760d7"),
+    // agy 基準快照的對話複本登記（2026-11-26）：`agy_conversation_copies`，清除只刪 AG Man 自己建立的複本。
+    (109, "44979bd0e42fa14c"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
