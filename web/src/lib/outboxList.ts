@@ -78,6 +78,24 @@ export function splitOutboxName(name: string): { dir: string; base: string } {
   return i < 0 ? { dir: '', base: name } : { dir: name.slice(0, i + 1), base: name.slice(i + 1) }
 }
 
+export function splitOutboxExt(base: string): { stem: string; ext: string | null } {
+  const dot = base.lastIndexOf('.')
+  if (dot <= 0) return { stem: base, ext: null }
+  const ext = base.slice(dot + 1)
+  if (!/^[a-z0-9]{1,8}$/i.test(ext)) return { stem: base, ext: null }
+  return { stem: base.slice(0, dot), ext: ext.toLowerCase() }
+}
+
+export type OutboxExtTone = 'pdf' | 'image' | 'doc' | 'other'
+
+export function outboxExtTone(ext: string): OutboxExtTone {
+  const e = ext.toLowerCase()
+  if (e === 'pdf') return 'pdf'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif'].includes(e)) return 'image'
+  if (['ppt', 'pptx', 'key', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'tsv', 'md'].includes(e)) return 'doc'
+  return 'other'
+}
+
 const OUTBOX_REF = /outbox\/([0-9A-HJKMNP-TV-Z]{26})\/([^\s`'"<>()[\]|*]+)/g
 
 export function relayedOutboxRefs(messages: ReadonlyArray<{ content: string }> | undefined, selfId: string): Record<string, string[]> {

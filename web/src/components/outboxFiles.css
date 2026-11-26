@@ -129,6 +129,48 @@
 .outbox-meta {
   font-size: 10px;
   color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.outbox-meta-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.outbox-ext {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0 4px;
+  border-radius: 4px;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.outbox-ext-pdf {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.outbox-ext-image {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.outbox-ext-doc {
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  color: var(--warn);
+}
+
+.outbox-ext-other {
+  background: color-mix(in srgb, var(--text-faint) 14%, transparent);
+  color: var(--text-faint);
 }
 
 .outbox-meta.soon {

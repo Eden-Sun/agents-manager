@@ -2,7 +2,7 @@ import { useT } from '../lib/i18n'
 import { useEffect, useRef, useState } from 'react'
 import type { OutboxFile } from '../api'
 import { isHtmlFile } from '../lib/htmlPreview'
-import { emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, LOAD_FAILED, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
+import { emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, LOAD_FAILED, outboxExtTone, remainingLabel, remainingNow, splitOutboxExt, splitOutboxName } from '../lib/outboxList'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useOutboxFiles } from './useOutboxFiles'
 import './outboxFiles.css'
@@ -72,6 +72,7 @@ export function OutboxFiles() {
           {files.map((f) => {
             const left = remainingNow(f, fetchedAt, now)
             const { dir: folder, base } = splitOutboxName(f.name)
+            const { stem, ext } = splitOutboxExt(base)
             const itemBusy = busy?.bot === (f.owner ?? botId) && busy.name === f.name ? busy.mode : null
             const isBusy = itemBusy !== null
             const canPreview = isBrowserPreviewable(f.name) || isHtmlFile(f.name)
@@ -90,13 +91,16 @@ export function OutboxFiles() {
                 >
                   <span className="outbox-name">
                     {folder ? <span className="outbox-dir">{folder}</span> : null}
-                    {base}
+                    {stem}
                   </span>
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
-                    {fileSize(f.size)}
-                    {f.ownerName ? t(' · 來自 {name}', { name: f.ownerName }) : ''}
-                    {left === null ? '' : ` · ${remainingLabel(left)}`}
-                    {itemBusy === 'preview' ? t(' · 開啟中…') : itemBusy === 'download' ? t(' · 下載中…') : ''}
+                    {ext ? <span className={`outbox-ext outbox-ext-${outboxExtTone(ext)}`}>{ext.toUpperCase()}</span> : null}
+                    <span className="outbox-meta-text">
+                      {fileSize(f.size)}
+                      {f.ownerName ? t(' · 來自 {name}', { name: f.ownerName }) : ''}
+                      {left === null ? '' : ` · ${remainingLabel(left)}`}
+                      {itemBusy === 'preview' ? t(' · 開啟中…') : itemBusy === 'download' ? t(' · 下載中…') : ''}
+                    </span>
                   </span>
                 </button>
                 {canPreview ? (

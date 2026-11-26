@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadFailure, emptyReason, fileSize, INLINE_PREVIEW_EXTENSIONS, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, relayedOutboxRefs, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, INLINE_PREVIEW_EXTENSIONS, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, outboxExtTone, previewPlacement, readOutbox, relayedOutboxRefs, remainingLabel, remainingNow, splitOutboxExt, splitOutboxName } from './outboxList'
 import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
@@ -199,4 +199,17 @@ test('relayedOutboxRefs: picks other bots’ outbox files from relayed paths, no
     self,
   )
   assert.deepEqual(refs, { [other]: ['a b.pdf', '報價/Q-1.pdf', '錠嵂車險_手機版.pdf'] })
+})
+
+test('splitOutboxExt 與 outboxExtTone：拆出乾淨副檔名、保留無副檔名與隱藏檔', () => {
+  assert.deepEqual(splitOutboxExt('車險報價-本次更新重點.pdf'), { stem: '車險報價-本次更新重點', ext: 'pdf' })
+  assert.deepEqual(splitOutboxExt('report.v2.PPTX'), { stem: 'report.v2', ext: 'pptx' })
+  assert.deepEqual(splitOutboxExt('README'), { stem: 'README', ext: null })
+  assert.deepEqual(splitOutboxExt('.env'), { stem: '.env', ext: null })
+  assert.deepEqual(splitOutboxExt('note.'), { stem: 'note.', ext: null })
+  assert.deepEqual(splitOutboxExt('a.中文副檔名'), { stem: 'a.中文副檔名', ext: null })
+  assert.equal(outboxExtTone('pdf'), 'pdf')
+  assert.equal(outboxExtTone('PNG'), 'image')
+  assert.equal(outboxExtTone('pptx'), 'doc')
+  assert.equal(outboxExtTone('html'), 'other')
 })
