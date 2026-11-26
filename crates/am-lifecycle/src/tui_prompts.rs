@@ -1131,6 +1131,14 @@ async fn dismiss_agy_survey(app: &(impl crate::capabilities::Db + crate::capabil
         tracing::warn!(run = %run.id, error = %e, "agy 回饋問卷送 0 失敗");
         return false;
     }
+    tokio::time::sleep(crate::lifecycle::pane_settle(Duration::from_millis(700))).await;
+    if let Ok(after) = target.client.pane_read(&target.pane, "visible", 80).await {
+        if am_base::agy_screen::stray_zero_after(&after.text, "") {
+            if let Err(e) = target.client.pane_send_keys(&target.pane, &["backspace"]).await {
+                tracing::warn!(run = %run.id, error = %e, "agy 回饋問卷：輸入列留下的 0 清不掉");
+            }
+        }
+    }
     tracing::info!(run = %run.id, bot = %run.bot_id, "agy 回饋問卷：自動選 0（Skip）");
     true
 }

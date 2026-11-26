@@ -116,10 +116,11 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
 
 pub fn shortcuts_help_open(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    lines[lines.len().saturating_sub(3)..].iter().any(|l| {
+    let footer = lines[lines.len().saturating_sub(3)..].iter().any(|l| {
         let n = norm(l);
         n.starts_with("keyboard:") && n.contains("esc close")
-    })
+    });
+    footer && lines[lines.len().saturating_sub(TAIL_LINES)..].iter().any(|l| norm(l) == "keyboard shortcuts")
 }
 
 const FEEDBACK_QUESTION: &str = "how's the cli experience so far?";
@@ -165,6 +166,12 @@ pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
 
 pub fn feedback_survey_open(screen: &str) -> bool {
     feedback_survey_span(screen).is_some()
+}
+
+/// 送完 `0` 後輸入列正好是 `typed` 接一個 `0`：問卷在按鍵前就消失了，`0` 落進輸入列（要用 backspace 清掉）。
+pub fn stray_zero_after(screen: &str, typed: &str) -> bool {
+    let want = format!("{typed}0");
+    crate::composer_parse::composer_text_whole("agy", screen).is_some_and(|c| c == want)
 }
 
 /// 一行是不是輸入框的上下框線（整行都是 `─`，至少 20 格）。
@@ -353,6 +360,29 @@ mod tests {
         assert!(shortcuts_help_open(help));
         assert!(!shortcuts_help_open("──────\n>\n──────\n ? for shortcuts      Gemini 4 Neon · high\n"));
         assert!(!shortcuts_help_open("Keyboard: ↑/↓ Navigate  esc Close\nmore\nmore\nmore\nmore\n"));
+        let real = "Antigravity CLI   general    commands    shortcuts   (←/→ or tab to cycle)\nKeyboard Shortcuts\n  /keybindings to customize\n\n> /                               Open slash commands\n  \\ + enter                       Insert newline fallback\nKeyboard: ↑/↓ Navigate  ←/→ Switch View  esc Close\n";
+        assert!(shortcuts_help_open(real));
+    }
+
+    #[test]
+    fn other_overlays_with_the_same_footer_are_not_the_shortcuts_help() {
+        let models = "  Effort  ◂      ●━━━━━━━━━━●━━━━━━━━━━◉──────────○      ▸\n                low      medium      high       xhigh\n  [1-1 of 9 items]\nKeyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back\n";
+        assert!(!shortcuts_help_open(models));
+        let picker = "Select a model\n> Gemini 4 Neon\n  Gemini 4 Argon\nKeyboard: ↑/↓ Navigate  enter Select  esc Close\n";
+        assert!(!shortcuts_help_open(picker));
+        let title_far_up = "Keyboard Shortcuts\n".to_string() + &"row\n".repeat(40) + "Keyboard: ↑/↓ Navigate  esc Close\n";
+        assert!(!shortcuts_help_open(&title_far_up));
+    }
+
+    #[test]
+    fn a_lone_zero_in_the_composer_is_a_stray_survey_answer() {
+        const RULE: &str = "────────────────────────────────────────";
+        assert!(stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n> 0\n{RULE}\n? for shortcuts\n"), ""));
+        assert!(!stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n>\n{RULE}\n? for shortcuts\n"), ""));
+        assert!(!stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n> 10\n{RULE}\n"), ""));
+        assert!(!stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n> 0 items\n{RULE}\n"), ""));
+        assert!(stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n> 幫我查0\n{RULE}\n"), "幫我查"));
+        assert!(!stray_zero_after(&format!(" Gemini 4 Neon\n{RULE}\n> 幫我查\n{RULE}\n"), "幫我查"));
     }
 
     const MAIN: &str = "\

@@ -903,6 +903,11 @@ pub async fn type_text(
         if crate::agy_screen::feedback_survey_open(&before) {
             return Ok(Typing::Done(Delivered::NotAttempted { reason: "feedback_survey_open", retry: true }));
         }
+        if crate::agy_screen::stray_zero_after(&before, "") {
+            client.pane_send_keys(&pane, &["backspace"]).await?;
+            tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+            before = read().await?;
+        }
     }
     if let Err(not) = composer_ready(app, run, &bot.kind, &before).await {
         return Ok(Typing::Done(not));
@@ -920,6 +925,14 @@ pub async fn type_text(
         client.pane_send_keys(&pane, &["0"]).await?;
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
+        if crate::agy_screen::feedback_survey_open(&seen) {
+            return Ok(Typing::Done(Delivered::NotAttempted { reason: "feedback_survey_open", retry: true }));
+        }
+        if crate::agy_screen::stray_zero_after(&seen, text) {
+            client.pane_send_keys(&pane, &["backspace"]).await?;
+            tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+            seen = read().await?;
+        }
     }
     if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&seen).is_some() {
         if super::claude_resume_menu::accept_on(app, run, client).await.is_err() {
