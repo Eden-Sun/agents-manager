@@ -88,6 +88,8 @@ export function Notices() {
   const t = useT()
   const notices = useStore((s) => s.notices)
   const dismiss = useStore((s) => s.dismiss)
+  const holdNotices = useStore((s) => s.holdNotices)
+  const releaseNotices = useStore((s) => s.releaseNotices)
   const localClaudeLoginExpiresAt = useStore((s) => s.localClaudeLoginExpiresAt)
   const hosts = useStore((s) => s.hosts)
   const dismissedLoginExpiry = useStore((s) => s.dismissedLoginExpiry)
@@ -99,7 +101,21 @@ export function Notices() {
     nowMs: Date.now(),
   }).filter((a) => dismissedLoginExpiry[`${a.host}:${a.account}`] !== a.stage)
   return (
-    <div className="notices" role="status" aria-live="polite">
+    <div
+      className="notices"
+      role="status"
+      aria-live="polite"
+      onPointerEnter={(e) => {
+        if (e.pointerType !== 'touch') holdNotices()
+      }}
+      onPointerLeave={(e) => {
+        if (e.pointerType !== 'touch' && !e.currentTarget.contains(document.activeElement)) releaseNotices()
+      }}
+      onFocus={holdNotices}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null) && !e.currentTarget.matches(':hover')) releaseNotices()
+      }}
+    >
       {expiryAlerts.map((a) => {
         const key = `${a.host}:${a.account}`
         const hostName = a.host === 'local' ? t('本機') : a.host
@@ -138,7 +154,7 @@ export function Notices() {
         return (
           <div
             key={n.id}
-            className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}`}
+            className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}${n.leaving ? ' leaving' : ''}`}
             role={n.kind === 'error' ? 'alert' : undefined}
             onClick={lightInfo ? () => dismiss(n.id) : undefined}
           >

@@ -99,3 +99,77 @@ test('一般 info 通知點擊本體可關閉；error 與帶 action 通知點擊
   })
   assert.equal([...document.querySelectorAll<HTMLElement>('.notice')].some((el) => el.textContent?.includes('錯誤訊息')), false)
 })
+
+test('自動消失前先加上 leaving 淡出，再從 DOM 移除', async () => {
+  const timers = installManualTimers()
+  try {
+    await mount(<Notices />)
+    await act(async () => {
+      useStore.getState().notify('info', '淡出訊息')
+    })
+    await act(async () => {
+      await timers.clock.advance(4000)
+    })
+    assert.equal(document.querySelector('.notice')?.classList.contains('leaving'), true)
+    await act(async () => {
+      await timers.clock.advance(200)
+    })
+    assert.equal(document.querySelectorAll('.notice').length, 0)
+  } finally {
+    timers.restore()
+    resetStoreForTest()
+  }
+})
+
+test('滑鼠停在或焦點在通知上時暫停自動消失，離開後才繼續倒數', async () => {
+  const timers = installManualTimers()
+  try {
+    await mount(<Notices />)
+    await act(async () => {
+      useStore.getState().notify('info', '可暫停', { label: '查看', run: () => {} })
+    })
+    const box = document.querySelector<HTMLElement>('.notices')!
+    await act(async () => {
+      box.querySelector<HTMLButtonElement>('.notice-action')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    })
+    await act(async () => {
+      await timers.clock.advance(60000)
+    })
+    assert.equal(document.querySelectorAll('.notice').length, 1, '暫停中不應消失')
+    assert.equal(document.querySelector('.notice')?.classList.contains('leaving'), false)
+    await act(async () => {
+      useStore.getState().releaseNotices()
+    })
+    await act(async () => {
+      await timers.clock.advance(16000)
+    })
+    assert.equal(document.querySelectorAll('.notice').length, 0, '恢復後照剩餘時間消失')
+  } finally {
+    timers.restore()
+    resetStoreForTest()
+  }
+})
+
+test('淡出中被暫停會取消淡出並保留通知', async () => {
+  const timers = installManualTimers()
+  try {
+    await mount(<Notices />)
+    await act(async () => {
+      useStore.getState().notify('info', '救回來')
+    })
+    await act(async () => {
+      await timers.clock.advance(4000)
+    })
+    await act(async () => {
+      useStore.getState().holdNotices()
+      await timers.clock.advance(1000)
+    })
+    const el = document.querySelector('.notice')
+    assert.ok(el)
+    assert.equal(el.classList.contains('leaving'), false)
+    useStore.getState().releaseNotices()
+  } finally {
+    timers.restore()
+    resetStoreForTest()
+  }
+})

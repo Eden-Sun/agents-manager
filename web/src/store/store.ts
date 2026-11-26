@@ -311,6 +311,7 @@ export interface Notice {
   kind: 'error' | 'warn' | 'info'
   text: string
   topCenter?: boolean
+  leaving?: boolean
   action?: { label: string; run: () => void | Promise<void> }
 }
 
@@ -456,6 +457,8 @@ export interface StoreState {
   pruneDead: () => void
   notify: (kind: Notice['kind'], text: string, action?: Notice['action'], topCenter?: boolean) => void
   dismiss: (id: number) => void
+  holdNotices: () => void
+  releaseNotices: () => void
   dismissLoginExpiry: (key: string, stage: string) => void
 
   startBot: (botId: string) => Promise<void>
@@ -571,6 +574,11 @@ export interface StoreState {
 
 let noticeSeq = 0
 const noticeTimers = new Map<number, ReturnType<typeof setTimeout>>()
+const noticeDeadlines = new Map<number, number>()
+const noticeRemaining = new Map<number, number>()
+const NOTICE_FADE_MS = 200
+const NOTICE_RESUME_MIN_MS = 1500
+let noticesHeld = false
 
 function forkErrText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -864,20 +872,33 @@ export const useStore = create<StoreState>((set, get) => {
     noticeSeq += 1
     const id = noticeSeq
     set((s) => ({ notices: [...s.notices, { id, kind, text, action, topCenter }] }))
-    const timer = setTimeout(() => {
-      noticeTimers.delete(id)
-      get().dismiss(id)
-    }, action ? 15000 : kind === 'error' ? 8000 : 4000)
-    noticeTimers.set(id, timer)
+    const ms = action ? 15000 : kind === 'error' ? 8000 : 4000
+    if (noticesHeld) noticeRemaining.set(id, ms)
+    else scheduleNoticeExpiry(id, ms)
   },
 
   dismiss: (id) => {
-    const timer = noticeTimers.get(id)
-    if (timer !== undefined) {
-      clearTimeout(timer)
-      noticeTimers.delete(id)
-    }
+    clearNoticeTimer(id)
+    noticeRemaining.delete(id)
     set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }))
+  },
+
+  holdNotices: () => {
+    if (noticesHeld) return
+    noticesHeld = true
+    const now = Date.now()
+    for (const id of [...noticeTimers.keys()]) {
+      noticeRemaining.set(id, Math.max(NOTICE_RESUME_MIN_MS, (noticeDeadlines.get(id) ?? now) - now))
+      clearNoticeTimer(id)
+    }
+    set((s) => (s.notices.some((n) => n.leaving) ? { notices: s.notices.map((n) => (n.leaving ? { ...n, leaving: false } : n)) } : {}))
+  },
+
+  releaseNotices: () => {
+    if (!noticesHeld) return
+    noticesHeld = false
+    for (const [id, ms] of noticeRemaining) scheduleNoticeExpiry(id, Math.max(NOTICE_RESUME_MIN_MS, ms))
+    noticeRemaining.clear()
   },
 
   dismissLoginExpiry: (key, stage) => {
@@ -2699,10 +2720,39 @@ useStore.subscribe((s, prev) => {
   useStore.setState({ composerDrafts: kept })
 })
 
+function clearNoticeTimer(id: number): void {
+  const timer = noticeTimers.get(id)
+  if (timer !== undefined) clearTimeout(timer)
+  noticeTimers.delete(id)
+  noticeDeadlines.delete(id)
+}
+
+function scheduleNoticeExpiry(id: number, ms: number): void {
+  clearNoticeTimer(id)
+  noticeDeadlines.set(id, Date.now() + ms)
+  noticeTimers.set(
+    id,
+    setTimeout(() => {
+      noticeDeadlines.delete(id)
+      useStore.setState((s) => ({ notices: s.notices.map((n) => (n.id === id ? { ...n, leaving: true } : n)) }))
+      noticeTimers.set(
+        id,
+        setTimeout(() => {
+          noticeTimers.delete(id)
+          useStore.getState().dismiss(id)
+        }, NOTICE_FADE_MS),
+      )
+    }, ms),
+  )
+}
+
 export function resetStoreForTest(): void {
   resetAttachmentDraftsForTest()
   for (const timer of noticeTimers.values()) clearTimeout(timer)
   noticeTimers.clear()
+  noticeDeadlines.clear()
+  noticeRemaining.clear()
+  noticesHeld = false
   for (const slot of liveThrottle.values()) clearTimeout(slot.timer)
   liveThrottle.clear()
   knownBotIds = new Set()
