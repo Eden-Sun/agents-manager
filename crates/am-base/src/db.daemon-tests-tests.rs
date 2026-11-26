@@ -1389,6 +1389,7 @@
         for (table, col) in [("schedule_occurrences", "runner_json"), ("schedule_occurrences", "first_started_at"), ("schedule_occurrences", "attempt_started_at"), ("schedule_occurrences", "slot_label"), ("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "code_no"), ("schedules", "from_base"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
         }
+        sqlx::query("ALTER TABLE turns DROP COLUMN stop_reason").execute(&mut *tx).await.unwrap();
         drop_dry_run_schema(&mut *tx).await;
         if version == 67 {
             sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&mut *tx).await.unwrap();
@@ -1555,6 +1556,7 @@
         for (table, col) in [("schedule_occurrences", "runner_json"), ("schedule_occurrences", "first_started_at"), ("schedule_occurrences", "attempt_started_at"), ("schedule_occurrences", "slot_label"), ("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "code_no"), ("schedules", "from_base"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
+        sqlx::query("ALTER TABLE turns DROP COLUMN stop_reason").execute(&pool).await.unwrap();
         drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;
         {
             let mut conn = pool.acquire().await.unwrap();

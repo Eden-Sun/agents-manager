@@ -5422,6 +5422,13 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
             .unwrap();
     assert_eq!(receipt_outcome, "completed");
 
+    let stop_reason: Option<String> = sqlx::query_scalar("SELECT stop_reason FROM turns WHERE id=?")
+        .bind(&first)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(stop_reason.as_deref(), Some("max_calls"), "排程要靠這個欄位知道回合是被上限截斷的");
+
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot).cloned();
@@ -7161,4 +7168,12 @@ async fn a_pending_openai_turn_whose_provider_cannot_be_built_fails_with_a_reaso
     assert_eq!(kept, 1, "使用者原訊息保留");
     let in_flight: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='in_flight'").bind(&bot).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(in_flight, 0, "沒有懸空的 in_flight");
+}
+
+#[test]
+fn only_the_limits_are_recorded_as_stop_reasons() {
+    assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::MaxCallsReached)), Some("max_calls"));
+    assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::TimeLimit)), Some("time_limit"));
+    assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::EndTurn)), None);
+    assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::Refusal)), None);
 }

@@ -763,6 +763,7 @@ impl ApiBotRuntime {
         let fail_inner = self.inner.clone();
         let fail_key = full.clone();
         let turn_timeout_secs = limits.turn_timeout_secs;
+        let stop_pool = app.db.clone();
         let (soft_limit, hard_limit) = turn_deadlines(turn_timeout_secs);
         let (final_text_tx, final_text_rx) = oneshot::channel();
         let (release_tx, release_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
@@ -854,6 +855,17 @@ impl ApiBotRuntime {
                 let outcome = if deadline_elapsed {
                     TurnOutcome::Failed(format!("turn_timeout:{turn_timeout_secs}"))
                 } else {
+                    if let Some(reason) = limit_stop_reason(&result) {
+                        if let Err(error) = sqlx::query("UPDATE turns SET stop_reason = ? WHERE id = ? AND run_id = ?")
+                            .bind(reason)
+                            .bind(&fail_key.turn_id)
+                            .bind(&fail_key.run_id)
+                            .execute(&stop_pool)
+                            .await
+                        {
+                            tracing::warn!(bot = %fail_key.bot_id, turn = %fail_key.turn_id, error = %error, "API bot turn stop reason could not be stored");
+                        }
+                    }
                     if matches!(&result, Ok(super::runner::Halt::TimeLimit)) {
                         fail_inner
                             .time_limited
@@ -2069,6 +2081,15 @@ fn map_runner_result(
             H::InvalidResponseDetail(d) => format!("api_invalid_response:{d}"),
             H::InvalidRequest | H::Cancelled => "api_invalid_request".into(),
         }),
+    }
+}
+
+/// 回合因上限（呼叫次數、軟時限）提早收尾時的代碼，寫進 `turns.stop_reason`。排程據此判成未完成，不當成完成。
+pub(crate) fn limit_stop_reason(result: &Result<super::runner::Halt, super::runner::Error>) -> Option<&'static str> {
+    match result {
+        Ok(super::runner::Halt::MaxCallsReached) => Some("max_calls"),
+        Ok(super::runner::Halt::TimeLimit) => Some("time_limit"),
+        _ => None,
     }
 }
 

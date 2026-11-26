@@ -730,6 +730,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (108, "4feb69a023e760d7"),
     // agy 基準快照的對話複本登記（2026-11-26）：`agy_conversation_copies`，清除只刪 AG Man 自己建立的複本。
     (109, "44979bd0e42fa14c"),
+    // turn 的停止原因（2026-11-26，issue #2218）：`turns.stop_reason`，回合被呼叫上限或軟時限提早收尾時寫入，排程據此判未完成。
+    (110, "faa899d4cb32f7de"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -956,6 +958,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("bots", "track", "ALTER TABLE bots ADD COLUMN track TEXT"),
         ("bots", "runtime_override_json", "ALTER TABLE bots ADD COLUMN runtime_override_json TEXT"),
         ("turns", "cache_ttl_secs", "ALTER TABLE turns ADD COLUMN cache_ttl_secs INTEGER NOT NULL DEFAULT 300"),
+        ("turns", "stop_reason", "ALTER TABLE turns ADD COLUMN stop_reason TEXT"),
         ("projects", "role_policy_json", "ALTER TABLE projects ADD COLUMN role_policy_json TEXT NOT NULL DEFAULT '{}'"),
         ("projects", "deputy_bot_id", "ALTER TABLE projects ADD COLUMN deputy_bot_id TEXT"),
         ("projects", "deputy_after_sec", "ALTER TABLE projects ADD COLUMN deputy_after_sec INTEGER"),

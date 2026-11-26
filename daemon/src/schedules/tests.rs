@@ -386,6 +386,32 @@ async fn unknown_outcome_pauses_the_schedule_in_the_same_step() {
     assert!(store::settle_queued(&e.app.db, &db::now()).await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn a_turn_cut_short_by_a_limit_is_not_a_success_even_when_its_summary_says_done() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let occ = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let t = db::ulid();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, stop_reason, created_at) VALUES (?,?,'web','completed','ok','max_calls',?)")
+        .bind(&t)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&t).bind(&conv).bind(&occ).execute(&e.app.db).await.unwrap();
+    sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'assistant','已完成步驟 1–3，剩下步驟 4，回覆 continue 可接著做。','transcript',?)")
+        .bind(db::ulid()).bind(&conv).bind(&t).bind(db::now()).execute(&e.app.db).await.unwrap();
+    let transitions = store::settle_queued(&e.app.db, &db::now()).await.unwrap();
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(transitions[0].status, "failed", "上限截斷的摘要不是任務結果");
+    let outcome: String = sqlx::query_scalar("SELECT outcome FROM schedule_attempts WHERE occurrence_id = ?").bind(&occ).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(outcome, "failed");
+    let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+    assert!(o.error.unwrap_or_default().contains("未完成"));
+}
+
 async fn run_with(app: &std::sync::Arc<crate::state::App>, sid: &str, crid: &str) -> String {
     let v = api::run_now(State(app.clone()), Path(sid.into()), Json(RunIn { client_request_id: Some(crid.into()), dry_run: false })).await.unwrap().0;
     v["occurrence"]["id"].as_str().expect("回應要有 occurrence.id").to_string()

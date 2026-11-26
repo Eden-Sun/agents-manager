@@ -349,6 +349,14 @@ pub async fn finish_open_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &st
     Ok(())
 }
 
+/// 回合因上限提早收尾（`turns.stop_reason`）：模型寫的摘要不是任務結果，排程判成未完成，不能因為摘要裡有「已完成」就算成功。
+fn limit_error(stop: &str) -> &'static str {
+    match stop {
+        "time_limit" => "API 回合達到時間上限，模型沒有做完就收尾（未完成；回覆 continue 可接著做）",
+        _ => "API 回合達到呼叫上限，任務沒有做完（未完成；回覆 continue 可接著做）",
+    }
+}
+
 /// 終態同步：queued 的 occurrence 依綁定 turn 的狀態收斂（見檔頭）。回傳這次剛發生的終態轉移（每筆只一次，靠 notified 去重）。
 #[cfg(test)]
 pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transition>> {
@@ -364,27 +372,30 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
     let rows = sqlx::query_as::<_, Occurrence>("SELECT * FROM schedule_occurrences WHERE status = 'queued'").fetch_all(pool).await?;
     let mut out = Vec::new();
     for occ in rows {
-        let turn: Option<(String, String)> = match &occ.turn_id {
-            Some(id) => sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(id).fetch_optional(pool).await?,
+        let turn: Option<(String, String, Option<String>)> = match &occ.turn_id {
+            Some(id) => sqlx::query_as("SELECT status, delivery, stop_reason FROM turns WHERE id = ?").bind(id).fetch_optional(pool).await?,
             None => None,
         };
-        let (next, error) = match turn.as_ref().map(|t| (t.0.as_str(), t.1.as_str())) {
+        let (next, error) = match turn.as_ref().map(|t| (t.0.as_str(), t.1.as_str(), t.2.as_deref())) {
             None => ("cancelled", Some("綁定的 turn 已不存在")),
-            Some(("completed" | "completed_fallback", "ok")) => ("done", None),
-            Some(("completed" | "completed_fallback", _)) | Some(("failed", "unknown")) => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
-            Some(("failed", _)) => ("failed", Some("回合失敗或已撤回")),
+            Some(("completed" | "completed_fallback", "ok", Some(stop))) => ("failed", Some(limit_error(stop))),
+            Some(("completed" | "completed_fallback", "ok", None)) => ("done", None),
+            Some(("completed" | "completed_fallback", _, _)) | Some(("failed", "unknown", _)) => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
+            Some(("failed", _, _)) => ("failed", Some("回合失敗或已撤回")),
             _ => continue,
         };
+        let limited = matches!(turn.as_ref().map(|t| (t.0.as_str(), t.1.as_str(), t.2.is_some())), Some(("completed" | "completed_fallback", "ok", true)));
         let reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' AND rewound_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1")
             .bind(&occ.turn_id).fetch_optional(pool).await?;
-        let outcome = if next == "done" || (next == "failed" && reply.is_some()) { super::outcome::classify(model, reply.as_ref().map_or("", |r| r.1.as_str())).await }
+        let outcome = if limited { "failed".into() }
+            else if next == "done" || (next == "failed" && reply.is_some()) { super::outcome::classify(model, reply.as_ref().map_or("", |r| r.1.as_str())).await }
             else if next == "failed" { "failed".into() } else { "unknown".into() };
         let dry_run = occ.source == "dry_run";
         let summary = super::outcome::summary(reply.as_ref().map_or(error.unwrap_or(""), |r| r.1.as_str()));
         let mut tx = crate::db::begin_write(pool).await?;
         let Some(cur) = get_occurrence_tx(&mut tx, &occ.id).await?.filter(|o| o.status == "queued" && o.turn_id == occ.turn_id && o.attempt_no == occ.attempt_no) else { continue };
         let Some(sched) = get_schedule_tx(&mut tx, &occ.schedule_id).await? else { continue };
-        let current: Option<(String, String)> = sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
+        let current: Option<(String, String, Option<String>)> = sqlx::query_as("SELECT status, delivery, stop_reason FROM turns WHERE id = ?").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
         if current != turn { continue; }
         let current_reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' AND rewound_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
         if current_reply != reply { continue; }
