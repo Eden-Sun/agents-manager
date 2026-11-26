@@ -217,6 +217,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot_route))
         .route("/bots/{id}/role", axum::routing::put(put_bot_role))
         .route("/bots/{id}/base-snapshot", get(crate::schedules::base::get_snapshot).put(crate::schedules::base::lock).delete(crate::schedules::base::clear))
+        .route("/bots/{id}/base-snapshot/build", post(crate::schedules::base::build))
         .route("/bots/{id}/member", post(crate::expert_member::adopt))
         .route("/projects/{id}/members", post(hire_member))
         .route("/bots/restart-idle", post(restart_idle_bots))
@@ -807,6 +808,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
     ("PUT", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/base-snapshot/build", BotRoutePolicy::UserOnly),
     ("GET", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("PUT", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("PUT", "/api/settings/time-zone", BotRoutePolicy::UserOnly),
@@ -1243,7 +1245,7 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
-                if parts.len() == 4 && parts[3] == "base-snapshot" && expert_manager_over(app, caller, &target_bot).await? {
+                if (parts.len() == 4 && parts[3] == "base-snapshot" || parts.len() == 5 && parts[3] == "base-snapshot" && parts[4] == "build") && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
                 if manager_lifecycle_op(method, &parts, &target_bot) && expert_manager_over(app, caller, &target_bot).await? {
@@ -3018,10 +3020,12 @@ fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], ta
     );
 }
 
-/// `GET|PUT|DELETE /api/bots/{id}/base-snapshot` by the expert manager of that bot's project.
+/// `GET|PUT|DELETE /api/bots/{id}/base-snapshot` and `POST …/base-snapshot/build` by the expert manager of that bot's project.
 async fn manager_base_snapshot(app: &Arc<App>, caller: &str, path: &str) -> bool {
     let Some(parts) = decoded_bot_path_segments(path) else { return false };
-    if parts.len() != 4 || parts[0] != "api" || parts[1] != "bots" || parts[3] != "base-snapshot" { return false }
+    let n = parts.len();
+    let snapshot_path = (n == 4 || n == 5) && parts[3] == "base-snapshot" && (n == 4 || parts[4] == "build");
+    if !snapshot_path || parts[0] != "api" || parts[1] != "bots" { return false }
     let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
     expert_manager_over(app, caller, &target).await.unwrap_or(false)
 }

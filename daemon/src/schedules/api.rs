@@ -230,9 +230,7 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         bot_ids.insert(s.bot_id.clone());
         heads.push(s);
     }
-    if heads.iter().any(|h| h.from_base == 1 && h.bot_id != b.bot_id) {
-        super::base::ensure(&app, &b.bot_id, &project_id).await?;
-    }
+    let needs_base = heads.iter().any(|h| h.from_base == 1 && h.bot_id != b.bot_id);
     let mut locks = Vec::new();
     for id in &bot_ids { locks.push(app.bot_lock(id).await); }
     let mut guards = Vec::new();
@@ -249,7 +247,7 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
             .ok_or_else(|| LcError::Conflict(json!({"error":"schedule_changed", "message":"排程已變更，請重新整理再試"})))?;
         if cur.bot_id == b.bot_id { continue; }
         if cur.from_base == 1 {
-            super::base::require_tx(&mut tx, &b.bot_id).await?;
+            super::base::require_kind_tx(&mut tx, &b.bot_id).await?;
         }
         if let Some(open) = store::open_occurrence_tx(&mut tx, &cur.id).await.map_err(db_err)? {
             if open.status != "pending" || open.waiting_reason.as_deref() != Some("bot_unavailable") {
@@ -262,6 +260,9 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     }
     tx.commit().await.map_err(db_err)?;
     drop(guards);
+    if needs_base {
+        super::base::spawn_ensure(&app, &b.bot_id, &project_id);
+    }
     for id in &ids { announce(&app, &project_id, id).await; }
     Ok(Json(json!({"ok": true, "schedule_ids": ids})))
 }
@@ -274,9 +275,6 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     check_retry(b.retry_count, b.retry_interval_mins, b.retry_deadline_mins)?;
     let fp = create_fingerprint(&b);
     let now = Utc::now();
-    if b.from_base {
-        super::base::ensure(&app, &b.bot_id, &project_id).await?;
-    }
     let mut tx = db::begin_write(&app.db).await.map_err(db_err)?;
     if let Some(prev) = store::find_by_create_key_tx(&mut tx, &project_id, &b.client_request_id).await.map_err(db_err)? {
         if prev.create_fp.as_deref() != Some(fp.as_str()) {
@@ -291,7 +289,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     }
     require_dedicated_tx(&mut tx, &b.bot_id).await?;
     if b.from_base {
-        super::base::require_tx(&mut tx, &b.bot_id).await?;
+        super::base::require_kind_tx(&mut tx, &b.bot_id).await?;
     }
     let stamp = db::now();
     let s = Schedule {
@@ -320,6 +318,9 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     store::insert_schedule_tx(&mut tx, &s).await.map_err(db_err)?;
     let s = store::get_schedule_tx(&mut tx, &s.id).await.map_err(db_err)?.ok_or_else(|| LcError::Upstream("schedule vanished".into()))?;
     tx.commit().await.map_err(db_err)?;
+    if s.from_base == 1 {
+        super::base::spawn_ensure(&app, &s.bot_id, &project_id);
+    }
     announce(&app, &project_id, &s.id).await;
     Ok(Json(schedule_json(&s)))
 }
@@ -360,11 +361,6 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     let pool = app.db.clone();
     let head = store::get_schedule(&pool, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
-    let wants_base = b.from_base.unwrap_or(head.from_base == 1);
-    let target_bot = b.bot_id.clone().unwrap_or_else(|| head.bot_id.clone());
-    if wants_base && (target_bot != head.bot_id || b.from_base == Some(true)) {
-        super::base::ensure(&app, &target_bot, &head.project_id).await?;
-    }
     let lock = app.bot_lock(&head.bot_id).await;
     let _guard = lock.lock().await;
     let now = db::now();
@@ -398,7 +394,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
         require_dedicated_tx(&mut tx, &bot_id).await?;
     }
     if from_base == 1 && (bot_changed || b.from_base == Some(true)) {
-        super::base::require_tx(&mut tx, &bot_id).await?;
+        super::base::require_kind_tx(&mut tx, &bot_id).await?;
     }
     let now_t = Utc::now();
     let (mode, spec_json) = match &b.spec {
@@ -454,6 +450,9 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
         crate::lifecycle::announce_revoked(&app, &turn_id, r).await;
     }
     let out = store::get_schedule(&pool, &id).await.map_err(db_err)?.ok_or_else(|| LcError::NotFound("schedule".into()))?;
+    if out.from_base == 1 {
+        super::base::spawn_ensure(&app, &out.bot_id, &out.project_id);
+    }
     announce(&app, &out.project_id, &id).await;
     Ok(Json(with_open(&pool, &out).await?))
 }

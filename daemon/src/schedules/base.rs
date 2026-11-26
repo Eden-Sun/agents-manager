@@ -7,7 +7,8 @@
 //! codex fork 只會產生新 session，基準 rollout 不會被改；基準缺失就 failed，不退回在舊 context 執行。
 //! agy 沒有原生 fork：鎖基準時把對話複成一份凍結的複本（`agy_session::clone_conversation`），基準＝複本的對話 id；
 //! 執行時再從複本複出新對話、`--conversation=<新 id>` 接續（`start.rs` 的 fork 分支），複本與基準都不會被改。
-//! 勾 `from_base` 時目標 bot 沒有基準：[`ensure`] 先自動製作（有 session 就鎖，沒有就啟動 bot 取得 session 再鎖）。
+//! 儲存排程勾 `from_base` 時目標 bot 沒有基準：[`spawn_ensure`] 在背景自動製作（有 session 就鎖，沒有就啟動 bot 取得 session 再鎖），
+//! 儲存請求不等它。到點時基準還在建立就延後（`base_building`），建立失敗就該次 failed（`base_snapshot_create_failed`，可依重試額度重試）。
 
 use super::runner;
 use super::store::{self, Occurrence, Schedule};
@@ -64,8 +65,24 @@ async fn authorize(app: &Arc<App>, principal: &crate::api::RequestPrincipal, id:
 /// `GET /api/bots/{id}/base-snapshot`
 pub async fn get_snapshot(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(p): Extension<crate::api::RequestPrincipal>) -> Result<Response, LcError> {
     authorize(&app, &p, &id).await?;
-    let v = get(&app.db, &id).await.map_err(up)?.map_or(json!({"locked": false}), |s| view(&s));
-    Ok((StatusCode::OK, Json(v)).into_response())
+    Ok((StatusCode::OK, Json(status_json(&app, &id).await?)).into_response())
+}
+
+/// 基準本身加上建立狀態（`build`：`{state: building|failed, message}`，沒有在做也沒失敗就是 null）。
+async fn status_json(app: &Arc<App>, bot_id: &str) -> Result<Value, LcError> {
+    let mut v = get(&app.db, bot_id).await.map_err(up)?.map_or(json!({"locked": false}), |s| view(&s));
+    v["build"] = build_state(bot_id).map_or(Value::Null, |(state, message)| json!({"state": state, "message": message}));
+    Ok(v)
+}
+
+/// `POST /api/bots/{id}/base-snapshot/build`：重新在背景製作基準（失敗後的重試）。已有基準就什麼都不做。立即回 202。
+pub async fn build(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(p): Extension<crate::api::RequestPrincipal>) -> Result<Response, LcError> {
+    let bot = authorize(&app, &p, &id).await?;
+    if !supported(&bot.kind) {
+        return Err(unsupported(&bot.id));
+    }
+    spawn_ensure(&app, &bot.id, &bot.project_id);
+    Ok((StatusCode::ACCEPTED, Json(status_json(&app, &bot.id).await?)).into_response())
 }
 
 fn supported(kind: &str) -> bool {
@@ -148,6 +165,32 @@ fn ensure_locks() -> &'static Mutex<std::collections::HashMap<String, Arc<tokio:
     LOCKS.get_or_init(Default::default)
 }
 
+/// 每顆 bot 還在製作中的份數（[`ensure`] 進出時加減）；有就是「建立中」。
+fn building() -> &'static Mutex<std::collections::HashMap<String, usize>> {
+    static BUILDING: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    BUILDING.get_or_init(Default::default)
+}
+
+/// 每顆 bot 最近一次自動製作失敗的訊息；製作成功時清掉。
+fn last_failure() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    static FAILED: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    FAILED.get_or_init(Default::default)
+}
+
+/// 基準的建立狀態：`building`（製作中），或 `failed`（最近一次失敗，附訊息）；都不是就是 None。
+pub(super) fn build_state(bot_id: &str) -> Option<(&'static str, Option<String>)> {
+    if building().lock().unwrap().get(bot_id).is_some_and(|n| *n > 0) {
+        return Some(("building", None));
+    }
+    last_failure().lock().unwrap().get(bot_id).map(|m| ("failed", Some(m.clone())))
+}
+
+#[cfg(test)]
+pub(super) fn set_building_for_test(bot_id: &str, on: bool) {
+    let mut b = building().lock().unwrap();
+    if on { *b.entry(bot_id.to_string()).or_default() += 1 } else { b.remove(bot_id); }
+}
+
 async fn progress(app: &Arc<App>, bot_id: &str, state: &str, message: Option<&str>) {
     app.emit("base_snapshot_progress", json!({"bot_id": bot_id, "state": state, "message": message})).await;
 }
@@ -194,32 +237,67 @@ async fn seed_agy(app: &Arc<App>, bot: &db::Bot) -> Result<(), String> {
     }
 }
 
-/// 勾 `from_base` 前：目標 bot 沒有基準就自動製作（不回 400）。有 native session 就鎖；完全沒有就照正常方式啟動一次、
+fn failure_message(e: &LcError) -> String {
+    match e {
+        LcError::Conflict(v) | LcError::BadValue(v) => v.get("message").and_then(Value::as_str).or_else(|| v.get("reason").and_then(Value::as_str)).map(str::to_owned).unwrap_or_else(|| format!("{e:?}")),
+        other => format!("{other:?}"),
+    }
+}
+
+/// 在背景製作基準，不擋呼叫端（儲存排程、改綁、重試都走這裡）。已有基準或已在製作的，後到的會等同一把鎖、不重做。
+pub(super) fn spawn_ensure(app: &Arc<App>, bot_id: &str, project_id: &str) {
+    let (app, bot_id, project_id) = (app.clone(), bot_id.to_owned(), project_id.to_owned());
+    tokio::spawn(async move {
+        if let Err(e) = ensure(&app, &bot_id, &project_id).await {
+            tracing::warn!(bot = %bot_id, error = ?e, "base snapshot: background build failed");
+        }
+    });
+}
+
+/// 勾 `from_base` 時目標 bot 沒有基準就自動製作（不回 400）。有 native session 就鎖；完全沒有就照正常方式啟動一次、
 /// 等它回報 session 再鎖。bot 不合格（不是這個專案可接排程的 bot）時什麼都不做，由後續檢查回對的錯。
 /// 同一顆 bot 同時只有一份在做：後到的請求等前一份的結果，有基準了就直接用，不再送第二則種子。
-/// 開始與結束推 `base_snapshot_progress`（building／ready／failed），網頁據此顯示進度。
-pub(super) async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<(), LcError> {
+/// 開始與結束推 `base_snapshot_progress`（building／ready／failed），網頁據此顯示進度；失敗訊息留在 [`build_state`]。
+async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<(), LcError> {
     if get(&app.db, bot_id).await.map_err(up)?.is_some() {
         return Ok(());
     }
+    *building().lock().unwrap().entry(bot_id.to_string()).or_default() += 1;
+    let out = ensure_locked(app, bot_id, project_id).await;
+    {
+        let mut b = building().lock().unwrap();
+        if let Some(n) = b.get_mut(bot_id) {
+            *n -= 1;
+            if *n == 0 {
+                b.remove(bot_id);
+            }
+        }
+    }
+    match &out {
+        Ok(true) => {
+            last_failure().lock().unwrap().remove(bot_id);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            last_failure().lock().unwrap().insert(bot_id.to_string(), failure_message(e));
+        }
+    }
+    out.map(|_| ())
+}
+
+async fn ensure_locked(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<bool, LcError> {
     let lock = ensure_locks().lock().unwrap().entry(bot_id.to_string()).or_default().clone();
     let _one = lock.lock().await;
     if get(&app.db, bot_id).await.map_err(up)?.is_some() {
-        return Ok(());
+        return Ok(false);
     }
     let out = ensure_once(app, bot_id, project_id).await;
     match &out {
         Ok(true) => progress(app, bot_id, "ready", None).await,
         Ok(false) => {}
-        Err(e) => {
-            let msg = match e {
-                LcError::Conflict(v) | LcError::BadValue(v) => v.get("message").and_then(Value::as_str).or_else(|| v.get("reason").and_then(Value::as_str)).map(str::to_owned),
-                other => Some(format!("{other:?}")),
-            };
-            progress(app, bot_id, "failed", msg.as_deref()).await;
-        }
+        Err(e) => progress(app, bot_id, "failed", Some(&failure_message(e))).await,
     }
-    out.map(|_| ())
+    out
 }
 
 /// 回 true＝這次做了基準。
@@ -262,15 +340,12 @@ pub async fn clear(State(app): State<Arc<App>>, Path(id): Path<String>, Extensio
     Ok((StatusCode::OK, Json(json!({"locked": false}))).into_response())
 }
 
-/// 勾 `from_base` 的前提：bot 是 codex／agy 且已鎖基準（交易內查，不向池子再要連線；沒有基準由呼叫端先 [`ensure`]）。
-pub(super) async fn require_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_id: &str) -> Result<(), LcError> {
+/// 勾 `from_base` 的前提：bot 是 codex／agy（交易內查）。基準可以還沒有：儲存後由 [`spawn_ensure`] 在背景製作，
+/// 到點時仍沒有的由 [`dispatch`] 延後或失敗。
+pub(super) async fn require_kind_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_id: &str) -> Result<(), LcError> {
     let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id = ?").bind(bot_id).fetch_optional(&mut **tx).await.map_err(up)?;
     if !kind.as_deref().is_some_and(supported) {
         return Err(unsupported(bot_id));
-    }
-    let has: Option<i64> = sqlx::query_scalar("SELECT 1 FROM bot_base_snapshots WHERE bot_id = ?").bind(bot_id).fetch_optional(&mut **tx).await.map_err(up)?;
-    if has.is_none() {
-        return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "base_snapshot_required", "bot_id": bot_id})));
     }
     Ok(())
 }
@@ -305,7 +380,15 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         return Ok(false);
     }
     let Some(snap) = get(pool, &bot.id).await? else {
-        fail(app, &sched, &occ, "base_snapshot_missing", "這顆 bot 沒有基準快照（可能已被清除），不在舊 context 執行", false).await?;
+        match build_state(&bot.id) {
+            Some(("building", _)) => set_wait_reason(app, &sched, occurrence_id, "base_building").await,
+            Some((_, msg)) => {
+                spawn_ensure(app, &bot.id, &bot.project_id);
+                let why = format!("基準快照建立失敗，不在舊 context 執行：{}", msg.unwrap_or_default());
+                fail(app, &sched, &occ, "base_snapshot_create_failed", &why, true).await?;
+            }
+            None => fail(app, &sched, &occ, "base_snapshot_missing", "這顆 bot 沒有基準快照（可能已被清除），不在舊 context 執行", false).await?,
+        }
         return Ok(false);
     };
     let host = db::bot_host(pool, &bot.id).await?;
@@ -320,7 +403,7 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
     let conv = db::conversation_id(pool, &bot.id).await?;
     let busy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND status IN ('queued','in_flight')").bind(&conv).fetch_one(pool).await?;
     if busy > 0 {
-        wait_busy(app, &sched, occurrence_id).await;
+        set_wait_reason(app, &sched, occurrence_id, "bot_busy").await;
         return Ok(false);
     }
     let opts = StartOpts { fork_session: Some(snap.session_id.clone()), fork_source_bot: Some(bot.id.clone()), ..Default::default() };
@@ -333,7 +416,7 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
     let run_id = match started {
         Ok(r) => { store::mark_started(pool, occurrence_id, &began).await?; r }
         Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(Value::as_str), Some("not_idle" | "no_longer_idle")) => {
-            wait_busy(app, &sched, occurrence_id).await;
+            set_wait_reason(app, &sched, occurrence_id, "bot_busy").await;
             return Ok(false);
         }
         Err(LcError::Conflict(v)) if v.get("reason").and_then(Value::as_str) == Some("base_fork_failed") => {
@@ -356,8 +439,8 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
     runner::enqueue_now(app, occurrence_id).await
 }
 
-async fn wait_busy(app: &Arc<App>, sched: &Schedule, occurrence_id: &str) {
-    if store::set_waiting_reason(&app.db, occurrence_id, Some("bot_busy"), &db::now()).await.unwrap_or(false) {
+async fn set_wait_reason(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, reason: &str) {
+    if store::set_waiting_reason(&app.db, occurrence_id, Some(reason), &db::now()).await.unwrap_or(false) {
         app.emit("schedules_changed", json!({"project_id": sched.project_id, "id": sched.id})).await;
     }
 }

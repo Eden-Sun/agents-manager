@@ -865,6 +865,28 @@ mod from_base {
         store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap()
     }
 
+    /// 儲存後基準在背景建好（測試裡 `api::create` 已先回應）。
+    async fn wait_base(e: &testing::Env, bot: &str) -> base::Snapshot {
+        for _ in 0..500 {
+            if let Some(s) = base::get(&e.app.db, bot).await.unwrap() {
+                return s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("基準沒有在時限內建好");
+    }
+
+    /// 背景製作失敗：回傳失敗訊息。
+    async fn wait_build_failed(e: &testing::Env, bot: &str) -> String {
+        for _ in 0..500 {
+            if let Some(("failed", Some(msg))) = base::build_state(bot) {
+                return msg;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("基準建立沒有失敗");
+    }
+
     async fn status_and_error(e: &testing::Env, occ: &str) -> (String, Option<String>) {
         sqlx::query_as("SELECT status, error FROM schedule_occurrences WHERE id = ?").bind(occ).fetch_one(&e.app.db).await.unwrap()
     }
@@ -988,7 +1010,7 @@ mod from_base {
         let mut body = daily(&ag.id, "x");
         body.from_base = true;
         api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
-        let snap = base::get(&e.app.db, &ag.id).await.unwrap().expect("種子回合後鎖了基準");
+        let snap = wait_base(&e, &ag.id).await;
         assert_eq!(snap.locked_by, "schedule");
         assert_ne!(snap.session_id, src, "鎖的是凍結複本");
         assert_eq!(agy_cascade(&snap.session_id), snap.session_id);
@@ -1071,15 +1093,22 @@ mod from_base {
         let (a, b) = tokio::join!(save("crid-a"), save("crid-b"));
         a.unwrap();
         b.unwrap();
+        wait_base(&e, &ag.id).await;
         let conv = db::conversation_id(&e.app.db, &ag.id).await.unwrap();
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user' AND content LIKE '%建立排程基準對話%'").bind(&conv).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(n, 1, "第二個請求等第一個的結果，不再送種子");
         assert_eq!(copies_of(&e, &ag.id).await.len(), 1, "只複製一份");
         let mut states = Vec::new();
-        while let Ok(ev) = events.try_recv() {
-            if ev.kind == "base_snapshot_progress" {
-                states.push(ev.data["state"].as_str().unwrap_or_default().to_string());
+        for _ in 0..500 {
+            while let Ok(ev) = events.try_recv() {
+                if ev.kind == "base_snapshot_progress" {
+                    states.push(ev.data["state"].as_str().unwrap_or_default().to_string());
+                }
             }
+            if states.last().is_some_and(|s| s == "ready") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(states, ["building", "ready"]);
     }
@@ -1092,8 +1121,9 @@ mod from_base {
         e.herdr.set_screen("*", &format!("● hi\n{rule}\n>\n{rule}\n  Gemini 3.8 Flash · high\n"));
         let mut body = daily(&ag.id, "x");
         body.from_base = true;
-        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("沒答完要失敗");
-        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "base_snapshot_create_failed" && v["message"].as_str().unwrap().contains("還沒答完種子訊息")), "{err:?}");
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        let msg = wait_build_failed(&e, &ag.id).await;
+        assert!(msg.contains("還沒答完種子訊息"), "{msg}");
         assert!(base::get(&e.app.db, &ag.id).await.unwrap().is_none());
     }
 
@@ -1105,7 +1135,7 @@ mod from_base {
         let mut body = daily(&cx.id, "x");
         body.from_base = true;
         api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
-        let snap = base::get(&e.app.db, &cx.id).await.unwrap().expect("自動製作基準");
+        let snap = wait_base(&e, &cx.id).await;
         assert_eq!((snap.session_id.as_str(), snap.locked_by.as_str()), ("sid-live", "schedule"));
 
         let cx2 = codex_bot(&e, "cx2").await;
@@ -1123,14 +1153,17 @@ mod from_base {
         body.client_request_id = "crid-2".into();
         body.from_base = true;
         api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
-        assert_eq!(base::get(&e.app.db, &cx2.id).await.unwrap().unwrap().session_id, "sid-born", "沒有 session 就啟動 bot 取得再鎖");
+        assert_eq!(wait_base(&e, &cx2.id).await.session_id, "sid-born", "沒有 session 就啟動 bot 取得再鎖");
 
         let cx3 = codex_bot(&e, "cx3").await;
         let mut body = daily(&cx3.id, "x");
         body.client_request_id = "crid-3".into();
         body.from_base = true;
-        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("等不到 session 要說清楚");
-        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "base_snapshot_create_failed"), "{err:?}");
+        let t0 = std::time::Instant::now();
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        assert!(t0.elapsed() < std::time::Duration::from_secs(1), "儲存不等基準建立");
+        let msg = wait_build_failed(&e, &cx3.id).await;
+        assert!(msg.contains("等不到 bot 回報對話 session"), "{msg}");
     }
 
     #[tokio::test]
@@ -1193,6 +1226,26 @@ mod from_base {
         assert_eq!(started_args(&e).len(), before, "忙碌時不重啟");
         let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
         assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("bot_busy")));
+    }
+
+    #[tokio::test]
+    async fn a_due_occurrence_waits_while_the_base_is_building_and_fails_after_a_failed_build() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        base::set_building_for_test(&bot.id, true);
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("base_building")), "製作中就延後，不失敗");
+        base::set_building_for_test(&bot.id, false);
+
+        base::spawn_ensure(&e.app, &bot.id, &e.project_id);
+        wait_build_failed(&e, &bot.id).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        let (status, error) = status_and_error(&e, &occ).await;
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().starts_with("base_snapshot_create_failed"), "製作失敗要講清楚");
     }
 
     #[tokio::test]

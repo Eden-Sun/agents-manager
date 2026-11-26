@@ -21,7 +21,7 @@ import { ScheduleBotPicker } from './ScheduleBotPicker'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId, patchBot } from '../api'
 import { ApiError } from '../api/types'
-import { getBaseSnapshot } from '../api/baseSnapshot'
+import { buildBaseSnapshot, getBaseSnapshot, type BaseBuild } from '../api/baseSnapshot'
 import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
@@ -279,22 +279,7 @@ export function ScheduleEditor({
   }, [loadLatestDetail, scheduleId])
 
   const effectiveBotId = form.botId || (scheduleId ? '' : (pickable[0]?.id ?? ''))
-  const [baseProgress, setBaseProgress] = useState<string | null>(null)
-  useEffect(() => {
-    if (!busy) {
-      setBaseProgress(null)
-      return
-    }
-    const onProgress = (ev: Event) => {
-      const d = (ev as CustomEvent<{ bot_id?: string; state?: string }>).detail
-      if (!d || d.bot_id !== effectiveBotId) return
-      if (d.state === 'building') setBaseProgress(t('正在建立基準快照（agy 可能要幾分鐘）…'))
-      else if (d.state === 'ready') setBaseProgress(t('基準快照已建立，正在儲存…'))
-      else setBaseProgress(null)
-    }
-    window.addEventListener('agm:base_snapshot_progress', onProgress)
-    return () => window.removeEventListener('agm:base_snapshot_progress', onProgress)
-  }, [busy, effectiveBotId, t])
+  const [baseBuild, setBaseBuild] = useState<BaseBuild | null>(null)
 
   const boundBot = detail ? (bots.find((b) => b.id === detail.bot_id) ?? null) : null
   const refreshState = useStore((s) => s.refreshState)
@@ -311,13 +296,39 @@ export function ScheduleEditor({
   useEffect(() => {
     let live = true
     setBaseLocked(false)
+    setBaseBuild(null)
     if (effectiveBotId) {
-      getBaseSnapshot(effectiveBotId).then((s) => live && setBaseLocked(s.locked), () => undefined)
+      getBaseSnapshot(effectiveBotId).then((s) => {
+        if (!live) return
+        setBaseLocked(s.locked)
+        setBaseBuild(s.build ?? null)
+      }, () => undefined)
     }
+    const onProgress = (ev: Event) => {
+      const d = (ev as CustomEvent<{ bot_id?: string; state?: string; message?: string | null }>).detail
+      if (!d || d.bot_id !== effectiveBotId) return
+      if (d.state === 'building') setBaseBuild({ state: 'building', message: null })
+      else if (d.state === 'ready') {
+        setBaseLocked(true)
+        setBaseBuild(null)
+      } else if (d.state === 'failed') setBaseBuild({ state: 'failed', message: d.message ?? null })
+    }
+    window.addEventListener('agm:base_snapshot_progress', onProgress)
     return () => {
       live = false
+      window.removeEventListener('agm:base_snapshot_progress', onProgress)
     }
   }, [effectiveBotId])
+  const retryBaseBuild = async () => {
+    if (!effectiveBotId) return
+    setError(null)
+    try {
+      const s = await buildBaseSnapshot(effectiveBotId)
+      setBaseBuild(s.build ?? { state: 'building', message: null })
+    } catch (e) {
+      setError(errText(e))
+    }
+  }
   const unsaved = detail !== null && (
     form.name.trim() !== detail.name || form.prompt !== detail.prompt || effectiveBotId !== detail.bot_id ||
     form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) || form.fromBase !== (detail.from_base === true) ||
@@ -663,7 +674,7 @@ export function ScheduleEditor({
         <input type="checkbox" checked={form.fromBase} disabled={loading} onChange={(e) => set('fromBase', e.target.checked)} />
         {t('每次從基準快照開始')}
       </label>
-      <p className="hint">{baseLocked ? t('每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。') : t('這顆 Bot 還沒有基準快照：儲存時會將以此 Bot 目前對話建立基準（沒有對話就先啟動它一次，最久約兩分鐘）。只支援 codex、agy Bot。')}</p>
+      <p className="hint">{baseLocked ? t('每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。') : t('這顆 Bot 還沒有基準快照：儲存後會在背景以此 Bot 目前對話建立基準（沒有對話就先啟動它一次）。只支援 codex、agy Bot。')}</p>
 
       <label className="field schedule-prompt-field">
         <span>
@@ -686,7 +697,13 @@ export function ScheduleEditor({
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
-      {baseProgress ? <p className="hint" role="status">{baseProgress}</p> : null}
+      {baseBuild?.state === 'building' ? <p className="hint" role="status">{t('正在背景建立基準快照（agy 可能要幾分鐘）。排程已儲存，到點前還沒建好就延後，建好後照常執行。')}</p> : null}
+      {baseBuild?.state === 'failed' ? (
+        <p className="hint schedule-error" role="alert">
+          {t('基準快照建立失敗：{msg}', { msg: baseBuild.message ?? '' })}
+          <button type="button" className="btn" onClick={() => void retryBaseBuild()}>{t('重試建立基準')}</button>
+        </p>
+      ) : null}
       {unsaved ? <p className="hint" role="status">{t('請先儲存變更，再立即執行。')}</p> : null}
       {!unsaved && botUnavailable ? <p className="hint" role="status">{t('已綁定的 Bot 無法使用，請選擇其他 Bot 並儲存。')}</p> : null}
 

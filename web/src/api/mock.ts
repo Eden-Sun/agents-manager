@@ -1163,6 +1163,12 @@ export class MockTransport implements Transport {
     if (method === 'GET' && seg.length === 3 && seg[0] === 'messages' && seg[2] === 'translate-record') return mockTranslateRecord(decodeURIComponent(seg[1]))
     if (method === 'GET' && rawPath === '/translate-records') return mockTranslateRecords(q)
 
+    if (method === 'POST' && seg.length === 4 && seg[0] === 'bots' && seg[2] === 'base-snapshot' && seg[3] === 'build') {
+      const id = decodeURIComponent(seg[1])
+      if (!this.baseSnapshots.has(id)) this.baseSnapshots.set(id, new Date().toISOString())
+      const at = this.baseSnapshots.get(id) ?? new Date().toISOString()
+      return { locked: true, session_id: `mock-base-${id}`, locked_at: at, build: null }
+    }
     if (seg.length === 3 && seg[0] === 'bots' && seg[2] === 'base-snapshot') {
       const id = decodeURIComponent(seg[1])
       if (method === 'PUT') this.baseSnapshots.set(id, new Date().toISOString())

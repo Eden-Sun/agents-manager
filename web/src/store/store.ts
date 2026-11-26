@@ -2902,7 +2902,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     }
     case 'base_snapshot_progress': {
       if (!isRec(data)) return
-      window.dispatchEvent(new CustomEvent('agm:base_snapshot_progress', { detail: { bot_id: str(pick(data, 'bot_id')), state: str(pick(data, 'state')) } }))
+      window.dispatchEvent(new CustomEvent('agm:base_snapshot_progress', { detail: { bot_id: str(pick(data, 'bot_id')), state: str(pick(data, 'state')), message: optStr(pick(data, 'message')) ?? null } }))
       return
     }
     case 'schedules_changed': {

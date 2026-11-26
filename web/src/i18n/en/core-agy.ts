@@ -285,7 +285,7 @@ const dict: Dict = {
   '重試間隔（分鐘）': 'Retry interval (minutes)',
   '只有明確失敗才重試；拒絕與結果不明不會重試。重試可能重複外部操作，請確認任務可安全重做。': 'Retries only on explicit failure; declined or unknown outcomes will not retry. Retrying may repeat external actions; ensure the task is idempotent.',
   '每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。': 'Before each trigger, the Bot restarts into a fresh chat from the "baseline snapshot"; the baseline itself is unaltered, and failure occurs if the baseline is missing.',
-  '這顆 Bot 還沒有基準快照：儲存時會將以此 Bot 目前對話建立基準（沒有對話就先啟動它一次，最久約兩分鐘）。只支援 codex、agy Bot。': 'This Bot has no baseline snapshot yet: saving builds one from its current conversation (if it has none, the Bot is started once first, up to about two minutes). Only codex and agy Bots are supported.',
+  '這顆 Bot 還沒有基準快照：儲存後會在背景以此 Bot 目前對話建立基準（沒有對話就先啟動它一次）。只支援 codex、agy Bot。': 'This Bot has no baseline snapshot yet: after saving, a baseline is built in the background from this Bot\'s current conversation (if there is none, the Bot is started once first). Only codex and agy Bots are supported.',
 
   '停工的 bot：{names}。': 'Suspended Bots: {names}.',
   '{name} 額度用完了。{held}還有 {n} 張重置券{soonest}，要用一張嗎？': { one: '{name} quota exhausted. {held}There is {n} reset credit available{soonest}. Would you like to use one?', other: '{name} quota exhausted. {held}There are {n} reset credits available{soonest}. Would you like to use one?' },
@@ -305,8 +305,9 @@ const dict: Dict = {
   '複製 agy 對話失敗，無法建立基準快照': 'Could not copy the agy conversation, so no baseline snapshot was made',
   'agy 對話分岔失敗，這次沒有在舊 context 執行': 'The agy conversation could not be forked; this run did not execute in the old context',
   'agy 所在主機沒有 sqlite3 指令，無法複製對話；請先在該主機安裝 sqlite3': 'The agy host has no sqlite3 command, so the conversation cannot be copied; install sqlite3 on that host first',
-  '正在建立基準快照（agy 可能要幾分鐘）…': 'Building the baseline snapshot (agy may take a few minutes)…',
-  '基準快照已建立，正在儲存…': 'Baseline snapshot ready; saving…',
+  '正在背景建立基準快照（agy 可能要幾分鐘）。排程已儲存，到點前還沒建好就延後，建好後照常執行。': 'Building the baseline snapshot in the background (agy may take a few minutes). The schedule is saved; if it is not ready when due, the run waits and goes ahead once it is.',
+  '基準快照建立失敗：{msg}': 'Baseline snapshot failed: {msg}',
+  '重試建立基準': 'Retry baseline',
 }
 
 export default dict
