@@ -1468,15 +1468,23 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
+    seg.mark("r_projects_bots");
     let unread = crate::read_marks::unread_counts(&app.db).await.map_err(any_err)?;
+    seg.mark("r_unread");
     let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
+    seg.mark("r_read_marks");
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
+    seg.mark("r_asleep");
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
     let share_profiles = crate::share::store::profiles(&app.db).await.map_err(any_err)?;
     let sharing = crate::share::store::shared_ids(&app.db).await.map_err(any_err)?;
+    seg.mark("r_previews_share");
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
+    seg.mark("r_runs");
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
+    seg.mark("r_queued");
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.map_err(any_err)?;
+    seg.mark("r_last_turns");
     let scheduled_bots: std::collections::HashSet<String> = sqlx::query_scalar("SELECT DISTINCT bot_id FROM schedules WHERE deleted_at IS NULL").fetch_all(&app.db).await.map_err(any_err)?.into_iter().collect();
     let create_request_ids: std::collections::HashMap<&str, &str> = cfg
         .projects
