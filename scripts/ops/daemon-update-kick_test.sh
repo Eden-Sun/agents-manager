@@ -83,6 +83,7 @@ STUB
 echo "$*" >> "$AGM_DIR/agm.log"
 case "$*" in
   *build-inputs*) [ -z "${STUB_BUILD_INPUTS_FAIL:-}" ] || exit 1; printf '{"paths":["daemon","web","Cargo.toml","Cargo.lock"]}' ;;
+  *supervisor*) [ -f "$AGM_DIR/live.json" ] && cat "$AGM_DIR/live.json" || printf '{}' ;;
   *ops-alert*) reason=""; nxt=0
       for a in "$@"; do [ "$nxt" = 1 ] && { reason="$a"; nxt=0; }; [ "$a" = "--reason" ] && nxt=1; done
       echo "$reason" >> "$AGM_DIR/alerts.log" ;;
@@ -858,6 +859,11 @@ check "no-diff：log 說快轉" "主樹快轉到" "$(LOG)"
 teardown
 
 fake_live() {
+  local sha="${1%-dirty}" dirty=false
+  [ "$sha" = "$1" ] || dirty=true
+  printf '{"last_deploy":{"sha":"%s","sha_full":"%s","dirty":%s}}' "$(echo "$sha" | cut -c1-8)" "$sha" "$dirty" > "$AGM_DIR/live.json"
+}
+fake_disk() {
   printf '#!/bin/sh\necho "agents-managerd 0.2.0 %s"\n' "$1" > "$AGM_REPO/target/release/agents-managerd"
   chmod +x "$AGM_REPO/target/release/agents-managerd"
 }
@@ -915,6 +921,25 @@ fake_live "$C1"
 STUB_SWAP_RC=0 run >/dev/null
 check "下一輪自癒：舊版改成重新讀到的線上 C1" "--old $(short "$C1")" "$AGM_DIR/swap.log"
 check_eq "下一輪自癒：.built 也對上線上" "$(short "$C3")" "$(cat "$AGM_DIR/daemon-update.built")"
+teardown
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_live "$C0"
+fake_disk "$C1"
+ci "$C3" success
+STUB_SWAP_RC=3 run >/dev/null
+check_eq "磁碟上重建了 binary、daemon 沒重啟：.built 不動" "$(short "$C0")" "$(cat "$AGM_DIR/daemon-update.built")"
+check "磁碟上重建了 binary：換版的舊版是執行中的 C0" "--old $(short "$C0")" "$AGM_DIR/swap.log"
+check_no "磁碟上重建了 binary：不推 built_reconciled" "built_reconciled" "$AGM_DIR/alerts.log"
+teardown
+
+setup
+echo "$(short "$C0")" > "$AGM_DIR/daemon-update.built"
+fake_disk "$C1"
+ci "$C3" success
+STUB_SWAP_RC=3 run >/dev/null
+check_eq "問不到執行中的 daemon：不改讀磁碟 binary，.built 不動" "$(short "$C0")" "$(cat "$AGM_DIR/daemon-update.built")"
 teardown
 
 echo "$PASS passed, $FAIL failed"

@@ -1,8 +1,8 @@
 .project-lineage-section {
   margin-top: 1.5rem;
   padding: 1rem;
-  background: var(--bg-card, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
@@ -26,14 +26,14 @@
 .project-lineage-header .hint {
   margin: 0.35rem 0 0;
   font-size: 0.85rem;
-  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  color: var(--text-dim);
 }
 
 .project-lineage-loading,
 .project-lineage-empty {
   padding: 1.25rem 0;
   text-align: center;
-  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  color: var(--text-dim);
   font-size: 0.9rem;
 }
 
@@ -43,10 +43,10 @@
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
   border-radius: 6px;
-  color: #ef4444;
+  color: var(--danger);
   font-size: 0.85rem;
   margin-bottom: 0.75rem;
 }
@@ -64,8 +64,8 @@
   padding: 0.4rem 0.6rem;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--text-dim, rgba(255, 255, 255, 0.6));
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
 }
 
 .project-lineage-row {
@@ -75,37 +75,37 @@
   align-items: center;
   padding: 0.5rem 0.6rem;
   border-radius: 6px;
-  background: var(--bg-row, rgba(255, 255, 255, 0.02));
+  background: var(--bg-sunken);
   font-size: 0.85rem;
   transition: background 0.15s ease;
 }
 
 .project-lineage-row:hover {
-  background: var(--bg-row-hover, rgba(255, 255, 255, 0.06));
+  background: var(--bg-hover);
 }
 
 .lineage-line-badge {
   display: inline-block;
   padding: 0.15rem 0.45rem;
   border-radius: 4px;
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  color: #60a5fa;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent-ink);
   font-weight: 600;
   font-size: 0.82rem;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .lineage-sid,
 .lineage-sha {
   font-size: 0.82rem;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--code-bg);
   padding: 0.1rem 0.3rem;
   border-radius: 4px;
 }
 
 .lineage-empty-val {
-  color: var(--text-muted, rgba(255, 255, 255, 0.35));
+  color: var(--text-faint);
 }
 
 .lineage-claim-chip {
@@ -116,24 +116,24 @@
 }
 
 .lineage-claim-chip.active {
-  background: rgba(245, 158, 11, 0.2);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid var(--warn);
   font-weight: 600;
 }
 
 .lineage-claim-chip.zero {
-  color: var(--text-muted, rgba(255, 255, 255, 0.4));
+  color: var(--text-faint);
 }
 
 .lineage-ratio.high {
-  color: #10b981;
+  color: var(--status-ok);
   font-weight: 600;
 }
 
 .lineage-saved {
   font-weight: 500;
-  color: #34d399;
+  color: var(--status-ok);
 }
 
 /* 390px 手機寬度適應：卡片式流式排版 */
@@ -147,7 +147,7 @@
     flex-wrap: wrap;
     gap: 0.4rem 0.75rem;
     padding: 0.65rem 0.75rem;
-    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+    border: 1px solid var(--border);
     margin-bottom: 0.25rem;
   }
 
@@ -158,31 +158,31 @@
 
   .project-lineage-row .col-checkpoint::before {
     content: "CP: ";
-    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    color: var(--text-dim);
     font-size: 0.75rem;
   }
 
   .project-lineage-row .col-sha::before {
     content: "SHA: ";
-    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    color: var(--text-dim);
     font-size: 0.75rem;
   }
 
   .project-lineage-row .col-claims::before {
     content: "認領: ";
-    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    color: var(--text-dim);
     font-size: 0.75rem;
   }
 
   .project-lineage-row .col-ratio::before {
     content: "快取: ";
-    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    color: var(--text-dim);
     font-size: 0.75rem;
   }
 
   .project-lineage-row .col-saved::before {
     content: "省下: ";
-    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    color: var(--text-dim);
     font-size: 0.75rem;
   }
 }

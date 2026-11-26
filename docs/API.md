@@ -51,7 +51,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `PUT`／`DELETE /quota/reset-credit/snooze` | 只有網頁 | User-only；Bot 與 AGM role 均 403 `user_only` | 重置券提示「不再提醒」（只控制提醒、不兌換） | 維持 UserOnly |
 | C | `POST /quota/probe` | 網頁、AGM 角色 | User 或已登記 AGM 角色；一般 Bot → 403 `user_only` | 即時探測額度 | 維持 UserOrAgm |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
-| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身份的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身份都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、記錄遠端入口觀測） | 已有 |
+| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身份的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身份都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、記錄遠端入口觀測） | 已有 |
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身份的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者 → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身份的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/kids`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
@@ -447,7 +447,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/supervisor/leases/{resource}/acquire` | User 或 Bot；Bot owner 必須是自己；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/leases/{resource}/release` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/leases/{resource}/renew` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
-| POST | `/api/supervisor/ops-alerts` | User 與已驗證 Bot（含遠端主機 Bot，每小時同 source+reason 去重） |
+| POST | `/api/supervisor/ops-alerts` | User、service principal 或 AGM 角色 Bot；一般 Bot 403 `role_required`、子 agent 403；每呼叫者每小時上限 12 則（409 `ops_alert_rate_limited`） |
 | POST | `/api/supervisor/persona/adopt-embedded` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/setup` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/start` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -3101,7 +3101,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--si
   因為數字精確、樣本有界，這一段**不分頁**：它是健康快照裡一段固定大小的摘要，不是列表 API。讀不到時整段是 `null`——觀測不該變成新的故障點。
 - `POST /api/supervisor/ops-alerts {source,reason,detail?}` → `{queued,inbox_event_id,event_key}`。排程腳本（`scripts/ops/*`）卡住、自己解不開時喊人：
   寫一則 inbox `ops_alert`（此 HTTP 入口路由給巡檢；同一件事——同 `source`+`reason`+bot——12 小時內只有第一則叫醒，之後只記錄 `wake:false`，SPEC §18.15、issue #1478）。daemon 內部的冷 resume 告警只有在角色紀錄確認巡檢本人卡住時才加 `to_role:"responder"`；一般 bot 或協調者仍由巡檢收。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
-  event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。
+  呼叫者限使用者（本機排程腳本）、service principal 與 AGM 角色 bot；一般 bot 403 `role_required`、子 agent 403（2026-11-26，fb-scan 第 6 條）。
+  event_key 由 daemon 產生、帶小時格：使用者呼叫為 `ops_alert:<source>:<reason>:<hour>`，service／角色 bot 為 `ops_alert:<service-id|bot-id>:<reason>:<hour>`（換 `source` 繞不過去重）；每小時最多一則（`queued:false` = 這小時已經有了）。
+  每個呼叫者每小時最多新增 12 則（同一則重送照舊回 `queued:false`，不算），超過 409 `ops_alert_rate_limited` `{caller,limit_per_hour,retry_after_secs}`。
+  payload 多 `caller` 與 `detail_is_data:true`；`detail` 是回報方提供的未驗證資料，`action` 只請巡檢自行查證後處理，不叫它照 detail 做。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `role_unavailable` | `responder_undeliverable` | `approval_stalled` | `inbox_classify_failing` | `remote_shim_stale`（SPEC §18.9／§18.15；`inbox_classify_failing` 是 issue #472——`roles::classify` 連續 3 拍失敗，critical，resource 固定是 `inbox`，detail 帶 `consecutive_failures`／`action`；**這一種不入 inbox**，理由見下一行；`responder_undeliverable` 是 issue #420，`approval_stalled` 是 issue #421——核准開著 30 分鐘沒有任何人裁示，critical，resource 是核准 id，detail 帶 `approval_id`／`waiting_secs`／`requester`／`action`；`remote_shim_stale` 是 issue #534——遠端 shim 補版退避重試（立刻／5 分／15 分／60 分）都失敗、或有檔案換不動，degraded，resource 是 host 名，detail 帶 `why`／`action`，補成就自動恢復）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
   **收件人不一定是巡檢**：`notify_exhausted` 推給協調者（倒下的正是巡檢的通知路），`role_unavailable` 看故障的是誰——`resource='patrol'` 推協調者、`resource='responder'` 推巡檢；其餘都推巡檢。

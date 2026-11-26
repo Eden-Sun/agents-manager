@@ -4759,7 +4759,7 @@ SQLite 池健康探測獨立於使用 DB 的業務巡邏：每 30 秒檢查池�
   鎖帶 pid 與時間（執行者不在且鎖超過 `AGM_LOCK_STALE_SECS`＝120 秒才回收；還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人；mtime 在未來視為時間不可信，不回收並推 `runner_clock_skew` 告警）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。
 - **誰重建**：例行更新由上面那支腳本自己建；有 bot 要在 main 之前的 commit 上線，才走 §18.10 的 rebuild／restart 核准（申請者自己建、AGM 裁示）。
-- **docs-only 不重啟**：換版成功後 `daemon-swap.sh` 把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 每輪先讀線上 binary 內嵌的 sha：與 .built 不符（管線外換過 binary）且那顆 commit 在專用 checkout 裡，就以線上為準更正 .built 並推 built_reconciled；髒樹或說不出 sha 時沿用 .built。kick 用
+- **docs-only 不重啟**：換版成功後 `daemon-swap.sh` 把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 每輪先問**執行中的 daemon** 是哪一版（`agm supervisor` 的 `last_deploy.sha_full`，即行程內的 `BUILD_SHA_FULL`；不讀磁碟上的 binary——有人重建了 binary 但沒重啟時磁碟與執行中的不同，2026-11-26）：與 .built 不符（管線外換過 binary）且那顆 commit 在專用 checkout 裡，就以線上為準更正 .built 並推 built_reconciled；髒樹或說不出 sha 時沿用 .built。kick 用
   `git diff --quiet <built> <sha> -- <build-inputs>`（路徑問 daemon 的 `agm build-inputs`，§18.11）判斷，沒差異就不建置、不換版。
 - **換版固定條件**（`daemon-swap.sh` 內建，全中才動手，否則回報阻塞）：
   1. 在**乾淨的專用 checkout** 建 web 與 daemon（共用樹的 WIP 不得編進 release）；`--old`（線上）必須是 `--sha` 的祖先或同一顆，否則拒絕降版（#638）。
@@ -5229,7 +5229,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   例外 `notify_exhausted`：它說的是巡檢的通知送不出去，推給巡檢等於送進壞掉的那條路（事件又會用盡、再開一筆）。協調者建立時推給**協調者**（佇列沒有次數上限，不會遞迴）；沒有協調者就只留在 UI 與 `system_health`，不入 inbox。
 - `assignment_undelivered` 獨立一條：每次重試 `defer` 會推 `updated_at`，stalled 看不到它。被拒的真正理由（`bot has no active run`、`needs_login`）記在 `error`。
 - **排程腳本卡住**：`scripts/ops/*` 停住而且自己解不開時走 `POST /api/supervisor/ops-alerts`，寫一則 inbox `ops_alert`（巡檢收、叫醒；同一件事 12 小時內只有第一則叫醒，§18.15），
-  同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
+  同 `source`+`reason` 每小時最多一則（service／角色 bot 的去重鍵以呼叫者取代 `source`）；只收使用者、service principal 與 AGM 角色 bot，一般 bot 403，每呼叫者每小時上限 12 則，`detail` 以未驗證資料轉給巡檢（API §ops-alerts）。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
   `daemon-update-kick.sh` 與 `release-triage-kick.sh` 的目錄鎖帶 pid 與時間，另以 OS advisory lock 串行化鎖建立與殘留回收，避免兩個排程同時刪掉對方剛重建的鎖、重複建置或派工。執行者不在了（強制關機、SIGKILL）且沒有行程仍持 advisory lock 時就回收接手；活 runner 在安靜門檻內不洗 log，超過 `AGM_LOCK_HUNG_SECS`（部署 7200 秒、分診 3600 秒）才喊人。若子行程仍握著 advisory lock、owner 已無法驗證，超過 hung 門檻也會告警，不會無限安靜跳過。
   例行部署不再開核准單，所以沒有「協調者不裁示」這一種卡法（2026-09-29 拿掉 `approval_undecided`）。
   daemon 那一側更快也更準——核准開 5 分鐘改派給巡檢、開 30 分鐘開 `approval_stalled` incident。兩條都留著：

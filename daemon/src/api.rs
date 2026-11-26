@@ -376,7 +376,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/supervisor/cli",
             get(crate::runners::supervisor::cli::get_cli).layer(agm_gate!(app)).merge(post(crate::runners::supervisor::cli::post_cli_refresh).layer(agm_gate!(app))),
         )
-        .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert))
+        .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::runners::supervisor::responder_api::routes(app.clone()))
         .merge(crate::runners::release_triage::routes())

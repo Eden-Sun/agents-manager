@@ -310,11 +310,18 @@ binary_same() { "$GIT" -C "$DEPLOY" diff --quiet "$1" "$2" -- $PATHS; }
 
 LIVE_BIN="$REPO/target/release/agents-managerd"
 embedded_live_sha() {
-  local line name pkg sha extra
-  line=$("$LIVE_BIN" --version 2>/dev/null | head -n 1) || return 1
-  read -r name pkg sha extra <<< "$line"
-  [ -n "$sha" ] && [ -z "$extra" ] || return 1
-  printf "%s" "$sha"
+  [ -x "$AGM" ] || return 1
+  "$AGM" --compact supervisor 2>/dev/null | python3 -c '
+import json,sys
+try:
+    d = json.load(sys.stdin).get("last_deploy") or {}
+except Exception:
+    sys.exit(1)
+sha = str(d.get("sha_full") or "").strip()
+if not sha or any(c.isspace() for c in sha):
+    sys.exit(1)
+print(sha + ("-dirty" if d.get("dirty") else ""), end="")
+'
 }
 BUILT_SHA=""
 [ -f "$BUILT" ] && BUILT_SHA=$(tr -d '[:space:]' < "$BUILT")
@@ -324,20 +331,20 @@ LIVE_SHA=$(embedded_live_sha) || LIVE_SHA=""
 if [ -n "$LIVE_SHA" ]; then
   LIVE_FULL=$("$GIT" -C "$DEPLOY" rev-parse --verify --quiet "${LIVE_SHA}^{commit}" 2>/dev/null) || LIVE_FULL=""
   if [ -z "$LIVE_FULL" ]; then
-    log "線上 binary 內嵌的 sha「${LIVE_SHA}」不是專用 checkout 裡的 commit（髒樹或沒抓到），沿用 ${BUILT} 的「${BUILT_SHA}」"
+    log "執行中的 daemon 回報的 sha「${LIVE_SHA}」不是專用 checkout 裡的 commit（髒樹或沒抓到），沿用 ${BUILT} 的「${BUILT_SHA}」"
   elif [ "$LIVE_FULL" != "$BUILT_FULL" ]; then
     LIVE_SHORT=$(printf '%s' "$LIVE_FULL" | cut -c1-8)
     if write_built_marker "$LIVE_SHORT"; then
-      alert built_reconciled "線上 binary 內嵌的 ${LIVE_SHORT} 與 ${BUILT} 記的「${BUILT_SHA:-空}」不符（像是管線外換過 binary），已以線上為準更新 ${BUILT}"
+      alert built_reconciled "執行中的 daemon 是 ${LIVE_SHORT}，與 ${BUILT} 記的「${BUILT_SHA:-空}」不符（像是管線外換過 binary），已以線上為準更新 ${BUILT}"
     else
-      note_fail "線上 binary 是 ${LIVE_SHORT}，但 ${BUILT} 寫入失敗（記的是「${BUILT_SHA:-空}」）；這輪照線上版本往上換"
+      note_fail "執行中的 daemon 是 ${LIVE_SHORT}，但 ${BUILT} 寫入失敗（記的是「${BUILT_SHA:-空}」）；這輪照線上版本往上換"
     fi
     BUILT_SHA="$LIVE_SHORT"
     BUILT_FULL="$LIVE_FULL"
   fi
 fi
 if [ -z "$BUILT_SHA" ] || [ -z "$BUILT_FULL" ]; then
-  alert built_unknown "讀不到線上是哪一版（${BUILT} 是「${BUILT_SHA}」，線上 binary 也說不出 commit），不知道從哪裡往上換，自動部署停住。請確認線上 binary 的 short sha 後寫進那個檔"
+  alert built_unknown "讀不到線上是哪一版（${BUILT} 是「${BUILT_SHA}」，執行中的 daemon 也說不出 commit），不知道從哪裡往上換，自動部署停住。請確認線上 binary 的 short sha 後寫進那個檔"
   exit 0
 fi
 
