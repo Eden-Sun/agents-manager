@@ -15,7 +15,8 @@ use crate::hosts::sh_quote;
 pub const MAX_PER_TURN: usize = 8;
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub const REMOTE_FETCH_CAP: usize = 16;
-pub const RETENTION_SECS: i64 = 7 * 24 * 3600;
+/// 跟 outbox 一樣放 1 小時（使用者 2026-11-26：一小時之後用到的機率不高）。
+pub const RETENTION_SECS: i64 = crate::outbox::TTL_SECS as i64;
 pub const BOT_CAP_BYTES: i64 = 200 * 1024 * 1024;
 pub const GIVE_UP_SECS: i64 = 2 * 24 * 3600;
 pub const QUOTA_BANNER: &str = "image generation quota exceeded";
@@ -695,11 +696,11 @@ mod tests {
         add_image(&pool, "b1", &a, 10, "2026-11-26T00:00:00.000Z").await;
         add_image(&pool, "b1", &"b".repeat(64), 10, "2026-10-01T00:00:00.000Z").await;
         add_image(&pool, "b2", &"c".repeat(64), 10, "2026-11-26T00:00:00.000Z").await;
-        let now = epoch("2026-11-26T12:00:00Z").unwrap();
+        let now = epoch("2026-11-26T00:20:00Z").unwrap();
         let list = outbox_entries(&pool, "b1", now).await.unwrap();
         assert_eq!(list.len(), 1, "過期的不列");
         assert_eq!(list[0]["name"], format!("agy-images/{a}.png"));
-        assert_eq!(list[0]["remaining_secs"], RETENTION_SECS as u64 - 12 * 3600);
+        assert_eq!(list[0]["remaining_secs"], RETENTION_SECS as u64 - 20 * 60);
         let got = outbox_file(&pool, "b1", &format!("agy-images/{a}.png"), now).await.unwrap();
         assert_eq!(got.map(|(_, m, n)| (m, n)), Some(("image/png".to_string(), format!("{a}.png"))));
         assert!(outbox_file(&pool, "b1", &format!("agy-images/{a}.jpg"), now).await.unwrap().is_none(), "副檔名要跟內容型別一致");

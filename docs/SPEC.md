@@ -4342,11 +4342,11 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **收集**：背景每 5 秒掃 `state='open'` 且回合已終局（非 `queued`／`in_flight`）的 mark。本機直接讀檔；遠端一次 ssh 列出（10 秒逾時，卡住不拖住送出路徑）、再一次 ssh 讀最多 16 個新檔（≤10 MB 才給內容，`base64`）。排除 `scratch/`、以 `.` 開頭的目錄（`.system_generated`、`.user_uploaded`）、符號連結；內容要以檔頭辨認（png／jpg／gif／webp），副檔名不算數。
 - **上限與去重**：每回合最多 8 張、單張 10 MB；超過的在回合上留一則系統說明（`role=assistant`、`source=system`，綁同一 `turn_id`）。同一 bot 內容雜湊相同只收一次（`agy_images` 的 `(bot_id, sha256)`）。
 - **呈現**：收進來的圖寫到 bot 的附件目錄（`attach::local_copy_dir`，檔名 `agy-<sha>.<ext>`），建 `attachments` 列（`state='ready'`、綁該則說明訊息），沿用既有 `GET /api/attachments/{id}` 與縮圖／Lightbox，不新增路由。
-- **保存**：超過 7 天（`RETENTION_SECS`）或超過每顆 bot 200 MB（`BOT_CAP_BYTES`，最舊先刪）的圖：刪本機檔、刪 `agy_images` 列，`attachments` 列保留，讀取回 404／410，網頁顯示「已過期」（`GONE_LABEL`）。這不是 outbox（1 小時 TTL）。每小時掃一次。
+- **保存**：超過 1 小時（`RETENTION_SECS`，與 outbox 相同，使用者 2026-11-26）或超過每顆 bot 200 MB（`BOT_CAP_BYTES`，最舊先刪）的圖：刪本機檔、刪 `agy_images` 列，`attachments` 列保留，讀取回 404／410，網頁顯示「已過期」（`GONE_LABEL`）。存放位置不在 outbox 目錄，但保存時間與 outbox 同為 1 小時。每 5 分鐘掃一次。
 - **補收**：遠端離線或 daemon 重啟時 mark 留在 `open`，以 30 秒起、倍增（上限約 32 分鐘）重試；拍過快照後超過 2 天仍收不到就 `skipped`。
 - **產圖額度（與文字額度分開）**：紀錄檔裡在回合開始之後出現 `image generation quota exceeded` 橫幅（`image_quota_since`）→ 在回合上寫一則說明（「產圖額度已用盡（reset after …）」）。**不走撞限**：不呼叫 `mark_agy_limit_hit`、不寫 `limit_hit`、不設 `quota_blocked`，bot 的文字回合照常。`is_quota_exhaustion`／`is_quota_limit` 對這行都回 false（測試守門）。
 - **舊版 DB**：SCHEMA 112 新增 `agy_image_marks`、`agy_images`（純新增表）。
-- **outbox 清單**（MVP 第 2 條）：`GET /api/bots/{id}/outbox` 的 `files` 另外列出這顆 bot 尚未過期的產圖（`source:"agy"`，`name` 為 `agy-images/<sha256>.<ext>`，`expires_at` ＝收進來後 7 天，不是 outbox 的 1 小時）。`GET /api/bots/{id}/outbox/file?path=agy-images/…` 從產圖區讀出，路徑必須是 64 位十六進位 + 與內容型別一致的副檔名、且屬於這顆 bot、未過期；其他情況一律 404。不經過 outbox 的目錄與 1 小時清理。
+- **outbox 清單**（MVP 第 2 條）：`GET /api/bots/{id}/outbox` 的 `files` 另外列出這顆 bot 尚未過期的產圖（`source:"agy"`，`name` 為 `agy-images/<sha256>.<ext>`，`expires_at` ＝收進來後 1 小時，與 outbox 相同）。`GET /api/bots/{id}/outbox/file?path=agy-images/…` 從產圖區讀出，路徑必須是 64 位十六進位 + 與內容型別一致的副檔名、且屬於這顆 bot、未過期；其他情況一律 404。不經過 outbox 的目錄與其清理，由產圖自己的 1 小時清理處理。
 - 未涵蓋：跨 bot 交付（第二階段）；實機產圖與 ag0 額度實測（需要真的消耗產圖額度）。
 
 ## 13. 專案設定

@@ -16,7 +16,7 @@ pub trait Host: Db + Emit + DataDir + crate::hosts::HostsAccess + crate::lifecyc
 impl<T> Host for T where T: Db + Emit + DataDir + crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess {}
 
 const COLLECT_EVERY: Duration = Duration::from_secs(5);
-const SWEEP_EVERY: Duration = Duration::from_secs(3600);
+const SWEEP_EVERY: Duration = Duration::from_secs(300);
 const DUE_BATCH: i64 = 20;
 
 pub async fn begin(app: &(impl Db + crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), bot_id: &str, turn_id: &str, conversation_id: &str) -> Result<()> {
