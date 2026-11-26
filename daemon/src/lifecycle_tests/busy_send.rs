@@ -184,6 +184,56 @@ mod tests {
             "the quiet lease becomes available after both rows leave the queue",
         );
     }
+    /// #2223：排著的一則帶**有效**的額度暫扣（`until` 未過，或沒寫 `until`）時不算送達臨界區、窗口拿得到；
+    /// 暫扣過期、被清掉、或憑據壞掉時立刻回到臨界區；in_flight＋pending 不受暫扣影響。
+    #[tokio::test]
+    async fn a_queued_prompt_held_by_quota_is_not_delivery_critical_until_the_hold_lapses() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "held-2223").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let user = admit(&app, &conv, &bot.id, "額度暫扣中的一句", "held-2223-u").await.unwrap();
+        tt::fake_run(&app, &bot.id).await;
+        let critical = || async { crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap() };
+        let quiet = |resource: &'static str| {
+            let pool = app.db.clone();
+            async move {
+                crate::supervisor::store::acquire_lease(&pool, resource, "runner", None, None, &db::iso_in(600), true, None, &json!({}))
+                    .await
+                    .unwrap()
+                    .is_some()
+            }
+        };
+        let set_hold = |hold: Option<String>| {
+            let pool = app.db.clone();
+            let id = user.turn_id.clone();
+            async move {
+                sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(hold).bind(&id).execute(&pool).await.unwrap();
+            }
+        };
+
+        assert!(critical().await, "沒有暫扣：排著的一則照舊是臨界區");
+        set_hold(Some(json!({"message": "usage limit", "until": db::iso_in(3600)}).to_string())).await;
+        assert!(!critical().await, "有效暫扣（until 未過）：不算臨界區");
+        assert!(quiet("held-2223-a").await, "窗口拿得到");
+
+        set_hold(Some(json!({"message": "usage limit", "until": db::iso_in(-60)}).to_string())).await;
+        assert!(critical().await, "暫扣過期：立刻回到臨界區");
+        assert!(!quiet("held-2223-b").await, "過期後窗口拿不到");
+
+        set_hold(Some(json!({"message": "credits used up"}).to_string())).await;
+        assert!(!critical().await, "沒寫 until 的暫扣同樣不算（flush 原地不送）");
+
+        set_hold(Some("not json".to_string())).await;
+        assert!(critical().await, "憑據解不開：保守地當臨界區");
+
+        set_hold(None).await;
+        assert!(critical().await, "暫扣被清掉：回到臨界區");
+
+        set_hold(Some(json!({"message": "usage limit", "until": db::iso_in(3600)}).to_string())).await;
+        sqlx::query("UPDATE turns SET status='in_flight', delivery='pending' WHERE id=?").bind(&user.turn_id).execute(&app.db).await.unwrap();
+        assert!(critical().await, "in_flight＋pending 照算，不管暫扣");
+    }
     /// #821：真的有第二個排隊請求在同一瞬搶同一個槽時，它照舊拿到 `queue_slot_taken`（不是 `database is locked`），
     /// 槽裡只有先到的那一筆。不拿 bot 鎖，兩個 admission 直接在 DB 上碰。
     #[tokio::test]

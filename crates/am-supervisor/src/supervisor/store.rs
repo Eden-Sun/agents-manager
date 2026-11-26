@@ -2714,7 +2714,10 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 
 /// **送達臨界區的唯一定義**（SPEC §18.10）：這一筆 turn 此刻是不是「daemon 正要把字送進 pane，
 /// 中途被打斷會掉東西」。兩種：
-/// - `queued` 而且這顆 bot 還有活著、不在 `blocked`、也不在 `working` 的 run（flush 隨時會領它去打字）。
+/// - `queued` 而且這顆 bot 還有活著、不在 `blocked`、也不在 `working` 的 run（flush 隨時會領它去打字），
+///   **而且沒有仍有效的額度暫扣**（`turns.quota_hold` 的 `until` 還沒過，或沒寫 `until`）：暫扣中的一則 flush 會原地不送
+///   （`quota_hold::blocking_hit`），而且暫扣寫在這一列上、跨重啟保得住，所以不是「會被打斷」的東西（issue #2223）。
+///   暫扣過期或被清掉的那一刻，條件就回到臨界區（不靠任何 timer，SQL 每次都照當下時間判）。
 ///   `working` 不算（issue #1677）：flush 在 working 時一個字都不會打（`queue::flush_queued_locked`），
 ///   排隊跨 daemon 重啟保得住、回合結束的邊在新 daemon 照樣收得到；算進來的話長回合加一則排隊訊息就讓部署永遠拿不到窗口；
 /// - `in_flight` 而 `delivery` 還是 `pending`（正在打字／送出）。
@@ -2725,7 +2728,12 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 /// 安全檢查（`maintenance::safety`）、`acquire_lease` 的條件式寫入與入場閘門都讀這一份，
 /// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
 pub const DELIVERY_CRITICAL_PREDICATE: &str = concat!("(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
-                       AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working')))
+                       AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working'))
+                       AND NOT (t.quota_hold IS NOT NULL AND json_valid(t.quota_hold)
+                         AND (json_extract(CASE WHEN json_valid(t.quota_hold) THEN t.quota_hold END, '$.until') IS NULL
+                           OR COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(CASE WHEN json_valid(t.quota_hold) THEN t.quota_hold END, '$.until')),
+                                       json_extract(CASE WHEN json_valid(t.quota_hold) THEN t.quota_hold END, '$.until'))
+                               > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))))
       OR (t.status='in_flight' AND t.delivery='pending' AND NOT EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), "))
       OR (t.status='in_flight' AND EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), ")
           AND EXISTS (SELECT 1 FROM runs r WHERE r.id=t.run_id AND r.state='running')

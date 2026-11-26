@@ -5312,6 +5312,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
+  - **不擋（issue #2223）**：排著的一則帶**有效的額度暫扣**（`turns.quota_hold` 的 `until` 還沒過，或沒寫 `until`）時不算臨界區——flush 看到暫扣就原地不送（`quota_hold::blocking_hit`），暫扣寫在這一列上、跨重啟保得住，等的是額度回來而不是有人會被打斷。暫扣過期、被清掉、或 `quota_hold` 解不開（非 JSON）的那一刻，條件照當下時間回到臨界區，不靠任何 timer；in_flight＋pending 照算。`acquire_lease` 的條件式寫入與安全檢查讀同一份 `DELIVERY_CRITICAL_PREDICATE`，所以兩邊一起放行／一起擋。部署卡 17 小時的根因就是 m4p 上兩顆 codex bot 各一則被 quota_hold（until 2026-11-26T12:04Z）擋住的 web turn 一直被算成臨界區。
   - **仍然擋**：送達臨界區（`turns.status='queued'` **且那顆 bot 還有活著的 run、run 此刻不是 `blocked`、也不是 `working`**——沒有 run 的 queued 沒有人會送，是遺留的，會被撤銷（§4.4a），算進來的話永遠 unsafe；
     run 停在 `blocked`（等使用者回答）時 flush 不會開始打字、queued 跨 daemon 重啟保得住，放行才不會「有人在等使用者」就整台不能換版（AGM 裁示 2026-09-16）。
     這個判定讀 runs 的即時狀態、acquire 在鎖內重判：一離開 blocked 就立刻回到臨界區；
