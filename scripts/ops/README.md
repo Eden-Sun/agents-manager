@@ -377,6 +377,7 @@ is pinned by `daemon-swap_test.sh`:
 - A failure after a schema upgrade **fixes forward by default** (keep the new binary, exit 6); only if the new binary
   cannot start are binary and DB restored (exit 7).
 - The daemon is started with `launchctl submit` + `daemon-start.py` (fork + setsid), so it ends up ppid=1, nice 0.
+- `daemon-start.py` rotates `daemon.log` before it opens the log: when the file is over 100 MB it is moved aside and gzipped to `daemon.log.1.gz` (older ones shift to `.2.gz`, `.3.gz`; only 3 are kept). It only rotates while no daemon holds `daemon.lock`, so the moved file has no writer. A running daemon's log therefore rotates at its next restart (every `daemon-swap` restarts it); tests: `daemon-start_test.sh`.
   Backgrounding it inside a pane would inherit the pane's busy nice 5, which a non-root user cannot lower.
   On Linux (issue #677) it runs the same `daemon-start.py` through
   `systemd-run --user --collect --unit=am-daemon-swap-<pid>-<attempt> -p Type=forking -p KillMode=process`: the transient

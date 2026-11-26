@@ -11,8 +11,14 @@ daemon-swap.sh 的 start()）：systemd 看的是 cgroup 不是程序群，setsi
     python3 daemon-start.py <repo dir> <daemon log>
 """
 
+import fcntl
+import gzip
 import os
+import shutil
 import sys
+
+LOG_ROTATE_BYTES = 100 * 1024 * 1024
+LOG_ROTATE_KEEP = 3
 
 DROP = (
     "AM_DATA_DIR", "AM_RUN_ID", "AM_EFFORT", "AM_HOOK_TOKEN", "AM_KIND", "AM_MODEL",
@@ -26,6 +32,52 @@ DROP = (
 def daemon_path(home: str) -> str:
     return ":".join([f"{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
 
+def rotate_log(log: str, limit: int = LOG_ROTATE_BYTES, keep: int = LOG_ROTATE_KEEP) -> bool:
+    """daemon.log 超過 `limit` 就壓成 `<log>.1.gz`（舊的依序推成 `.2.gz`…，只留 `keep` 份）。
+
+    只在新 daemon 還沒開檔、舊的已經結束時呼叫：先拿資料目錄的 `daemon.lock`（daemon 活著就拿不到，直接不輪替），
+    所以搬走的檔沒有任何寫入者，不會丟行。搬走（rename）是瞬間的；壓縮的是搬走後的那一份，中途掛掉下次啟動接著做。
+    回傳是否真的輪替了。
+    """
+    staging = f"{log}.rotating"
+    lock_path = os.path.join(os.path.dirname(log) or ".", "daemon.lock")
+    try:
+        lock = open(lock_path, "a+")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        if os.path.exists(staging):
+            pending = staging
+        else:
+            try:
+                if os.path.getsize(log) <= limit:
+                    return False
+            except OSError:
+                return False
+            os.replace(log, staging)
+            pending = staging
+        oldest = f"{log}.{keep}.gz"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for i in range(keep - 1, 0, -1):
+            src = f"{log}.{i}.gz"
+            if os.path.exists(src):
+                os.replace(src, f"{log}.{i + 1}.gz")
+        tmp = f"{log}.1.gz.tmp"
+        with open(pending, "rb") as src, gzip.open(tmp, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+        os.replace(tmp, f"{log}.1.gz")
+        os.remove(pending)
+        return True
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
 def main() -> int:
     repo, log = sys.argv[1], sys.argv[2]
     if os.fork() != 0:
@@ -35,6 +87,10 @@ def main() -> int:
     for key in DROP:
         os.environ.pop(key, None)
     os.environ["PATH"] = daemon_path(os.environ.get("HOME", ""))
+    try:
+        rotate_log(log)
+    except OSError:
+        pass
     out = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
     os.dup2(out, 1)

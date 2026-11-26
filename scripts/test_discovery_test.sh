@@ -20,6 +20,7 @@ wrapper_for() {
         scripts/ops/claude_binary_diff_test.py) echo scripts/ops/claude_binary_diff_test.sh ;;
         scripts/ops/cutover-helper_test.py) echo scripts/ops/cutover-helper_test.sh ;;
         scripts/ops/daemon-swap-network_test.py) echo scripts/ops/daemon-swap-network_test.sh ;;
+        scripts/ops/daemon-start_test.py) echo scripts/ops/daemon-start_test.sh ;;
         scripts/ops/host-state-transfer_test.py) echo scripts/ops/cutover-to-host_test.sh ;;
         scripts/ops/project-transfer_test.py) echo scripts/ops/project-transfer_test.sh ;;
         scripts/ops/transcript-transfer_test.py) echo scripts/ops/transcript-transfer_test.sh ;;

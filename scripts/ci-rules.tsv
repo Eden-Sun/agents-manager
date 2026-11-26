@@ -61,6 +61,7 @@ scripts/dev-sshd.sh|ops|-|scripts/dev-sshd_test.sh
 scripts/ops/browser-gc-kick.sh|ops|-|scripts/ops/browser-gc-kick_test.sh
 scripts/ops/ci-watch-kick.sh|ops|-|scripts/ops/ci-watch-kick_test.sh
 scripts/ops/claude-release-kick.sh|ops|-|scripts/ops/claude-release-kick_test.sh
+scripts/ops/daemon-start.py|ops|-|__all__
 scripts/ops/daemon-boot.sh|ops|-|scripts/ops/daemon-boot_test.sh
 scripts/ops/daemon-update-kick.sh|ops|-|scripts/ops/daemon-update-kick_test.sh
 scripts/ops/dev-server-kick.ts|ops|-|scripts/ops/dev-server-kick_test.sh
