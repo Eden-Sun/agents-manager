@@ -138,7 +138,7 @@ export function ApiBotCostOverview({
             tokens: writeTokens,
             cost_usd: writeCost,
             percentage: calcPct(writeCost),
-            colorVar: '#d97706',
+            colorVar: 'var(--usage-cache-write)',
           },
           {
             key: 'input',
@@ -146,7 +146,7 @@ export function ApiBotCostOverview({
             tokens: inTokens,
             cost_usd: inCost,
             percentage: calcPct(inCost),
-            colorVar: '#2563eb',
+            colorVar: 'var(--usage-input)',
           },
           {
             key: 'output',
@@ -154,7 +154,7 @@ export function ApiBotCostOverview({
             tokens: outTokens,
             cost_usd: outCost,
             percentage: calcPct(outCost),
-            colorVar: '#7c3aed',
+            colorVar: 'var(--usage-output)',
           },
           {
             key: 'cache_read',
@@ -162,7 +162,7 @@ export function ApiBotCostOverview({
             tokens: readTokens,
             cost_usd: readCost,
             percentage: calcPct(readCost),
-            colorVar: '#16a34a',
+            colorVar: 'var(--usage-cache-read)',
           },
           {
             key: 'compaction',
@@ -170,7 +170,7 @@ export function ApiBotCostOverview({
             tokens: 0,
             cost_usd: 0,
             percentage: 0,
-            colorVar: '#64748b',
+            colorVar: 'var(--usage-neutral)',
           },
           {
             key: 'server_tool',
@@ -178,7 +178,7 @@ export function ApiBotCostOverview({
             tokens: 0,
             cost_usd: 0,
             percentage: 0,
-            colorVar: '#64748b',
+            colorVar: 'var(--usage-neutral)',
           },
         ]
 

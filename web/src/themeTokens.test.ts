@@ -28,3 +28,9 @@ test('API bot 相關 CSS 不寫死色碼（顏色一律走主題 token，深色�
   }
   assert.deepEqual(hits, [], '寫死的色碼（含後備值）：改用 styles.css 的 token；沒有對應的就先在三組主題（亮、系統深、data-theme 深）各加一個')
 })
+
+test('API bot 成本總覽的分類色走主題 token，元件不寫死色碼', () => {
+  const src = read('components/ApiBotCostOverview.tsx')
+  const hits = src.split('\n').filter((line) => /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/.test(line))
+  assert.deepEqual(hits, [], '分類色改用 var(--usage-*)，深色主題才會跟著變')
+})
