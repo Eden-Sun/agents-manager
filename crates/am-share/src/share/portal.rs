@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -586,28 +586,24 @@ const PLACEHOLDER_PAGE: &str = "<!doctype html><html lang=\"zh-Hant\"><head><met
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>分享</title></head>\
 <body><p>分享頁還沒打包進這個版本（web/dist/share.html）。</p></body></html>";
 
-async fn page<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
+async fn page<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>, req: HeaderMap) -> Response {
     let (_bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let html = crate::assets::embedded("share.html").unwrap_or_else(|| PLACEHOLDER_PAGE.as_bytes().to_vec());
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    match crate::assets::embedded_response("share.html", &req) {
+        Some(res) => res,
+        None => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], PLACEHOLDER_PAGE).into_response(),
+    }
 }
 
 /// 分享頁自己的靜態檔。只給 `assets/` 底下的 js／css／字型／圖，`..`、隱藏檔一律 404；主 UI 的 `index.html` 不在這條路上。
-async fn asset(Path(path): Path<String>) -> Response {
+async fn asset(Path(path): Path<String>, req: HeaderMap) -> Response {
     let ok_ext = [".js", ".css", ".woff2", ".woff", ".svg", ".png", ".webp", ".ico", ".map"];
     if path.split('/').any(|seg| seg.is_empty() || seg.starts_with('.')) || !ok_ext.iter().any(|e| path.ends_with(e)) {
         return not_found();
     }
-    match crate::assets::embedded(&format!("assets/{path}")) {
-        Some(data) => {
-            let mime = mime_guess::from_path(&path).first_or_octet_stream();
-            ([(header::CONTENT_TYPE, mime.as_ref().to_string())], data).into_response()
-        }
-        None => not_found(),
-    }
+    crate::assets::embedded_response(&format!("assets/{path}"), &req).unwrap_or_else(|| not_found())
 }
 
 /// 狀態燈（跟主 UI 的 `lamp` 同一套字：working／idle／starting／offline／blocked／unknown）。

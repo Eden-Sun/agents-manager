@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
 import { ClaudeLoginAssist } from './ClaudeLoginAssist'
@@ -13,7 +13,8 @@ import { useStore } from '../store/store'
 import { shellDraftKey } from '../store/shellDraft'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ServicePaneNote } from './ServicePaneNote'
-import { HostShellXterm } from './HostShellXterm'
+// xterm（約 300 KB）只有開到 xterm 模式才要，拆成另一個 chunk。
+const HostShellXterm = lazy(() => import('./HostShellXterm').then((m) => ({ default: m.HostShellXterm })))
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './termLinks'
 import { fitRules } from '../lib/termRules'
@@ -522,19 +523,21 @@ export function HostShellPanel({
         ) : null}
 
         {xtermMode ? (
-          <HostShellXterm
-            key={`${host}/${paneId}`}
-            host={host}
-            paneId={paneId}
-            wrap={wrap}
-            onTyping={setTyping}
-            onRead={xtermRead}
-            onSend={xtermSend}
-            onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
-            onStreaming={setXtermStreaming}
-            onObserve={setXtermObserve}
-            fitScreen={fitScreen}
-          />
+          <Suspense fallback={<div className="term shell-term" aria-busy="true" />}>
+            <HostShellXterm
+              key={`${host}/${paneId}`}
+              host={host}
+              paneId={paneId}
+              wrap={wrap}
+              onTyping={setTyping}
+              onRead={xtermRead}
+              onSend={xtermSend}
+              onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
+              onStreaming={setXtermStreaming}
+              onObserve={setXtermObserve}
+              fitScreen={fitScreen}
+            />
+          </Suspense>
         ) : (
         <pre
           ref={termRef}

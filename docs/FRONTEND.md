@@ -168,3 +168,11 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 | `core` | `store/store.ts`（notify 文字）、`api/*`、`schedules/*`、`share/*`（公開分享頁，自己的入口）、`App.tsx`、任務／issue／git 列、Modal／ConfirmDialog、其餘小檔 | 38 | 680 |
 
 每個區塊做完的驗收：`bun scripts/i18n-report.ts --area <區塊>` 剩 0（或只剩 `src/i18n/ignore.json` 登記的）；`bun test src/lib/i18n`（字典與原始碼對帳）；`bunx tsc -p tsconfig.app.json --noEmit`；`bunx oxlint src`；`CHECK_MAX_LOAD=40 scripts/check.sh changed`；英文畫面用 `VITE_MOCK=1 bunx vite --port <自己的>` 開 `/?lang=en` 以 agent-browser 走過自己的畫面，`__amI18n.missing()` 應為空。
+
+## 靜態資產傳輸：壓縮、快取、拆包
+
+- **壓縮**：`crates/am-base/src/assets.rs` 的 `file_response` 對文字類（`text/*`、js、json、svg，且 ≥512 B）依 `Accept-Encoding` 回 br（優先）或 gzip，帶 `Vary: Accept-Encoding`。壓縮結果第一次用到時壓一次，快取鍵是 `(路徑, 內容 sha256, 編碼)`，debug 讀檔改了也不會拿到舊的。圖與字型不再壓。
+- **快取**：`ETag` 是嵌入檔的 sha256（`-br`／`-gzip` 後綴分開）。`/assets/*`（hash 檔名）`Cache-Control: public, max-age=31536000, immutable`；`index.html`、`sw.js`、SPA fallback、分享頁（`share.html`、分享頁的 `assets/*` 同一套函式）一律 `no-cache`，`If-None-Match` 相符回 304。
+- **拆包**：`HostShellXterm`（含 xterm，約 345 KB 原始）改 `lazy()`，只有開主機 shell 的 xterm 模式才下載；排程編輯器（`LazyScheduleEditor.tsx`）與專案設定面板改 `lazy()`。`main` 從 1153 KB 降到 204 KB。
+- **首頁傳輸**：首頁啟動需要 main、initial-ui、api（英文字典）、react-dom、主 css 與小檔，原始合計約 2.0 MB，gzip 合計約 0.6 MB（br 再小一些）。英文字典（`api` chunk，約 416 KB）目前同步載入，是下一步可拆的對象（`t()` 同步讀 `EN`，要改成切語言時才載入，屬於 i18n 行為變更，未做）。
+- **驗證**：`assets.rs` 單元測試（編碼協商、br／gzip 還原、ETag 與 304、圖與小檔不壓、快取鍵）。實機量測用 `curl -sI -H 'Accept-Encoding: br'` 看 `Content-Encoding`、`Cache-Control`、`ETag`。

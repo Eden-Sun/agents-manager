@@ -16,7 +16,9 @@ import { LoginPromptBanner } from './components/LoginPromptBanner'
 import { CodexLoginReplaceDialog } from './components/CodexLoginReplaceDialog'
 import { ApiModelConflictDialog } from './components/ApiModelConflictDialog'
 import { OnboardingBanner } from './components/OnboardingChecklist'
-import { ProjectSettingsPanel } from './components/ProjectSettingsPanel'
+import { lazy, Suspense } from 'react'
+
+const ProjectSettingsPanel = lazy(() => import('./components/ProjectSettingsPanel').then((m) => ({ default: m.ProjectSettingsPanel })))
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { MobilePreview } from './components/MobilePreview'
@@ -322,7 +324,9 @@ export default function App() {
             onOpenSidebar={() => setDrawer(true)}
           />
         ) : groupProjectId ? (
-          <ProjectSettingsPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
+          <Suspense fallback={null}>
+            <ProjectSettingsPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
+          </Suspense>
         ) : (
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}

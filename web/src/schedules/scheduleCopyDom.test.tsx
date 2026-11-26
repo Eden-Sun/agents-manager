@@ -1,6 +1,6 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { ScheduleDetail, ScheduleSpecIn } from '../api/schedules'
 import { useStore } from '../store/store'
 import { ProjectSchedules } from './ProjectSchedules'
@@ -72,6 +72,7 @@ for (const spec of modes) {
     await settle()
     await openMenu()
     await click(menuItem('複製排程…'))
+    await until(() => document.querySelector('[role="dialog"]') !== null, '複製排程的對話框')
     await settle()
     assert.match(dialog().textContent ?? '', /複製排程/)
     assert.equal(dialog().querySelector<HTMLInputElement>('input')!.value, '最新名稱（副本）')

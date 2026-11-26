@@ -1,6 +1,6 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until as waitUntil } from '../testing/domHarness'
 import type { ScheduleDetail } from '../api/schedules'
 import { useStore } from '../store/store'
 import { ProjectSchedules } from './ProjectSchedules'
@@ -40,6 +40,7 @@ async function openCopy(requests: ReturnType<typeof fakeApi>, detail = source())
   await settle()
   await click(document.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!)
   await click(menuItem('複製排程…'))
+  await waitUntil(() => document.querySelector('[role="dialog"]') !== null, '複製排程的對話框')
   await settle()
   return detail
 }

@@ -4,7 +4,7 @@ import { t, useT } from '../lib/i18n'
 import { HeadMoreMenu } from '../components/HeadMoreMenu'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { ScheduleEditor } from './ScheduleEditor'
+import { ScheduleEditorLazy as ScheduleEditor } from './LazyScheduleEditor'
 
 function errorReason(e: unknown): string {
   return e instanceof Error ? e.message : t('操作失敗')
