@@ -7,19 +7,25 @@ import { OutboxImagePreview } from './OutboxImagePreview'
 import { useOutboxFiles } from './useOutboxFiles'
 import './outboxFiles.css'
 
+const isHoverPointer = (pointerType: string) => pointerType === 'mouse' || pointerType === 'pen'
+
 export function OutboxFiles() {
   const t = useT()
   const { botId, files, reason, dir, kept, fetchedAt, now, loadedFor, busy, refresh, download, openPreview } = useOutboxFiles()
   const [peek, setPeek] = useState<{ name: string; owner?: string; modified: number; anchor: DOMRect } | null>(null)
   const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const peekKey = useRef<string | null>(null)
+  const keyFor = (f: OutboxFile) => `${f.owner ?? ''}/${f.name}/${f.modified}`
   const showPeek = (f: OutboxFile, el: HTMLElement) => {
     if (!isPreviewableImage(f.name)) return
+    peekKey.current = keyFor(f)
     if (peekTimer.current) clearTimeout(peekTimer.current)
     peekTimer.current = setTimeout(() => setPeek({ name: f.name, owner: f.owner, modified: f.modified, anchor: el.getBoundingClientRect() }), 150)
   }
   const hidePeek = () => {
     if (peekTimer.current) clearTimeout(peekTimer.current)
     peekTimer.current = null
+    peekKey.current = null
     setPeek(null)
   }
 
@@ -31,6 +37,8 @@ export function OutboxFiles() {
   useEffect(
     () => () => {
       if (peekTimer.current) clearTimeout(peekTimer.current)
+      peekTimer.current = null
+      peekKey.current = null
     },
     [botId],
   )
@@ -84,8 +92,16 @@ export function OutboxFiles() {
                   disabled={isBusy}
                   title={t("下載 {name}", { name: f.name })}
                   onClick={() => void download(f.name, f.owner)}
-                  onMouseEnter={(e) => showPeek(f, e.currentTarget)}
-                  onMouseLeave={hidePeek}
+                  onPointerEnter={(e) => {
+                    if (isHoverPointer(e.pointerType)) showPeek(f, e.currentTarget)
+                  }}
+                  onPointerMove={(e) => {
+                    if (isHoverPointer(e.pointerType) && peekKey.current !== keyFor(f)) showPeek(f, e.currentTarget)
+                  }}
+                  onPointerLeave={(e) => {
+                    if (isHoverPointer(e.pointerType)) hidePeek()
+                  }}
+                  onPointerCancel={hidePeek}
                   onFocus={(e) => showPeek(f, e.currentTarget)}
                   onBlur={hidePeek}
                 >

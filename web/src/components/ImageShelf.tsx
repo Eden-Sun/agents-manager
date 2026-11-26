@@ -369,7 +369,7 @@ function ShelfCard({
 
   const onPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
     swallowClick.current = false
-    if (e.pointerType === 'mouse' || !item.isImage) return
+    if (e.pointerType === 'mouse' || e.pointerType === 'pen' || !item.isImage) return
     const el = e.currentTarget
     endPress()
     press.current = {
@@ -397,10 +397,10 @@ function ShelfCard({
           onPeekEnd()
         }}
         onPointerEnter={(e) => {
-          if (e.pointerType === 'mouse' && item.isImage) onPeekStart(item.key, e.currentTarget, PEEK_HOVER_MS, false)
+          if ((e.pointerType === 'mouse' || e.pointerType === 'pen') && item.isImage) onPeekStart(item.key, e.currentTarget, PEEK_HOVER_MS, false)
         }}
         onPointerLeave={(e) => {
-          if (e.pointerType === 'mouse') onPeekEnd()
+          if (e.pointerType === 'mouse' || e.pointerType === 'pen') onPeekEnd()
           endPress()
         }}
         onPointerDown={onPointerDown}
