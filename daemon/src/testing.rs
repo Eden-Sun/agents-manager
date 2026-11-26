@@ -695,6 +695,28 @@ impl MockHerdr {
                                     "format": format, "text": text, "revision": revision, "truncated": truncated}}})
                             }
                         }
+                        "pane.wait_for_output" => {
+                            let pid = wid_of("pane_id");
+                            let needle = params.pointer("/match/value").and_then(Value::as_str).unwrap_or("").to_string();
+                            let lines = params.get("lines").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
+                            let screen = st.live.lock().unwrap().get(&pid).map(LivePane::render);
+                            let tail = |text: &str| {
+                                let rows: Vec<&str> = text.lines().collect();
+                                rows[rows.len().saturating_sub(lines)..].join("\n")
+                            };
+                            match screen {
+                                None => json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}}),
+                                Some(text) if !needle.is_empty() && tail(&text).contains(&needle) => {
+                                    json!({"id": id, "result": {"pane_id": pid, "matched_line": needle,
+                                        "read": {"pane_id": pid, "source": params.get("source").cloned(), "format": "text", "text": text, "revision": 0}}})
+                                }
+                                Some(_) => {
+                                    let ms = params.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0);
+                                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                                    json!({"id": id, "error": {"code": "timeout", "message": "timed out waiting for output match"}})
+                                }
+                            }
+                        }
                         "pane.process_info" if !st.knows(&wid_of("pane_id")) => {
                             let pid = wid_of("pane_id");
                             json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})

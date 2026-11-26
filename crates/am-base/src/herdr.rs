@@ -552,6 +552,24 @@ impl HerdrClient {
         self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines}), "read").await.map(nbsp_to_space)
     }
 
+    /// `pane.wait_for_output`：在 `source` 的最後 `lines` 列等 `needle` 這段字（字面比對）出現，最多 `timeout`。
+    /// 等到回 `Ok(true)`，herdr 回 `timeout` 時 `Ok(false)`；其他錯誤（舊版 herdr 沒有這個方法、連線斷）照樣回 `Err`。
+    pub async fn pane_wait_for_output(&self, pane_id: &str, source: &str, lines: u32, needle: &str, timeout: Duration) -> Result<bool> {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let params = json!({
+            "pane_id": pane_id,
+            "source": source,
+            "lines": lines,
+            "match": {"type": "substring", "value": needle},
+            "timeout_ms": timeout_ms,
+        });
+        match self.call_timeout("pane.wait_for_output", params, timeout + Duration::from_secs(3)).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.downcast_ref::<HerdrError>().is_some_and(|h| h.code == "timeout") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Same read with SGR styling kept (`format: ansi`): the only way to tell a TUI's dim
     /// placeholder from the same words typed by a person.
     pub async fn pane_read_ansi(&self, pane_id: &str, source: &str, lines: u32) -> Result<PaneRead> {

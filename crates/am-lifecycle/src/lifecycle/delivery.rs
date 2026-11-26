@@ -134,6 +134,14 @@ impl Plan {
 }
 
 const TYPE_SETTLE_MS: u64 = 700;
+/// 送字後等輸入框畫出開頭的比對字，最多取幾個字元（#2226）。
+const ECHO_NEEDLE_CHARS: usize = 24;
+/// 比對字少於這個字元數就不等，直接走固定等待：太短的字容易撞到畫面上別處。
+const ECHO_NEEDLE_MIN_CHARS: usize = 4;
+/// 超過這個字元數，claude／codex 會把貼上摺成 `[Pasted text …]`／`[Pasted Content …]`，原文不會出現在框裡。
+const FOLDED_PASTE_CHARS: usize = 800;
+/// 換行超過這個數，claude 同樣會摺起來。
+const FOLDED_PASTE_NEWLINES: usize = 2;
 /// `Proof::Unverified` 送字後框仍空時，最多再輪詢幾次（每次 `TYPE_SETTLE_MS`）等文字畫出來。
 const UNVERIFIED_SETTLE_ROUNDS: u32 = 4;
 pub const SUBMIT_SETTLE_MS: u64 = 1200;
@@ -187,6 +195,40 @@ pub fn provable_by_echo_row(text: &str, marker_cols: usize, pane_cols: Option<u3
         && text == text.trim()
         && !text.chars().any(uncertain_char)
         && marker_cols + max_cols(text) + ROW_SAFETY_COLS <= cols as usize
+}
+
+/// 送字後要在輸入框等到的那段字：第一行開頭最多 [`ECHO_NEEDLE_CHARS`] 個字元，遇到顯示不可靠的字元就停。
+/// 長段貼上會被摺成摘要、比對不到，直接回 `None` 走固定等待（#2226）。
+pub fn echo_needle(text: &str) -> Option<String> {
+    if text.chars().count() > FOLDED_PASTE_CHARS || text.matches('\n').count() > FOLDED_PASTE_NEWLINES {
+        return None;
+    }
+    let first = text.trim_start().lines().next()?;
+    let needle: String = first.chars().take_while(|c| !uncertain_char(*c) && *c != '\t').take(ECHO_NEEDLE_CHARS).collect();
+    let needle = needle.trim_end();
+    (needle.chars().filter(|c| !c.is_whitespace()).count() >= ECHO_NEEDLE_MIN_CHARS).then(|| needle.to_string())
+}
+
+/// 送字後等文字出現在輸入框：等到就立刻回來；比對字不可用、逾時或 herdr 不支援時，補足原本的固定等待（#2226）。
+async fn await_typed(client: &HerdrClient, pane: &str, text: &str) -> bool {
+    let settle = pane_settle(Duration::from_millis(TYPE_SETTLE_MS));
+    let started = tokio::time::Instant::now();
+    let hit = match echo_needle(text) {
+        Some(needle) => {
+            match client.pane_wait_for_output(pane, SCAN_SOURCE, typed_tail(text) as u32, &needle, settle).await {
+                Ok(hit) => hit,
+                Err(e) => {
+                    tracing::debug!(%pane, error = %e, "pane.wait_for_output unavailable; falling back to the fixed settle");
+                    false
+                }
+            }
+        }
+        None => false,
+    };
+    if !hit {
+        tokio::time::sleep(settle.saturating_sub(started.elapsed())).await;
+    }
+    hit
 }
 
 /// A full-width rule the TUI draws above and below claude's current composer.
@@ -914,7 +956,7 @@ pub async fn type_text(
     }
 
     send_typed(client, &pane, &bot.kind, text).await?;
-    tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+    await_typed(client, &pane, text).await;
     let mut seen = read().await?;
     if bot.kind == "agy" && crate::agy_screen::shortcuts_help_open(&seen) {
         client.pane_send_keys(&pane, &["esc"]).await?;
@@ -951,7 +993,7 @@ pub async fn type_text(
     if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
         send_typed(client, &pane, &bot.kind, text).await?;
-        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+        await_typed(client, &pane, text).await;
         seen = read().await?;
         if box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty {
             tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
@@ -1279,6 +1321,21 @@ mod tests {
         assert_eq!(super::send_pieces("claude", "?abc"), vec!["?abc".to_string()]);
         assert_eq!(super::send_pieces("codex", "?"), vec!["?".to_string()]);
         assert_eq!(joined("claude", "?x"), "?x");
+    }
+
+    /// 等輸入框的比對字（#2226）：取第一行開頭；長段或多行會被摺成摘要的、太短的、開頭就是不可靠字元的都不等。
+    #[test]
+    fn echo_needle_takes_the_head_of_the_first_line_and_skips_folded_pastes() {
+        assert_eq!(super::echo_needle("Reply with PONG please").as_deref(), Some("Reply with PONG please"));
+        assert_eq!(super::echo_needle("  first line here\nsecond").as_deref(), Some("first line here"));
+        assert_eq!(super::echo_needle("abcdefghijklmnopqrstuvwxyz0123").as_deref(), Some("abcdefghijklmnopqrstuvwx"));
+        assert_eq!(super::echo_needle("請幫我看一下這個問題").as_deref(), Some("請幫我看一下這個問題"));
+        assert_eq!(super::echo_needle("hello\tworld").as_deref(), Some("hello"));
+        assert_eq!(super::echo_needle("hi"), None);
+        assert_eq!(super::echo_needle("a\nb\nc\nd"), None);
+        assert_eq!(super::echo_needle(&"x".repeat(801)), None);
+        assert!(super::echo_needle(&"x".repeat(800)).is_some());
+        assert_eq!(super::echo_needle("\u{200B}abcdef"), None);
     }
 
     /// 送後核對的補按規則（`may_press_retry_submit`）：只有「完整比對仍是自己的草稿、沒有送達證據、還沒補按過」才補一次。

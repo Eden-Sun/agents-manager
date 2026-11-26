@@ -569,4 +569,57 @@ mod api_tests {
         prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-disabled").await.unwrap();
         assert_eq!(stub.opens.load(std::sync::atomic::Ordering::Relaxed), 0, "設定關掉就不開");
     }
+    fn waits(env: &tt::Env) -> Vec<Value> {
+        env.herdr.calls_to("pane.wait_for_output")
+    }
+    /// 送字後等輸入框出現開頭的字（#2226）：herdr 比對到就往下走，參數是開頭那段字、限在輸入框附近幾列。
+    #[tokio::test]
+    async fn typing_waits_for_the_echo_and_moves_on_when_herdr_matches() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "claude").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-wait-hit").await.unwrap();
+        assert_eq!(out.delivery, "ok");
+        assert_eq!(turns(&app, &conv).await, 1);
+        let w = waits(&env);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["match"], json!({"type": "substring", "value": "Reply with PONG please"}));
+        assert_eq!(w[0]["source"], "recent_unwrapped");
+        assert!(w[0]["lines"].as_u64().unwrap() < 400, "{w:?}");
+    }
+    async fn delivered_after_wait_fault(code: &'static str) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "claude").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        env.herdr.fail_next("pane.wait_for_output", crate::testing::Fault::RefuseWith(code));
+        let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-wait-fault").await.unwrap();
+        assert_eq!(out.delivery, "ok", "{code}");
+        assert_eq!(turns(&app, &conv).await, 1);
+        assert_eq!(waits(&env).len(), 1);
+    }
+    /// herdr 逾時時退回固定等待＋畫面判斷，照樣送達。
+    #[tokio::test]
+    async fn a_wait_timeout_falls_back_to_the_fixed_settle() {
+        delivered_after_wait_fault("timeout").await;
+    }
+    /// 舊版 herdr 沒有 `pane.wait_for_output`：同樣退回固定等待。
+    #[tokio::test]
+    async fn a_herdr_without_wait_for_output_falls_back_to_the_fixed_settle() {
+        delivered_after_wait_fault("unsupported").await;
+    }
+    /// 長訊息會被摺成 `[Pasted text …]`，框裡比對不到開頭：不等，直接走原本的固定等待。
+    #[tokio::test]
+    async fn a_folded_long_message_skips_the_wait() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "grok").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        let out = prompt(&app, &bot_id, "line one\nline two\nline three\nline four", "crid-wait-long").await.unwrap();
+        assert_eq!(out.delivery, "unverified");
+        assert_eq!(turns(&app, &conv).await, 1);
+        assert!(waits(&env).is_empty(), "{:?}", waits(&env));
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), 1);
+    }
 }
