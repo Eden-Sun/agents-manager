@@ -63,6 +63,7 @@
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
 }
 

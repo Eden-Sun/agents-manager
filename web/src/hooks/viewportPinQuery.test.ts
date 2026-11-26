@@ -2,17 +2,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-test('--vvh 的寫入端與使用端都掛在抽屜版面（≤1024px）', () => {
+test('--vvh 與整頁鎖捲的寫入端與使用端都涵蓋手機與 iPad 直／橫向（≤1366px）', () => {
   const hook = readFileSync(new URL('./useViewportPin.ts', import.meta.url), 'utf8')
-  assert.match(hook, /useMediaQuery\(DRAWER_QUERY\)/)
+  assert.match(hook, /useMediaQuery\(VIEWPORT_PIN_QUERY\)/)
   assert.doesNotMatch(hook, /useMediaQuery\(PHONE_QUERY\)/, '註解可以提到它，但不能再用它當門檻')
 
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
-  const at = css.indexOf('height: var(--vvh, 100dvh);', css.indexOf('@media (width <= 1024px)'))
+  const start = css.indexOf('@media (width <= 1366px)')
+  assert.ok(start >= 0, 'styles.css 要有 @media (width <= 1366px)')
+  const at = css.indexOf('height: var(--vvh, 100dvh);', start)
   assert.ok(at > 0, 'styles.css 要有 html/body/#root 的 height: var(--vvh, 100dvh)')
   const before = css.slice(0, at).match(/@media \(width <= (\d+)px\)(?![\s\S]*@media \(width <= \d+px\))/)
   assert.ok(before, '那一行要在某個 max-width 的 @media 裡')
-  assert.equal(Number(before![1]), 1024, `--vvh 的高度規則掛在 ≤${before![1]}px，iPad 直式（768／820）吃不到`)
+  assert.equal(Number(before![1]), 1366, `--vvh 的高度規則掛在 ≤${before![1]}px，iPad 橫式（1194／1366）吃不到`)
+  const block = css.slice(at, css.indexOf('@media (width <= 640px)', at))
+  assert.match(block, /html,\s*body\s*\{[^}]*position:\s*fixed;[^}]*overflow:\s*hidden;[^}]*overscroll-behavior:\s*none;/, 'iPad 直／橫向也要鎖定 html/body 防整頁捲動')
 })
 
 test('手機全螢幕 sheet 的高度與遮罩都吃 --vvh', () => {

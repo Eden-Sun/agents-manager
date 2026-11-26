@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { DRAWER_QUERY, useMediaQuery } from './useMediaQuery'
+import { VIEWPORT_PIN_QUERY, useMediaQuery } from './useMediaQuery'
 
 export const SHEET_SELECTOR = '.modal, .bot-settings, .confirm-dialog'
 
@@ -10,7 +10,7 @@ export function revealInSheet(active: Pick<Element, 'closest' | 'scrollIntoView'
 }
 
 export function useViewportPin() {
-  const narrow = useMediaQuery(DRAWER_QUERY)
+  const narrow = useMediaQuery(VIEWPORT_PIN_QUERY)
   useEffect(() => {
     if (!narrow) return
     const vv = window.visualViewport

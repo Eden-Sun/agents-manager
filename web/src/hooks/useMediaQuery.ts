@@ -6,6 +6,8 @@ export const PHONE_QUERY = '(max-width: 640px)'
 
 export const TABLET_QUERY = '(min-width: 641px) and (max-width: 1366px)'
 
+export const VIEWPORT_PIN_QUERY = '(max-width: 1366px)'
+
 export function useMediaQuery(query: string): boolean {
   const subscribe = useCallback(
     (onChange: () => void) => {

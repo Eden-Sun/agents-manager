@@ -3210,15 +3210,12 @@ button.model-tag:hover:not(:disabled) {
   transform: translateY(0);
 }
 
-@media (width <= 1024px) {
+@media (width <= 1366px) {
   html,
   body,
   #root {
     height: var(--vvh, 100dvh);
   }
-}
-
-@media (width <= 640px) {
 
   html,
   body {
@@ -3228,7 +3225,9 @@ button.model-tag:hover:not(:disabled) {
     overflow: hidden;
     overscroll-behavior: none;
   }
+}
 
+@media (width <= 640px) {
   .main-head {
     position: sticky;
     top: 0;

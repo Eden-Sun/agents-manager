@@ -57,6 +57,7 @@
   gap: 6px;
   padding: 8px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   flex: 1;
 }
