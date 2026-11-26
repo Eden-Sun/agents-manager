@@ -1463,6 +1463,7 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
 }
 
 pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
+    let mut seg = crate::state_timing::SegTimer::start();
     let cfg = app.cfg.get().await;
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
@@ -1483,11 +1484,13 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         .flat_map(|p| p.bots.iter())
         .filter_map(|c| Some((c.id.as_deref()?, c.create_request_id.as_deref()?)))
         .collect();
+    seg.mark("reads");
     let limit_hits: HashMap<String, crate::quota::LimitHit> = bots
         .iter()
         .zip(crate::runners::quota::limit_hits_for_bots(app, &bots).await)
         .filter_map(|(b, hit)| hit.map(|hit| (b.id.clone(), hit)))
         .collect();
+    seg.mark("limit_hits");
     let stale_hosts = app.remote_shim_stale.lock().await.clone();
     let policy_revs: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
         "SELECT bot_id, policy_rev FROM runs WHERE state IN ('starting','running','stopping') AND policy_rev IS NOT NULL",
@@ -1497,7 +1500,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     .map_err(any_err)?
     .into_iter()
     .collect();
+    seg.mark("policy_revs");
     let mut out = Vec::new();
+    let (mut t_conn, mut t_run, mut t_github) = (std::time::Duration::ZERO, std::time::Duration::ZERO, std::time::Duration::ZERO);
     for p in projects {
         let mut bl = Vec::new();
         let role_policy = p.role_policy();
@@ -1513,8 +1518,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 let path = app.data_dir.join("bots").join(&b.id).join("bin/herdr");
                 (run.is_some() || path.exists()) && std::fs::read_to_string(path).ok().as_deref() != Some(crate::herdr_shim::SHIM_SH)
             } else { stale_hosts.contains_key(&p.host) };
+            let t0 = std::time::Instant::now();
             let bot_connected = app.bot_connected_on(b, &p.host).await;
+            t_conn += t0.elapsed();
+            let t0 = std::time::Instant::now();
             let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
+            t_run += t0.elapsed();
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
             let limit_hit = crate::state::limit_hit_value(b, limit_hits.get(&b.id));
@@ -1567,6 +1576,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             bot_v["scheduled"] = json!(scheduled_bots.contains(&b.id));
             bl.push(bot_v);
         }
+        let t0 = std::time::Instant::now();
+        let github = crate::github::cached(app, &p.id).await;
+        t_github += t0.elapsed();
         out.push(json!({
             "id": p.id, "path": p.path, "label": p.label, "host": p.host, "mode": p.mode,
             "workspace_id": p.workspace_id,
@@ -1574,11 +1586,14 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "role_policy": p.role_policy(),
             "deputy": p.deputy_bot_id.as_ref().map(|bot_id| json!({"bot_id": bot_id, "after_sec": p.deputy_after_sec})),
             "specialist_dispatch": p.specialist_dispatch,
-            "github": crate::github::cached(app, &p.id).await,
+            "github": github,
             "bots": bl,
         }));
     }
-    Ok(json!({
+    seg.mark("projects");
+    let hosts = hosts_list(app, &cfg).await;
+    seg.mark("hosts");
+    let body = json!({
         "daemon_seq": app.current_seq(),
         "restart_batch": crate::runners::bulk_restart::running_batch(&app.data_dir),
         "cli_updates": crate::cli_update::running_list(app).await,
@@ -1589,10 +1604,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
-        "hosts": hosts_list(app, &cfg).await,
+        "hosts": hosts,
         "identities": cfg.identities,
         "projects": out,
-    }))
+    });
+    seg.finish_with(&[("bot_connected", t_conn), ("run_json", t_run), ("github", t_github)]);
+    Ok(body)
 }
 
 async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
