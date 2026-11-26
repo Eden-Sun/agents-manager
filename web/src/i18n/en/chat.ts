@@ -87,6 +87,8 @@ export default {
   '由 {host} 管理：這裡不送訊息，也不啟動或停止這顆 Bot': 'Managed by {host}. Messages cannot be sent here, and this Bot cannot be started or stopped here.',
   '即將清除': 'Clearing soon',
   '剩 {n} 分鐘': { one: '{n} minute left', other: '{n} minutes left' },
+  '剩 {n} 小時': { one: '{n} hour left', other: '{n} hours left' },
+  '剩 {n} 天': { one: '{n} day left', other: '{n} days left' },
   '下載「{name}」失敗：{reason}': 'Could not download “{name}”: {reason}',
   '「{name}」已經不在了：分享用 bot 的檔案保留 14 天，總量太大時會從最舊的清掉。': '“{name}” is no longer available. Files from shared bots are kept for 14 days and the oldest files are removed when the total is too large.',
   '「{name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。': '“{name}” is no longer available. Outbox files are removed one hour after they are added.',

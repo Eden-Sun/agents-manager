@@ -35,6 +35,9 @@ test('分享用 bot 的檔案走 14 天保留：沒有倒數，空清單也不�
 test('倒數以分鐘講、無條件進位，到期講即將清除', () => {
   assert.equal(remainingLabel(3600), '剩 60 分鐘')
   assert.equal(remainingLabel(2521), '剩 43 分鐘')
+  assert.equal(remainingLabel(3601), '剩 2 小時')
+  assert.equal(remainingLabel(7 * 86400 - 600), '剩 7 天')
+  assert.equal(remainingLabel(47 * 3600), '剩 47 小時')
   assert.equal(remainingLabel(30), '剩 1 分鐘', '還沒到期就不能講 0 分鐘')
   assert.equal(remainingLabel(0), '即將清除')
   assert.equal(remainingLabel(Number.NaN), '即將清除')

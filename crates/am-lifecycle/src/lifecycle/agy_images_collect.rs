@@ -128,7 +128,7 @@ async fn collect(app: &impl Host, mark: &agy_images::Mark) -> Result<&'static st
     let dir = attach::local_copy_dir(app, &mark.bot_id)?;
     tokio::fs::create_dir_all(&dir).await?;
     let mut tx = app.db().begin().await?;
-    let msg = insert_message_tx(&mut tx, &conversation_id, Some(&mark.turn_id), "assistant", &notes.join("\n"), "system", false, None).await?;
+    let mut msg = insert_message_tx(&mut tx, &conversation_id, Some(&mark.turn_id), "assistant", &notes.join("\n"), "system", false, None).await?;
     let mut items = Vec::with_capacity(collected.images.len());
     for img in &collected.images {
         let local = dir.join(format!("agy-{}.{}", img.sha256, img.kind));
@@ -163,10 +163,19 @@ async fn collect(app: &impl Host, mark: &agy_images::Mark) -> Result<&'static st
         items.push(attach::Attachment { id, name, mime: mime.to_string(), size, path: agent_path });
     }
     attach::bind_tx(&mut tx, &msg.id, &items).await?;
+    msg.attachments_json = message_attachments_json(&items)?;
     sqlx::query("UPDATE agy_image_marks SET state = 'done' WHERE turn_id = ?").bind(&mark.turn_id).execute(&mut *tx).await?;
     tx.commit().await?;
     emit_message_added(app, &mark.bot_id, msg).await;
     Ok("done")
+}
+
+/// 推給畫面的 `message_added` 要帶跟 DB 同一份附件清單：訊息是附件綁上去之前插入的，不補的話畫面要重新整理才看得到圖。
+fn message_attachments_json(items: &[attach::Attachment]) -> anyhow::Result<Option<String>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(items)?))
 }
 
 fn notes_for(c: &Collected, quota: Option<&str>) -> Vec<String> {
@@ -245,6 +254,15 @@ mod tests {
         assert!(!crate::turn_error::is_quota_exhaustion(BANNER));
         assert!(!crate::turn_error::is_quota_limit(BANNER));
         assert!(crate::turn_error::api_error_line(&format!("⏺ {BANNER}\n")).is_none());
+    }
+
+    #[test]
+    fn the_pushed_message_carries_the_same_attachment_list_as_the_row() {
+        assert_eq!(message_attachments_json(&[]).unwrap(), None);
+        let items = vec![attach::Attachment { id: "a1".into(), name: "x.png".into(), mime: "image/png".into(), size: 3, path: "/brain/x.png".into() }];
+        let json = message_attachments_json(&items).unwrap().unwrap();
+        assert_eq!(json, serde_json::to_string(&items).unwrap());
+        assert!(json.contains("\"id\":\"a1\""));
     }
 
     #[test]

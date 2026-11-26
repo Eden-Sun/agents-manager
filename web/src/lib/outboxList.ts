@@ -25,7 +25,11 @@ export function remainingNow(file: OutboxFile, fetchedAt: number, now = Date.now
 
 export function remainingLabel(secs: number): string {
   if (!Number.isFinite(secs) || secs <= 0) return t('即將清除')
-  return t('剩 {n} 分鐘', { n: Math.ceil(secs / 60) })
+  const mins = Math.ceil(secs / 60)
+  if (mins <= 60) return t('剩 {n} 分鐘', { n: mins })
+  const hours = Math.ceil(secs / 3600)
+  if (hours < 48) return t('剩 {n} 小時', { n: hours })
+  return t('剩 {n} 天', { n: Math.ceil(secs / 86400) })
 }
 
 export function downloadFailure(name: string, e: unknown, kept = false): { text: string; gone: boolean } {
