@@ -12,22 +12,39 @@ export function ImageViewer({ pictures, index: initialIndex, onClose }: { pictur
   const [zoom, setZoom] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const viewport = useRef<HTMLDivElement>(null)
-  const touch = useRef<{ x: number; y: number } | null>(null)
+  const touch = useRef<{ x: number; y: number; zoomed: boolean; sx: number; sy: number } | null>(null)
   const suppressClick = useRef(false)
   const close = useRef(onClose)
   useEffect(() => { close.current = onClose }, [onClose])
   const picture = pictures[index]
+  const resetScroll = () => {
+    if (viewport.current) { viewport.current.scrollTop = 0; viewport.current.scrollLeft = 0 }
+  }
   const move = (delta: number) => {
     setIndex((i) => (i + delta + pictures.length) % pictures.length)
     setZoom(false)
-    if (viewport.current) { viewport.current.scrollTop = 0; viewport.current.scrollLeft = 0 }
+    resetScroll()
   }
   useDialogFocus(true, root)
   useEffect(() => {
+    const el = viewport.current
+    if (!el) return
+    if (zoom) {
+      el.scrollLeft = Math.max(0, Math.round((el.scrollWidth - el.clientWidth) / 2))
+      el.scrollTop = Math.max(0, Math.round((el.scrollHeight - el.clientHeight) / 2))
+    } else {
+      el.scrollLeft = 0
+      el.scrollTop = 0
+    }
+  }, [zoom, index])
+  useEffect(() => {
     const body = document.body
-    const saved = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow }
+    const html = document.documentElement
+    const savedBody = { position: body.style.position, top: body.style.top, left: body.style.left, right: body.style.right, width: body.style.width, overflow: body.style.overflow }
+    const savedHtml = { overflow: html.style.overflow, overscrollBehavior: html.style.overscrollBehavior }
     const x = window.scrollX, y = window.scrollY
-    Object.assign(body.style, { position: 'fixed', top: `${-y}px`, width: '100%', overflow: 'hidden' })
+    Object.assign(body.style, { position: 'fixed', top: `${-y}px`, left: '0', right: '0', width: '100%', overflow: 'hidden' })
+    Object.assign(html.style, { overflow: 'hidden', overscrollBehavior: 'none' })
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return
       if (event.key === 'Escape') { event.preventDefault(); close.current() }
@@ -37,10 +54,24 @@ export function ImageViewer({ pictures, index: initialIndex, onClose }: { pictur
         setZoom(false)
       }
     }
+    const el = root.current
+    const blockPinch = (event: TouchEvent) => {
+      if (event.touches.length > 1) event.preventDefault()
+    }
+    const blockGesture = (event: Event) => {
+      event.preventDefault()
+    }
     window.addEventListener('keydown', key)
+    el?.addEventListener('touchmove', blockPinch, { passive: false })
+    el?.addEventListener('gesturestart', blockGesture, { passive: false })
+    el?.addEventListener('gesturechange', blockGesture, { passive: false })
     return () => {
       window.removeEventListener('keydown', key)
-      Object.assign(body.style, saved)
+      el?.removeEventListener('touchmove', blockPinch)
+      el?.removeEventListener('gesturestart', blockGesture)
+      el?.removeEventListener('gesturechange', blockGesture)
+      Object.assign(body.style, savedBody)
+      Object.assign(html.style, savedHtml)
       window.scrollTo(x, y)
     }
   }, [pictures.length])
@@ -53,17 +84,46 @@ export function ImageViewer({ pictures, index: initialIndex, onClose }: { pictur
         <button type="button" onClick={onClose} aria-label={t('關閉')}>×</button>
       </header>
       <div ref={viewport} className={`image-viewer-stage${zoom ? ' zoomed' : ''}`}
-        onClick={(event) => { if (event.target === event.currentTarget && !suppressClick.current) onClose() }}
+        onClick={(event) => { if (event.target === event.currentTarget && !suppressClick.current) onClose(); suppressClick.current = false }}
         onTouchStart={(event) => {
           suppressClick.current = false
-          touch.current = !zoom && event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null
+          if (event.touches.length === 1) {
+            const el = viewport.current
+            touch.current = { x: event.touches[0].clientX, y: event.touches[0].clientY, zoomed: zoom, sx: el?.scrollLeft ?? 0, sy: el?.scrollTop ?? 0 }
+          } else {
+            touch.current = null
+            suppressClick.current = true
+          }
         }}
-        onTouchMove={(event) => { if (event.touches.length > 1) touch.current = null }}
+        onTouchMove={(event) => {
+          if (event.touches.length > 1) {
+            touch.current = null
+            suppressClick.current = true
+            return
+          }
+          const start = touch.current
+          if (!start || !event.touches.length) return
+          if (start.zoomed) {
+            const dx = Math.abs(event.touches[0].clientX - start.x)
+            const dy = Math.abs(event.touches[0].clientY - start.y)
+            const el = viewport.current
+            if (Math.max(dx, dy) > 10 || (el && (el.scrollLeft !== start.sx || el.scrollTop !== start.sy))) {
+              suppressClick.current = true
+            }
+          }
+        }}
         onTouchEnd={(event) => {
           const start = touch.current
           touch.current = null
           if (!start || !event.changedTouches.length) return
           const dx = event.changedTouches[0].clientX - start.x, dy = event.changedTouches[0].clientY - start.y
+          if (start.zoomed) {
+            const el = viewport.current
+            if (Math.max(Math.abs(dx), Math.abs(dy)) > 10 || (el && (el.scrollLeft !== start.sx || el.scrollTop !== start.sy))) {
+              suppressClick.current = true
+            }
+            return
+          }
           if (Math.max(Math.abs(dx), Math.abs(dy)) < 50) return
           suppressClick.current = true
           if (dy > 70 && dy > Math.abs(dx)) onClose()
