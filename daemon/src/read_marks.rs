@@ -139,7 +139,8 @@ macro_rules! unread_sql {
 /// 查詢裡的 `m.role = 'assistant'` 要原樣留著，partial index 才用得上）：
 /// `/api/state` 每次都會問，以前是從 `messages` 全表掃起（1.7 萬則約 40～70 ms，隨訊息數線性長），已讀過的 bot 其實幾乎沒有
 /// 標記之後的訊息。`created_at >= 標記時間` 是下面那個全序條件的必要條件，只負責讓索引能 seek，結果不變。
-const UNREAD_SQL: &str = unread_sql!("");
+/// 軟刪的 bot 不算：`/api/state` 只列活著的 bot，它們從沒被讀過的舊訊息卻佔了候選列的八成以上（2026-11-26 實測 9127 列中 7543 列）。
+const UNREAD_SQL: &str = unread_sql!("c.bot_id NOT IN (SELECT id FROM bots WHERE deleted_at IS NOT NULL) AND ");
 
 /// 單顆 bot 的版本（`POST /bots/{id}/read` 只要那一顆，不必算全表）：同一份查詢，`WHERE` 多一個 `c.bot_id = ?`；
 /// 順序與索引（`CROSS JOIN`、`INDEXED BY`、`m.role = 'assistant'`）原樣不動。
@@ -351,6 +352,19 @@ mod tests {
             );
             assert!(!details.iter().any(|d| d.starts_with("SCAN m")), "{name} must not scan messages: {details:#?}");
         }
+    }
+
+    /// 軟刪的 bot 不進全表版的未讀數；單顆版照算。
+    #[tokio::test]
+    async fn a_soft_deleted_bot_is_left_out_of_the_unread_counts() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&3));
+        sqlx::query("UPDATE bots SET deleted_at = '2026-09-16T00:00:00.000Z' WHERE id = 'b'").execute(&pool).await.unwrap();
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), None);
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 3);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// 裝置 A 讀到 t2，裝置 B（手機，分頁睡著沒收到事件）照樣看到只剩 1 則；舊標記不能倒退；同時間戳依 id 全序。
