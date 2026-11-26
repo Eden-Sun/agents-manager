@@ -1,6 +1,7 @@
 //! #1862 L2：am-lifecycle 的 daemon 整合測試（比照 supervisor_tests／share_tests）。
 mod agent_md;
 mod agy_session;
+mod agy_images;
 mod agy_tests;
 mod background_jobs;
 mod blocked_reason;

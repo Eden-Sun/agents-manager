@@ -371,6 +371,73 @@ pub async fn drop_rows(pool: &SqlitePool, gone: &[Stored]) -> sqlx::Result<()> {
     Ok(())
 }
 
+pub const OUTBOX_PREFIX: &str = "agy-images/";
+
+fn ext_of_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        _ => "webp",
+    }
+}
+
+fn epoch(ts: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|t| t.timestamp().max(0) as u64)
+}
+
+fn cutoff_at(now: u64) -> String {
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp(now as i64 - RETENTION_SECS, 0).unwrap_or_default();
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 產圖區裡還沒過期的圖，以 outbox 清單的格式列出（`name` 就是下載用的路徑）。
+pub async fn outbox_entries(pool: &SqlitePool, bot_id: &str, now: u64) -> sqlx::Result<Vec<serde_json::Value>> {
+    let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+        "SELECT i.sha256, i.size, i.created_at, a.mime FROM agy_images i JOIN attachments a ON a.id = i.attachment_id
+         WHERE i.bot_id = ? AND i.created_at >= ? ORDER BY i.created_at DESC LIMIT ?",
+    )
+    .bind(bot_id)
+    .bind(cutoff_at(now))
+    .bind(crate::outbox::MAX_ENTRIES as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(sha, size, created, mime)| {
+            let modified = epoch(&created)?;
+            let expires_at = modified + RETENTION_SECS as u64;
+            Some(serde_json::json!({
+                "name": format!("{OUTBOX_PREFIX}{sha}.{}", ext_of_mime(&mime)),
+                "size": size,
+                "modified": modified,
+                "expires_at": expires_at,
+                "remaining_secs": expires_at.saturating_sub(now),
+                "source": "agy",
+            }))
+        })
+        .collect())
+}
+
+/// 下載 `agy-images/<sha>.<ext>`：要在產圖區、沒過期、副檔名與內容型別一致。回傳（本機檔案、MIME、下載檔名）。
+pub async fn outbox_file(pool: &SqlitePool, bot_id: &str, requested: &str, now: u64) -> sqlx::Result<Option<(PathBuf, String, String)>> {
+    let Some(rest) = requested.strip_prefix(OUTBOX_PREFIX) else { return Ok(None) };
+    let Some((sha, ext)) = rest.rsplit_once('.') else { return Ok(None) };
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Ok(None);
+    }
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT a.local_path, a.mime FROM agy_images i JOIN attachments a ON a.id = i.attachment_id
+         WHERE i.bot_id = ? AND i.sha256 = ? AND i.created_at >= ?",
+    )
+    .bind(bot_id)
+    .bind(sha)
+    .bind(cutoff_at(now))
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.filter(|(_, mime)| ext_of_mime(mime) == ext).map(|(path, mime)| (PathBuf::from(path), mime, format!("{sha}.{ext}"))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +686,27 @@ mod tests {
         assert!(known_hashes(&pool, "b1").await.unwrap().contains("cc"));
         assert!(!known_hashes(&pool, "b1").await.unwrap().contains("aa"));
         assert_eq!(bots_with_images(&pool).await.unwrap(), vec!["b1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_outbox_lists_unexpired_images_and_serves_only_their_own_valid_names() {
+        let pool = store("outbox").await;
+        let a = "a".repeat(64);
+        add_image(&pool, "b1", &a, 10, "2026-11-26T00:00:00.000Z").await;
+        add_image(&pool, "b1", &"b".repeat(64), 10, "2026-10-01T00:00:00.000Z").await;
+        add_image(&pool, "b2", &"c".repeat(64), 10, "2026-11-26T00:00:00.000Z").await;
+        let now = epoch("2026-11-26T12:00:00Z").unwrap();
+        let list = outbox_entries(&pool, "b1", now).await.unwrap();
+        assert_eq!(list.len(), 1, "過期的不列");
+        assert_eq!(list[0]["name"], format!("agy-images/{a}.png"));
+        assert_eq!(list[0]["remaining_secs"], RETENTION_SECS as u64 - 12 * 3600);
+        let got = outbox_file(&pool, "b1", &format!("agy-images/{a}.png"), now).await.unwrap();
+        assert_eq!(got.map(|(_, m, n)| (m, n)), Some(("image/png".to_string(), format!("{a}.png"))));
+        assert!(outbox_file(&pool, "b1", &format!("agy-images/{a}.jpg"), now).await.unwrap().is_none(), "副檔名要跟內容型別一致");
+        assert!(outbox_file(&pool, "b2", &format!("agy-images/{a}.png"), now).await.unwrap().is_none(), "別顆 bot 的圖不給");
+        assert!(outbox_file(&pool, "b1", "agy-images/../../etc/passwd", now).await.unwrap().is_none());
+        assert!(outbox_file(&pool, "b1", &format!("agy-images/{}.png", "A".repeat(64)), now).await.unwrap().is_none());
+        assert!(outbox_file(&pool, "b1", &format!("agy-images/{}.png", "b".repeat(64)), now).await.unwrap().is_none(), "過期的不給下載");
     }
 
     #[test]

@@ -614,6 +614,9 @@ pub async fn queue_for_next_turn(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
+    if let Err(e) = super::agy_images_collect::begin(app, bot_id, &turn_id, conv).await {
+        tracing::warn!(turn = %turn_id, error = ?e, "agy images: turn snapshot not taken");
+    }
     publish_prompt_message(app, bot_id, &msg_id).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
@@ -1339,6 +1342,9 @@ async fn prompt_commit_and_deliver_body(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
+    if let Err(e) = super::agy_images_collect::begin(app, bot_id, &turn_id, &conv).await {
+        tracing::warn!(turn = %turn_id, error = ?e, "agy images: turn snapshot not taken");
+    }
     if let Err(e) = app.bind_attachments(&msg_id, &files).await {
         publish_prompt_message(app, bot_id, &msg_id).await;
         super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;

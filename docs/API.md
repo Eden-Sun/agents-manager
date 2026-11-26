@@ -1258,6 +1258,7 @@ bot 或 active Run 不存在 404。
 ```
 
 - 列**一般檔案，含子資料夾裡的**（bot 常把產出放在 `$AM_OUTBOX/<資料夾>/<檔>`）：`name` 是相對路徑（`報價_Q-1/報價單.pdf`，以 `/` 分段）。fd-bound 往下走（逐層 `openat(O_NOFOLLOW)`，不跟符號連結，符號連結目錄與符號連結檔都不列、硬連結不列），深度上限 32 層、總項目數上限 200,000；隱藏項目、被擋的名字（資料夾名也算）整個略過，內容擋逐檔照套，每個檔各自算自己的 `expires_at`。新的排前面，最多 300 筆。
+- agy 產圖（SPEC §12a.13，#2215）：這顆 bot 尚未過期的產圖也列在 `files` 裡，`source:"agy"`，`name` 為 `agy-images/<sha256>.<ext>`，`expires_at`＝收進來後 7 天（不是 1 小時）。下載用 `GET /api/bots/{id}/outbox/file?path=agy-images/<sha256>.<ext>`；不在產圖區、已過期、或副檔名與內容型別不符一律 404。
 - 分享用 bot（SPEC §20.5）：outbox 走分享保留政策（14 天、500 MiB／1000 檔，超過從最舊刪），回 `ttl_secs:null`、`kept:true`、`keep_days:14`，每個檔 `expires_at`／`remaining_secs` 為 `null`，另回
   `share_usage:{bytes, files, truncated, cap:{bytes:524288000, files:1000}, keep_days:14}`（整棵 outbox 的用量，不受上面 300 筆列表上限影響；`truncated:true` 表示樹太大、數字是下限）。
 - `expires_at` = mtime 與 ctime（檔案搬進 outbox 的時間）較晚的那個 + `ttl_secs`（`modified` 仍是 mtime）；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。

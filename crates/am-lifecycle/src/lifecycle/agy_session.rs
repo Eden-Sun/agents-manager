@@ -168,7 +168,7 @@ impl Site {
             Site::Local { .. } => crate::agy_images::snapshot(&self.brain_root(id)).ok(),
             Site::Remote { conn, .. } => {
                 let root = self.brain_root(id).to_string_lossy().into_owned();
-                conn.ssh_exec_path(&crate::agy_images::remote_list_script(&root)).await.ok().map(|out| crate::agy_images::parse_listing(&out))
+                conn.ssh_exec_path_timeout(&crate::agy_images::remote_list_script(&root), std::time::Duration::from_secs(10)).await.ok().map(|out| crate::agy_images::parse_listing(&out))
             }
         }
     }

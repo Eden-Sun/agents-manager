@@ -106,6 +106,8 @@ pub struct LivePane {
     pub width: Option<u32>,
     /// Draw grok's boxed composer (`│ ❯ … │` over `╰── Grok 4.6 (low) ─╯`) instead of claude's.
     pub boxed: bool,
+    /// Draw agy's screen (banner, rules, `> …` composer row) instead of claude's.
+    pub agy: bool,
     /// Draw codex's unboxed `› …` composer and echo rows instead of claude's.
     pub codex: bool,
     /// claude's suggested next prompt: drawn dim in an empty composer, gone once anything is typed.
@@ -223,6 +225,16 @@ impl LivePane {
         }
         if !self.no_spinner {
             out.push_str(&format!("✻ Crunching… ({}s · esc to interrupt)\n", self.reads));
+        }
+        if self.agy {
+            let rule = "────────────────────────────────────────";
+            out.push_str(&format!(" Antigravity CLI 1.2.16\n Gemini 3.1 Pro\n\n{rule}\n"));
+            match self.composer.split_first() {
+                None => out.push_str(">\n"),
+                Some((first, _)) => out.push_str(&format!("> {first}\n")),
+            }
+            out.push_str(&format!("{rule}\n"));
+            return out;
         }
         if self.boxed {
             out.push_str("  ╭──────────────────────────────────────────╮\n");

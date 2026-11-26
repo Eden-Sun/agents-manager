@@ -572,6 +572,27 @@ async fn outbox_of(app: &impl OutboxEnv, bot_id: &str) -> Result<PathBuf, LcErro
 
 /// `GET /api/bots/{id}/outbox` — 這顆 bot 交給使用者的檔案（新的排前面），各自還剩多久被清掉。
 pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: String) -> Result<Response, LcError> {
+    let resp = list_outbox_files(app, id.clone()).await?;
+    let extra = match crate::agy_images::outbox_entries(app.db_pool(), &id, now_secs()).await {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => return Ok(resp),
+        Err(e) => {
+            tracing::warn!(bot = %id, error = ?e, "agy images: not listed in the outbox");
+            return Ok(resp);
+        }
+    };
+    let (parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let mut v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| LcError::Upstream(e.to_string()))?;
+    if let Some(files) = v.get_mut("files").and_then(serde_json::Value::as_array_mut) {
+        files.extend(extra);
+        files.sort_by(|a, b| b["modified"].as_u64().unwrap_or(0).cmp(&a["modified"].as_u64().unwrap_or(0)));
+    }
+    let body = serde_json::to_vec(&v).map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok(Response::from_parts(parts, axum::body::Body::from(body)))
+}
+
+async fn list_outbox_files(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: String) -> Result<Response, LcError> {
     match crate::outbox_remote::target(app, &id).await {
         Ok(Some(t)) => return crate::outbox_remote::list(t, now_secs()).await,
         Ok(None) => {}
@@ -634,6 +655,18 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     let not_found = || LcError::NotFound("file".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?.clone();
     let inline_req = q.get("inline").map(|v| v == "1" || v == "true").unwrap_or(false);
+    if requested.starts_with(crate::agy_images::OUTBOX_PREFIX) {
+        let (path, mime, name) = crate::agy_images::outbox_file(app.db_pool(), &id, &requested, now_secs())
+            .await
+            .map_err(|_| not_found())?
+            .ok_or_else(not_found)?;
+        let data = tokio::fs::read(&path).await.map_err(|_| not_found())?;
+        if data.len() as u64 > MAX_BYTES {
+            return Err(not_found());
+        }
+        let inline = inline_req && is_inline_allowed(Path::new(&name));
+        return Ok(download_response(data, &mime, &name, inline));
+    }
     if let Some(t) = crate::outbox_remote::target(app, &id).await? {
         return crate::outbox_remote::file(t, &requested, inline_req).await;
     }
@@ -665,15 +698,15 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     }
     let p = Path::new(&name);
     let is_inline = inline_req && is_inline_allowed(p);
-    let disposition = if is_inline {
-        content_disposition_inline(&name)
-    } else {
-        content_disposition(&name)
-    };
+    Ok(download_response(data, mime_of(p), &name, is_inline))
+}
+
+fn download_response(data: Vec<u8>, mime: &str, name: &str, inline: bool) -> Response {
+    let disposition = if inline { content_disposition_inline(name) } else { content_disposition(name) };
     let mut resp = (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime_of(p).to_string()),
+            (header::CONTENT_TYPE, mime.to_string()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
@@ -681,13 +714,13 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
         data,
     )
         .into_response();
-    if is_inline {
+    if inline {
         resp.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             header::HeaderValue::from_static("sandbox; default-src 'none'"),
         );
     }
-    Ok(resp)
+    resp
 }
 
 /// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。
