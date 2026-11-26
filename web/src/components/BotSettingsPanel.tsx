@@ -489,6 +489,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       }
     })
   }
+  const pendingDetail = bot.daemon_url_pending
+    ? t('此 bot 啟動時未取得 daemon 位址。')
+    : t('設定角色 {role}；執行中的政策 {policy}。', {
+        role: bot.role ?? t('未分配'),
+        policy: bot.runtime_role_policy ? bot.runtime_role_policy.split(':').slice(-2).join(' / ') || t('未分配') : t('未知'),
+      })
   const restartButton = child || isApiKind(bot.kind) ? null : (
     <button type="button" className="btn primary" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('立即重啟')}
@@ -560,7 +566,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
 
       {}
-      {bot.role_pending && !isApiKind(bot.kind) ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
+      {bot.role_pending && !isApiKind(bot.kind) ? <div className="bs-banner warn" role="status"><span>{t('待套用（需重啟）：{detail}', { detail: pendingDetail })}</span>{restartButton}</div> : null}
       <div className="bs-body">
         <form
           className="form"

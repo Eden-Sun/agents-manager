@@ -4,6 +4,7 @@ import { mount, act, click, setupDom, teardownDom, unmountAll, until } from '../
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, Run } from '../api/types'
 import { BotSettingsPanel } from './BotSettingsPanel'
+import { resetLangForTest, setLangPref } from '../lib/i18n'
 
 before(setupDom)
 afterEach(async () => {
@@ -95,6 +96,31 @@ test('「待套用（需重啟）」橫幅（遠端啟動時沒拿到 daemon 位
   await click(btn)
   await until(() => restarted.length === 1, '呼叫重啟')
   assert.deepEqual(restarted, ['b1'])
+})
+
+test('英文介面：待套用橫幅的內文全部是英文，不留中文（#2216）', async () => {
+  setLangPref('en')
+  try {
+    const cases: Array<Partial<Bot>> = [
+      { role: 'executor', runtime_role_policy: 'proj:exec:infra', daemon_url_pending: false },
+      { role: null, runtime_role_policy: null, daemon_url_pending: false },
+      { role: 'executor', daemon_url_pending: true },
+    ]
+    for (const c of cases) {
+      useStore.setState({ bots: [{ ...bot, role_pending: true, ...c } as Bot], runs: { b1: run }, busy: {} })
+      await mount(<BotSettingsPanel botId="b1" />)
+      const banner = document.querySelector('.bs-banner.warn')!.textContent ?? ''
+      assert.match(banner, /^Pending \(restart required\): /, banner)
+      assert.doesNotMatch(banner, /[一-鿿]/, banner)
+      await unmountAll()
+    }
+    useStore.setState({ bots: [{ ...bot, role_pending: true, role: 'executor', runtime_role_policy: 'proj:exec:infra' } as Bot] })
+    await mount(<BotSettingsPanel botId="b1" />)
+    assert.ok(text().includes('Configured role executor; running policy exec / infra.'), text())
+  } finally {
+    localStorage.clear()
+    resetLangForTest()
+  }
 })
 
 test('claude-api bot 取消勾選 fast：按儲存送出 PATCH 帶 fast:false', async () => {
