@@ -235,6 +235,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     }
     attach::reconcile_orphans(&app).await;
     attach::spawn_sweep(app.clone());
+    crate::lifecycle::agy_images_collect::spawn(app.clone());
     preview::reconcile_all(&app).await;
     crate::runners::events::spawn_global(app.clone()).await;
 

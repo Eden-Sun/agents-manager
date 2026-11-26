@@ -7,6 +7,7 @@ pub use am_ports;
 mod arc_app_impls;
 mod quota_conversions;
 
+pub mod agy_images;
 pub mod identity_fence;
 pub mod ledger;
 pub mod codex_async_question;

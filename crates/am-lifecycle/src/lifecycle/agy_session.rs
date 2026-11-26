@@ -31,14 +31,14 @@ pub fn pick_conversation(
 }
 
 /// 這台主機上的 agy 事實從哪裡讀（issue #1788）：本機直接讀 `/proc` 與檔案；遠端＝那台的 ssh（`lsof`、`date`、`tail`）。
-enum Site {
+pub(super) enum Site {
     Local { home: PathBuf, recorded: Option<PathBuf> },
     Remote { conn: std::sync::Arc<crate::hosts::HostConn>, home: PathBuf },
 }
 
 impl Site {
     /// 拿不到家目錄、遠端沒連線＝`None`（照舊看畫面）。agy 非預設身份的 HOME 是身份目錄，紀錄檔在那底下（身份 env 的 `HOME`）。
-    async fn of(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>, recorded: Option<&str>) -> Option<Site> {
+    pub(super) async fn of(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>, recorded: Option<&str>) -> Option<Site> {
         let identity_home = match identity.map(str::trim).filter(|s| !s.is_empty()) {
             Some(name) => app.identity_for_host(host, name).await.filter(|i| i.kind == "agy").and_then(|i| crate::tools::agy_identity_home(&i.env).map(str::to_owned)),
             None => None,
@@ -150,6 +150,45 @@ impl Site {
                 }
             }
         }
+    }
+}
+
+impl Site {
+    /// 對話的 brain 目錄（本機的絕對路徑；遠端是那台上的路徑字串）。
+    pub(super) fn brain_root(&self, id: &str) -> PathBuf {
+        self.agy_dir().join("brain").join(id)
+    }
+
+    /// 這個對話 brain 底下現在有的一般檔（相對路徑）；讀不到＝`None`（遠端 ssh 失敗也是）。
+    pub(super) async fn brain_list(&self, id: &str) -> Option<crate::agy_images::Snapshot> {
+        if !valid_session_id(id) {
+            return None;
+        }
+        match self {
+            Site::Local { .. } => crate::agy_images::snapshot(&self.brain_root(id)).ok(),
+            Site::Remote { conn, .. } => {
+                let root = self.brain_root(id).to_string_lossy().into_owned();
+                conn.ssh_exec_path(&crate::agy_images::remote_list_script(&root)).await.ok().map(|out| crate::agy_images::parse_listing(&out))
+            }
+        }
+    }
+
+    /// 遠端才需要：一次 ssh 拿 `rels` 的大小與內容（≤10 MB 的才給內容）。本機直接讀檔（回 `None`）。
+    pub(super) async fn prefetch(&self, id: &str, rels: &[PathBuf]) -> anyhow::Result<Option<crate::agy_images::Prefetched>> {
+        let Site::Remote { conn, .. } = self else { return Ok(None) };
+        anyhow::ensure!(valid_session_id(id), "invalid conversation id");
+        let root = self.brain_root(id).to_string_lossy().into_owned();
+        let script = crate::agy_images::remote_fetch_script(&root, rels);
+        let out = conn.ssh_exec_path_timeout(&script, std::time::Duration::from_secs(120)).await?;
+        Ok(Some(crate::agy_images::parse_fetch(&out, rels)))
+    }
+
+    /// 紀錄檔尾巴（給產圖額度橫幅用）。
+    pub(super) async fn transcript(&self, id: &str) -> Option<String> {
+        if !valid_session_id(id) {
+            return None;
+        }
+        self.tail(&self.path_of(id)).await
     }
 }
 

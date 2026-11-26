@@ -307,6 +307,19 @@ CREATE TABLE IF NOT EXISTS agy_conversation_copies (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, host TEXT NOT NULL, identity TEXT,
   purpose TEXT NOT NULL CHECK (purpose IN ('base','run')), run_id TEXT, created_at TEXT NOT NULL
 );
+-- agy 產圖（#2215）：回合開始時拍的快照（`before_json` NULL＝拍不到、整回合不收）與收集進度；`agy_images` 是收進來的圖（同一 bot 同內容只一列）。
+CREATE TABLE IF NOT EXISTS agy_image_marks (
+  turn_id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, host TEXT NOT NULL, conversation_id TEXT NOT NULL,
+  session_id TEXT, before_json TEXT,
+  state TEXT NOT NULL CHECK (state IN ('open','done','skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agy_image_marks_open ON agy_image_marks(created_at) WHERE state = 'open';
+CREATE TABLE IF NOT EXISTS agy_images (
+  bot_id TEXT NOT NULL, sha256 TEXT NOT NULL, attachment_id TEXT NOT NULL, turn_id TEXT,
+  size INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (bot_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS agy_images_created ON agy_images(created_at);
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at);
 CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
 CREATE TABLE IF NOT EXISTS schedule_occurrences (
@@ -735,6 +748,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (111, "7ccc79bda6fd7d45"),
     // 最近回合查詢的保溫與系統訊息 partial index（2026-11-26）：`turns_keep_warm`、`messages_system_conv`。
     (112, "56f8895dd103439d"),
+    (113, "1a45813b3a9010a2"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

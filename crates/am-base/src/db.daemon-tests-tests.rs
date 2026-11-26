@@ -1326,7 +1326,14 @@
     }
 
     /// Versions through 74 contained mission tables. Reconstruct them only in historical fixtures.
+    /// SCHEMA 112（agy 產圖收集）才有的表：歷史 fixture 不該帶著它們。
+    async fn drop_agy_image_tables(conn: &mut sqlx::SqliteConnection) {
+        sqlx::query("DROP TABLE IF EXISTS agy_images").execute(&mut *conn).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS agy_image_marks").execute(&mut *conn).await.unwrap();
+    }
+
     async fn restore_legacy_mission_schema(conn: &mut sqlx::SqliteConnection) {
+        drop_agy_image_tables(&mut *conn).await;
         for stmt in include_str!("db/legacy_mission.sql").split(";\n").map(str::trim).filter(|s| !s.is_empty()) {
             sqlx::query(stmt).execute(&mut *conn).await.unwrap();
         }

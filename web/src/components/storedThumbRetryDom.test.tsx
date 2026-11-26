@@ -58,7 +58,7 @@ test('斷線時抓失敗：連回來自動重抓，縮圖換成圖', async () =>
   assert.ok(callCount >= 2, '至少呼叫兩次')
 })
 
-test('已清除（404）不重試', async () => {
+test('已過期（404）不重試', async () => {
   const att = { id: 'att-gone-2', name: 'gone.png', mime: 'image/png', size: 4, path: '/x/gone.png' }
   let callCount = 0
 
@@ -78,9 +78,9 @@ test('已清除（404）不重試', async () => {
   await until(
     () => {
       const el = document.querySelector<HTMLElement>('.msg-attachment.failed')
-      return Boolean(el && el.textContent?.includes('已清除'))
+      return Boolean(el && el.textContent?.includes('已過期'))
     },
-    '等待已清除出現',
+    '等待已過期出現',
   )
 
   const n = callCount

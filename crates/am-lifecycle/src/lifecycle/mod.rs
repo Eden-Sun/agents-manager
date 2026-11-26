@@ -67,6 +67,7 @@ pub mod grok_hook;
 pub mod agy_hook;
 pub mod agy_busy;
 pub mod agy_session;
+pub mod agy_images_collect;
 #[cfg(test)]
 pub mod agy_tests;
 pub mod grok_transcript;

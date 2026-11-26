@@ -1070,6 +1070,15 @@ fn prompt_gate<'a>(
     Box::pin(prompt_gate_body(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, queue_awaits_idle, admission, want_send_now, clear_draft, expected_run))
 }
 
+async fn queued_with_snapshot(app: &impl LcHost, bot_id: &str, conv: &str, out: LcResult<PromptOut>) -> LcResult<PromptOut> {
+    if let Ok(o) = &out {
+        if let Err(e) = super::agy_images_collect::begin(app, bot_id, &o.turn_id, conv).await {
+            tracing::warn!(turn = %o.turn_id, error = ?e, "agy images: turn snapshot not taken");
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prompt_gate_body(
     app: &impl LcHost,
@@ -1149,7 +1158,7 @@ async fn prompt_gate_body(
     if queue_awaits_idle {
         let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
         if in_flight.is_some() || run.agent_status != "idle" {
-            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await.map(Gated::Done);
+            return queued_with_snapshot(app, bot_id, &conv, super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await).await.map(Gated::Done);
         }
     }
     if run.agent_status == "blocked" {
@@ -1190,7 +1199,7 @@ async fn prompt_gate_body(
     };
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
         if queue_awaits_idle {
-            let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
+            let out = queued_with_snapshot(app, bot_id, &conv, super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await).await?;
             schedule_flush_retry(app, bot_id, left);
             return Ok(Gated::Done(out));
         }
@@ -1208,7 +1217,7 @@ async fn prompt_gate_body(
     if queue_if_busy && !users_own {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
             if queue_awaits_idle {
-                let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
+                let out = queued_with_snapshot(app, bot_id, &conv, super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await).await?;
                 schedule_flush_retry(app, bot_id, wait);
                 return Ok(Gated::Done(out));
             }

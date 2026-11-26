@@ -4336,6 +4336,18 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
 `/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身份要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身份＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在 statusLine 的 `quota` 先只記進 `status_json`，額度列仍用 `/usage` 探測，§12a.7）、`--effort` 獨立旗標、persona（per-bot HOME 全域規則檔或 `SessionStart`／`PreInvocation` 的 `injectSteps`）。細節與風險見設計文件。
 
+### 12a.13 產圖收集（#2215，`agy_images.rs`、`lifecycle/agy_images_collect.rs`）
+
+- **界線是快照，不是 mtime**：agy 每回合送出時（`start_send`、`prompt.rs` 的排隊路徑）對這個對話的 brain 目錄拍一次一般檔的相對路徑快照，存在 `agy_image_marks.before_json`。`cp -R` 複製的舊圖 mtime 會變新，所以只看「快照裡沒有」的路徑。拍不到（遠端 ssh 失敗）＝`before_json` NULL，這回合整回合不收，寫 `skipped`。對話 id 還沒綁到 run 時快照是空集合（新對話）。
+- **收集**：背景每 5 秒掃 `state='open'` 且回合已終局（非 `queued`／`in_flight`）的 mark。本機直接讀檔；遠端一次 ssh 列出、再一次 ssh 讀最多 16 個新檔（≤10 MB 才給內容，`base64`）。排除 `scratch/`、以 `.` 開頭的目錄（`.system_generated`、`.user_uploaded`）、符號連結；內容要以檔頭辨認（png／jpg／gif／webp），副檔名不算數。
+- **上限與去重**：每回合最多 8 張、單張 10 MB；超過的在回合上留一則系統說明（`role=assistant`、`source=system`，綁同一 `turn_id`）。同一 bot 內容雜湊相同只收一次（`agy_images` 的 `(bot_id, sha256)`）。
+- **呈現**：收進來的圖寫到 bot 的附件目錄（`attach::local_copy_dir`，檔名 `agy-<sha>.<ext>`），建 `attachments` 列（`state='ready'`、綁該則說明訊息），沿用既有 `GET /api/attachments/{id}` 與縮圖／Lightbox，不新增路由。
+- **保存**：超過 7 天（`RETENTION_SECS`）或超過每顆 bot 200 MB（`BOT_CAP_BYTES`，最舊先刪）的圖：刪本機檔、刪 `agy_images` 列，`attachments` 列保留，讀取回 404／410，網頁顯示「已過期」（`GONE_LABEL`）。這不是 outbox（1 小時 TTL）。每小時掃一次。
+- **補收**：遠端離線或 daemon 重啟時 mark 留在 `open`，以 30 秒起、倍增（上限約 32 分鐘）重試；拍過快照後超過 2 天仍收不到就 `skipped`。
+- **產圖額度（與文字額度分開）**：紀錄檔裡在回合開始之後出現 `image generation quota exceeded` 橫幅（`image_quota_since`）→ 在回合上寫一則說明（「產圖額度已用盡（reset after …）」）。**不走撞限**：不呼叫 `mark_agy_limit_hit`、不寫 `limit_hit`、不設 `quota_blocked`，bot 的文字回合照常。`is_quota_exhaustion`／`is_quota_limit` 對這行都回 false（測試守門）。
+- **舊版 DB**：SCHEMA 112 新增 `agy_image_marks`、`agy_images`（純新增表）。
+- 未涵蓋：outbox 清單不列這些圖（只在聊天內呈現）；跨 bot 交付（第二階段）；實機產圖與 ag0 額度實測（需要真的消耗產圖額度）。
+
 ## 13. 專案設定
 
 點選側欄專案標題開啟專案設定；專案群組聊天與群組任務畫面已移除。既有 `messages.group_id` 欄位留在 SQLite 以相容舊資料，daemon 不再讀寫或輸出此欄位。

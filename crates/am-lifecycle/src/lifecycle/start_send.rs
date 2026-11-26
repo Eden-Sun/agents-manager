@@ -197,6 +197,9 @@ async fn accept_locked(
     .map_err(up)?;
     tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
     tx.commit().await.map_err(up)?;
+    if let Err(e) = super::agy_images_collect::begin(app, bot_id, &turn_id, &conv).await {
+        tracing::warn!(turn = %turn_id, error = ?e, "agy images: turn snapshot not taken");
+    }
     super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
     super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;

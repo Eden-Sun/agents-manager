@@ -1907,3 +1907,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - `apiBotUsageBar.css`、`translateRetro.css`、`apiTurnTimeline.css`、`apiBotCostOverview.css` 不再寫死色碼，連 `var(--x, #hex)` 的後備值也不留；顏色一律來自 `styles.css` 的主題 token。`themeTokens.test.ts` 守門這四檔不得出現色碼。
 - 成本總覽（`ApiBotCostOverview.tsx`）的分類色也改傳 token 名（`var(--usage-*)`），不再傳 hex，`themeTokens.test.ts` 守門這個檔。
 - 時間軸與用量條的分類色（輸入、輸出、快取讀、快取寫、其他）是新的 `--usage-*` token，亮色、系統深色、`data-theme="dark"` 三組都定義，深色版提亮以在深底上保持對比。
+
+## agy 產圖：聊天內嵌與「已過期」（2026-11-26，issue #2215）
+
+- agy 產的圖以附件綁在回合上的一則系統說明下方，沿用一般附件的縮圖與 Lightbox，不另開區塊。
+- 過期或超量清除後，縮圖位置顯示「已過期」（原本的「已清除」文案改掉），提示寫明保留 7 天、每顆 bot 上限 200 MB。
+- 產圖額度用盡只在回合上留一則說明，文案明講「與文字額度分開計算，不影響這顆 bot 的文字回合」。
+

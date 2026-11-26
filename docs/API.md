@@ -133,6 +133,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | DELETE | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/*` | 無 principal；前端靜態檔 fallback |
 | GET | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+|  | （agy 產圖）過期或超量清除後 `attachments` 列還在、檔案已刪 → 404／410，網頁顯示「已過期」；見 SPEC §12a.13。路由與權限不變。 | |
 | GET | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/api-session/retire` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
