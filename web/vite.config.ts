@@ -40,6 +40,7 @@ export default defineConfig({
     rolldownOptions: {
       input: { main: 'index.html', share: 'share.html' },
       output: {
+        strictExecutionOrder: true,
         codeSplitting: {
           groups: [{
             name: 'react-dom',
