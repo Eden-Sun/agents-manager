@@ -91,8 +91,7 @@ function ClusterManagerUseChip({ name, members, on, busy }: { name: string; memb
 
   const deleteAll = () => {
     setDeleteOpen(false)
-    const remove = useStore.getState().removeBot
-    void Promise.allSettled(members.map((m) => remove(m.id)))
+    void useStore.getState().removeBotGroup(members.map((m) => m.id))
   }
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()

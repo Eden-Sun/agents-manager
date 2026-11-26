@@ -519,10 +519,14 @@ export interface StoreState {
   installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
   updateChain: boolean
   startUpdateChain: (plan: { claude?: { hosts: string[]; target: string }; codex?: { host: string; target: string } }) => Promise<void>
-  removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
+  removeBot: (botId: string, opts?: { confirmSupervisor?: boolean; onAgmAsk?: (ask: AgmDeleteAsk) => void }) => Promise<void>
+  removeBotGroup: (botIds: string[]) => Promise<void>
   restoreBot: (botId: string) => Promise<boolean>
   agmDeleteAsk: AgmDeleteAsk | null
+  agmDeleteBatch: AgmDeleteAsk[] | null
   cancelAgmDelete: () => void
+  confirmAgmBatch: () => Promise<void>
+  cancelAgmBatch: () => void
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number, format?: TerminalFormat) => ReturnType<typeof api.fetchTerminal>
 
@@ -833,6 +837,7 @@ export const useStore = create<StoreState>((set, get) => {
   identityLoginPane: null,
   supervisorProjectId: null,
   agmDeleteAsk: null,
+  agmDeleteBatch: null,
 
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
@@ -1996,6 +2001,22 @@ export const useStore = create<StoreState>((set, get) => {
     set({ agmDeleteAsk: null })
   },
 
+  async removeBotGroup(botIds) {
+    const asks: AgmDeleteAsk[] = []
+    await Promise.allSettled(botIds.map((id) => get().removeBot(id, { onAgmAsk: (ask) => asks.push(ask) })))
+    if (asks.length > 0) set({ agmDeleteBatch: asks })
+  },
+
+  async confirmAgmBatch() {
+    const batch = get().agmDeleteBatch ?? []
+    set({ agmDeleteBatch: null })
+    await Promise.allSettled(batch.map((ask) => get().removeBot(ask.botId, { confirmSupervisor: true })))
+  },
+
+  cancelAgmBatch() {
+    set({ agmDeleteBatch: null })
+  },
+
   async restoreBot(botId) {
     try {
       await api.restoreBot(botId)
@@ -2041,7 +2062,8 @@ export const useStore = create<StoreState>((set, get) => {
         }
       } catch (e) {
         const ask = opts.confirmSupervisor ? null : supervisorOwnedAsk(e, botId, name)
-        if (ask) set({ agmDeleteAsk: ask })
+        if (ask && opts.onAgmAsk) opts.onAgmAsk(ask)
+        else if (ask) set({ agmDeleteAsk: ask })
         else get().notify('error', errText(e))
       }
     })

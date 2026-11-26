@@ -4,6 +4,7 @@ import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type 
 import { useStore } from '../store/store'
 import type { Bot, Project } from '../api/types'
 import { Sidebar } from './Sidebar'
+import { AgmDeleteConfirm } from './AgmDeleteConfirm'
 import { groupClusterItems, sortClusterEntries } from '../lib/expertClusters'
 
 afterEach(unmountAll)
@@ -300,6 +301,45 @@ test('群集選單「全部刪除…」：先跳確認框、取消不刪，確�
   await settle()
   const deleted = new Set(requests.filter((r) => r.method === 'DELETE').map((r) => r.path.split('/').pop()))
   assert.deepEqual(deleted, new Set(['h1', 'h2', 'h3']))
+})
+
+test('群集「全部刪除…」含 AGM 的 Bot：非 AGM 的照刪，AGM 的合併成一張確認框（列出名字），確認後才帶 confirm 逐顆刪', async () => {
+  seed([true, true, true])
+  const seen: FakeRequest[] = []
+  globalThis.fetch = (async (input: string, init?: { method?: string }) => {
+    const method = init?.method ?? 'GET'
+    const path = String(input)
+    seen.push({ method, path, body: undefined })
+    if (method === 'DELETE' && /\/h[12](\?|$)/.test(path) && !path.includes('confirm=supervisor')) {
+      const id = path.split('/').pop()!.split('?')[0]
+      return new Response(JSON.stringify({ error: 'conflict', reason: 'supervisor_owned', bot_id: id, name: `bot-${id}`, role: 'AGM 專案裡的常駐工人' }), { status: 409 })
+    }
+    return new Response('{}', { status: 200 })
+  }) as unknown as typeof fetch
+  requests = seen
+  await mount(<><Sidebar /><AgmDeleteConfirm /></>)
+  await settle()
+  await click(menuBtn())
+  await settle()
+  await click(menuItems()[2])
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find((b) => b.textContent === '全部刪除')!)
+  await settle(300)
+
+  const dels = () => seen.filter((r) => r.method === 'DELETE')
+  assert.deepEqual(dels().map((r) => r.path.split('/').pop()).sort(), ['h1', 'h2', 'h3'], '第一輪：每顆都先不帶 confirm 試')
+  assert.ok(dels().every((r) => !r.path.includes('confirm=supervisor')))
+  const batch = [...document.querySelectorAll<HTMLElement>('[role="alertdialog"]')].find((d) => (d.textContent ?? '').includes('仍要全部刪除'))!
+  assert.ok(batch, 'AGM 的兩顆要合併成一張確認框')
+  assert.match(batch.textContent ?? '', /bot-h1/)
+  assert.match(batch.textContent ?? '', /bot-h2/)
+  assert.doesNotMatch(batch.textContent ?? '', /bot-h3/)
+  assert.equal(dels().filter((r) => r.path.includes('confirm=supervisor')).length, 0, '還沒確認不送第二輪')
+
+  await click([...batch.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === '仍要全部刪除')!)
+  await settle(300)
+  const confirmed = dels().filter((r) => r.path.includes('confirm=supervisor')).map((r) => r.path.split('/').pop()!.split('?')[0])
+  assert.deepEqual(confirmed.sort(), ['h1', 'h2'])
 })
 
 test('sortClusterEntries：有活躍成員的群集排前面，全停止的排後面，單顆維持最後', () => {

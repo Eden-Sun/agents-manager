@@ -810,7 +810,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
 
 ## 刪 AGM 的 bot 要第二次確認（2026-09-24，issue #406）
 
-daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案裡的工人）的刪除回 409 `supervisor_owned`，要帶 `?confirm=supervisor` 才刪。
+daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案裡的工人）的刪除回 409 `supervisor_owned`，要帶 `?confirm=supervisor` 才刪。群集選單「全部刪除…」（#2221）：先逐顆不帶 confirm 試，非 AGM 的照刪；AGM 的合併成一張確認框列出名字（`agmDeleteBatch`，store 層，不跟著群集列掛載），確認後才逐顆帶 `?confirm=supervisor` 送出，取消則 AGM 那幾顆留著。
 網頁不能因此變死路（09-23 13:28Z 那兩刀很可能就是從網頁按的），所以一般的「刪除 Bot」確認之後若收到這個 409，**不跳錯誤通知**，改跳第二個確認框
 「這是 AGM 的 Bot」：寫名稱與 daemon 給的角色（`role`），說明「刪了 AGM 可能會壞」。焦點照確認框慣例落在「取消」；取消什麼都不送，
 「仍要刪除」才帶參數重送，成功後照常是帶「復原」的通知。判斷集中在 `lib/agmDelete.ts`，框是 `AgmDeleteConfirm`（掛在 App 根層，側欄 ⋯ 與 Bot 設定兩個入口共用）。
