@@ -260,8 +260,8 @@ fn failure_message(e: &LcError) -> String {
 }
 
 /// 在背景製作基準，不擋呼叫端（儲存排程、改綁、重試都走這裡）。已有基準或已在製作的，後到的會等同一把鎖、不重做。
+/// 「製作中」在 spawn 當下就計入（不是在背景任務裡），下一個 tick 立刻看得到，不會又開一份。
 pub(super) fn spawn_ensure(app: &Arc<App>, bot_id: &str, project_id: &str) {
-    // 計入「製作中」要在 spawn 當下做，不然下一個 tick 會看不到，又開一份。
     begin_build(bot_id);
     let (app, bot_id, project_id) = (app.clone(), bot_id.to_owned(), project_id.to_owned());
     tokio::spawn(async move {
