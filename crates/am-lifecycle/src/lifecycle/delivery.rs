@@ -134,6 +134,8 @@ impl Plan {
 }
 
 const TYPE_SETTLE_MS: u64 = 700;
+/// `Proof::Unverified` 送字後框仍空時，最多再輪詢幾次（每次 `TYPE_SETTLE_MS`）等文字畫出來。
+const UNVERIFIED_SETTLE_ROUNDS: u32 = 4;
 pub const SUBMIT_SETTLE_MS: u64 = 1200;
 pub const SUBMIT_CHECKS: u32 = 3;
 pub const DELIVER_SCAN_LINES: u32 = 400;
@@ -943,8 +945,13 @@ pub async fn type_text(
             seen = read().await?;
         }
     } else if proof == Proof::Unverified && box_empty {
-        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
-        seen = read().await?;
+        for _ in 0..UNVERIFIED_SETTLE_ROUNDS {
+            tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+            seen = read().await?;
+            if box_state_within(&bot.kind, &seen, typed_tail(text)) != BoxState::Empty {
+                break;
+            }
+        }
     }
     let state = box_state_within(&bot.kind, &seen, typed_tail(text));
     let truncated = match super::paste_check::lost_head(&bot.kind, &seen, text, typed_tail(text)) {

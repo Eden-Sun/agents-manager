@@ -291,7 +291,7 @@ async fn a_prompt_with_no_lossless_proof_is_typed_once_and_unverified() {
     assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
 }
 
-/// 沒有證據的那條路，TUI 晚一幀才把貼上的字畫出來：多等一個 settle 再看，照常按 Enter 送出，
+/// 沒有證據的那條路，TUI 晚一幀才把貼上的字畫出來：有上限地輪詢，照常按 Enter 送出，
 /// 不是判 `nothing_typed` 把字留在框裡（review2 deliv 上一輪 #2 的副作用）。只貼一次。
 #[tokio::test]
 async fn a_late_redraw_on_an_unverified_run_is_still_submitted_not_left_in_the_box() {
@@ -323,6 +323,54 @@ async fn a_late_redraw_on_an_unverified_run_is_still_submitted_not_left_in_the_b
     assert_eq!(count(&f, "pane.send_text"), 1, "沒有證據就不重貼");
     assert!(count(&f, "pane.send_keys") >= 1, "有按 Enter");
     assert!(f.env.herdr.pane("pane-17").unwrap().composer.is_empty(), "字沒有留在框裡");
+}
+
+/// 前兩次讀框都還是空的、第三次才畫出來：仍照常送出，而且只貼一次。
+#[tokio::test]
+async fn an_unverified_run_whose_text_appears_on_the_third_read_is_submitted_without_repaste() {
+    let f = fixture("grok", "").await;
+    live(&f, crate::testing::LivePane { boxed: true, swallow_text: true, ..wide() });
+    let app = f.env.app.clone();
+    db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+    let (run, bot) = run_and_bot(&f).await;
+    let client = client_for_run(&app, &run).await.unwrap();
+    let (calls, panes) = (f.env.herdr.calls.clone(), f.env.herdr.live.clone());
+    let redraw = tokio::spawn(async move {
+        loop {
+            let m: Vec<String> = calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+            if let Some(pos) = m.iter().position(|x| x == "pane.send_text") {
+                if m[pos..].iter().filter(|x| *x == "pane.read").count() >= 2 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let mut live = panes.lock().unwrap();
+        let p = live.get_mut("pane-17").unwrap();
+        p.swallow_text = false;
+        p.composer = vec!["第一行".into(), "第二行".into()];
+    });
+    let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap();
+    redraw.await.unwrap();
+    assert_ne!(out, Delivered::Unproven("nothing_typed"));
+    assert_eq!(count(&f, "pane.send_text"), 1, "沒有證據就不重貼");
+    assert!(count(&f, "pane.send_keys") >= 1, "有按 Enter");
+}
+
+/// 全程框都是空的：輪詢到上限後仍判 `nothing_typed`，而且沒有按 Enter。
+#[tokio::test]
+async fn an_unverified_run_whose_paste_never_appears_is_nothing_typed_without_enter() {
+    let f = fixture("grok", "").await;
+    live(&f, crate::testing::LivePane { boxed: true, swallow_text: true, ..wide() });
+    let app = f.env.app.clone();
+    db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+    let (run, bot) = run_and_bot(&f).await;
+    let client = client_for_run(&app, &run).await.unwrap();
+
+    let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap();
+    assert_eq!(out, Delivered::Unproven("nothing_typed"));
+    assert_eq!(count(&f, "pane.send_text"), 1, "沒有證據就不重貼");
+    assert_eq!(count(&f, "pane.send_keys"), 0);
 }
 
 /// 打過字、證不明的 turn 絕不自動重送（`auto_resend = 0`）：它很可能已經被收下了。
