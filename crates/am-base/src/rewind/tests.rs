@@ -19,6 +19,12 @@ const MENU_LONG: &str = include_str!("claude_2.1.280_rewind_menu_selected_long_2
 const CONFIRM_SHORT: &str = include_str!("claude_2.1.280_rewind_confirm_short_multiline.txt");
 const CONFIRM_4_LINES: &str = include_str!("claude_2.1.280_rewind_confirm_truncated_4_lines_24rows.txt");
 const CONFIRM_LONG: &str = include_str!("claude_2.1.280_rewind_confirm_truncated_long_24rows.txt");
+const CUT_CONFIRM_40: &str = include_str!("claude_2.1.332_rewind_confirm_cut_40cols.txt");
+const CUT_CONFIRM_60: &str = include_str!("claude_2.1.332_rewind_confirm_cut_60cols.txt");
+const FULL_CONFIRM_80: &str = include_str!("claude_2.1.332_rewind_confirm_full_80cols.txt");
+const CUT_MENU_60: &str = include_str!("claude_2.1.332_rewind_menu_cut_60cols.txt");
+/// 實機（claude 2.1.332，tmux 40／60／80 欄）倒回確認頁的目標：單行、雙空白、超長網址。網址是假的。
+const LONG_URL_TARGET: &str = "查  https://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE0123456789abcdEFGH/edit?gid=4#gid=4  是我要給錠嵂的，是否合理";
 const REFILLED: &str = include_str!("claude_2.1.280_rewind_restored_composer_refilled.txt");
 const CLEARED: &str = include_str!("claude_2.1.280_rewind_restored_composer_cleared.txt");
 const CONFIRM_14_ROWS: &str = include_str!("claude_2.1.280_rewind_confirm_options_cut_off_14rows.txt");
@@ -107,6 +113,44 @@ fn a_truncated_confirm_page_matches_by_prefix_only_when_it_is_long_enough() {
     assert!(confirm_matches(&c.quoted, &long_words()), "折行不算差異");
     let short = vec!["multi line 0 of the thirty line prompt".to_string(), "multi line 1 of the thirty line prompt".to_string()];
     assert!(!confirm_matches(&short, &thirty_lines()));
+}
+
+/// 2.1.332 窄 pane（40、60 欄）：原文在最後一行尾端截斷加 `…`，只剩 3 行。以前要求 4 行而判成 text_mismatch（#2224）。
+#[test]
+fn a_narrow_pane_confirm_cut_with_an_ellipsis_matches_by_prefix() {
+    for (screen, cols) in [(CUT_CONFIRM_40, 40), (CUT_CONFIRM_60, 60)] {
+        let c = parse_confirm(screen).expect("確認頁");
+        assert_eq!(c.quoted.len(), 3, "{cols} 欄：{:?}", c.quoted);
+        assert!(c.quoted.last().unwrap().ends_with('…'));
+        assert!(confirm_matches(&c.quoted, LONG_URL_TARGET), "{cols} 欄的截斷頁要對得上");
+    }
+}
+
+/// 80 欄沒截斷：整則照常整則對上。
+#[test]
+fn a_full_confirm_page_still_matches_the_whole_message() {
+    let c = parse_confirm(FULL_CONFIRM_80).expect("確認頁");
+    assert!(confirm_matches(&c.quoted, LONG_URL_TARGET));
+}
+
+/// 選單上的同一則（截斷到欄寬）要對得上，不然選單那步就會 not_in_menu。
+#[test]
+fn the_narrow_pane_menu_entry_matches_the_long_url_target() {
+    let entry = CUT_MENU_60.lines().map(str::trim).find(|l| l.starts_with("查")).expect("選單列");
+    assert!(entry.ends_with('…'));
+    assert!(entry_matches(entry, LONG_URL_TARGET));
+    assert!(parse_menu(CUT_MENU_60).is_some());
+}
+
+/// 有截斷記號也要防誤選：前綴太短，或前綴其實是別則，都不算。
+#[test]
+fn a_cut_mark_does_not_make_a_short_or_different_prefix_match() {
+    let cut = |lines: &[&str]| lines.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+    assert!(!confirm_matches(&cut(&["查…"]), LONG_URL_TARGET), "前綴只有一個字");
+    assert!(!confirm_matches(&cut(&["查  https://docs.g…"]), "查  https://docs.google.com/spreadsheets/d/x  別的內容"), "前綴 24 字以內");
+    let other = "查詢  https://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE0123456789abcdEFGH/edit?gid=4#gid=4  是我要給錠嵂的";
+    assert!(!confirm_matches(&cut(&["查  https://docs.google.com/spreadsheets/d/1FAKEf…"]), other), "首行不同");
+    assert!(!confirm_matches(&cut(&["查  https://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE0123…"]), "查  https://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE9999"), "截斷前的字已經不同");
 }
 
 /// 14 列的 pane：選項整組被擠出畫面，只剩說明兩行。一樣認得出是確認頁、讀得到原文（之後按 `1` 選，不靠游標）。

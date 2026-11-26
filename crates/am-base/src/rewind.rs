@@ -51,6 +51,9 @@ const MAX_STEPS: usize = 400;
 /// 確認頁只印了原文的前一段（沒有截斷記號）時，要看起來**確實是被截斷的長度**才接受：至少這麼多行。
 /// 2.1.280 實測截斷時一定有 4 行以上（多行的前 4 行、長的一行折成約 6 行）；比這短卻只對到前綴＝不是同一則。
 const TRUNCATED_MIN_LINES: usize = 4;
+/// 2.1.332 實測：窄 pane 時確認頁的原文在最後一行尾端加 `…` 截斷，行數可能還不到 4 行（40、60 欄各 3 行）。
+/// 有這個記號就以它為準，但對上的前綴至少要這麼長（去掉空白後的字元數），免得短前綴對上一堆別則。
+const CUT_MARK_MIN_CHARS: usize = 24;
 
 /// 選單的樣子。`selected` 是游標那一則的顯示文字，`None`＝在 `(current)`。`block` 用來判斷游標有沒有真的移動。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +194,7 @@ pub fn confirm_matches(quoted: &[String], target: &str) -> bool {
     confirm_matches_with_identity(quoted, target, false)
 }
 
+/// 有截斷記號：前綴＝記號之前的字，行數不限（見 [`CUT_MARK_MIN_CHARS`]）；沒有記號才要求截斷的長度（見 [`TRUNCATED_MIN_LINES`]）。
 fn confirm_matches_with_identity(quoted: &[String], target: &str, unique_target: bool) -> bool {
     let shown = squash(&quoted.join("\n"));
     let want = squash(target);
@@ -200,6 +204,15 @@ fn confirm_matches_with_identity(quoted: &[String], target: &str, unique_target:
     if shown == want {
         return true;
     }
+    let cut = quoted.last().is_some_and(|l| l.ends_with('…'));
+    let core = if cut { shown.strip_suffix('…').unwrap_or(&shown) } else { shown.as_str() };
+    let prefix_matches = |full: &str| {
+        if cut {
+            core.chars().count() >= CUT_MARK_MIN_CHARS && full.starts_with(core)
+        } else {
+            full.starts_with(core) && quoted.len() >= TRUNCATED_MIN_LINES
+        }
+    };
     if let Some((text, header, paths)) = attachment_tail(target) {
         if squash(text).is_empty() {
             return false;
@@ -209,9 +222,9 @@ fn confirm_matches_with_identity(quoted: &[String], target: &str, unique_target:
             let body_matches = body == squash(text);
             return body_matches && ((!tail.is_empty() && tail == squash(paths)) || (tail.is_empty() && unique_target));
         }
-        return unique_target && squash(text).starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES;
+        return unique_target && prefix_matches(&squash(text));
     }
-    want.starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES
+    prefix_matches(&want)
 }
 
 /// Recognize only the terminal suffix produced by `attach::deliver_text`, with

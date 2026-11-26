@@ -1,0 +1,19 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Rewind
+
+  Restore to the point before you sent
+  this message:
+
+  │ 查  https://docs.google.com/spre
+  │ adsheets/d/1FAKEfakeFAKEfakeFAKE
+  │ fakeFAKE0123456789abcdEFGH/edit…
+  │ (18s ago)
+
+  The conversation goes back to before
+  this message.
+  The code will be unchanged.
+
+  ❯ 1. Restore conversation
+    2. Summarize from here
+    3. Summarize up to here
+    4. Never mind
