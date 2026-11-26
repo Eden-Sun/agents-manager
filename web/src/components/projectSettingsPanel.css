@@ -1,4 +1,4 @@
-.project-settings { padding: 24px; overflow: auto; }
+.project-settings { --project-settings-pad: 24px; padding: var(--project-settings-pad); overflow: auto; scroll-padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
 .project-settings h2 { margin-top: 0; }
 
 .project-expert-settings-section { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--bg-panel); }
@@ -26,4 +26,4 @@
     scrollbar-width: none;
   }
 }
-.project-savebar { position: sticky; bottom: 0; z-index: 1; margin-top: 12px; padding: 10px 0; background: var(--bg-panel, var(--bg)); border-top: 1px solid var(--border); }
+.project-savebar { position: sticky; bottom: calc(-1 * var(--project-settings-pad, 0px)); z-index: 1; margin-top: 12px; padding: 10px 0 calc(10px + env(safe-area-inset-bottom, 0px)); background: var(--bg-panel, var(--bg)); border-top: 1px solid var(--border); }
