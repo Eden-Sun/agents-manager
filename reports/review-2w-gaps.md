@@ -35,3 +35,34 @@
 - 需要使用者確認的：1801dad13 的總上限是否真的存在（1 項）；32036abb1 在 quarantine 下回 ActiveRun 是否可接受（1 項）。
 - 候選（低）：93ac0fb18 SQL 判準寬、68eb5cc55 游標不可見時的 Down、has_prompt_cue 的 PageUp/PageDown 寬鬆規則。
 - 未覆蓋：web 98 個 commit、api_bot 其餘約 14 個 fix、d143c2bc3 與 2c1ac676b 的完整 diff。本報告**不完整**，不應視為 #2214 的完成版。
+
+## 4. 網頁 commit 前半（#2214 補審）
+
+範圍：`git log --since=2026-11-11 --reverse origin/main -- web/` 的前一半，114 個 commit（`e419f291d..e521fb229`）。唯讀。
+
+### 覆蓋
+
+- **機械掃描（全部看過）**：新增的原生 `alert／confirm／prompt`（無；`onConfirm` 是元件 prop）；TS／TSX 新增的中文字面量不經 `t()／L()`（66 筆，多數是註解、`msg()` 鍵與 API 錯誤對照表，實際漏的 2 筆，見下）；新增的 CSS 色碼（49 筆，其中 apiBot 三檔與時間軸已由 #2213 收斂）；`origin/main` 上 CSS 用到但未定義的自訂屬性（零筆，`ebdc1e642` 已清）。
+- **抽讀**：#2213 相關的成本總覽、用量條、翻譯回顧、outbox HTML 預覽（121ba320a）、移除最近刪除頁（3205b0116）。
+- **未讀**：草稿與附件（0b3b4fb8b、53a5b6783、568864c5e 系列）、排程卡片（2232c454a、ada29fd47）、窄螢幕版面的逐段 diff、其餘 Claude API 與 OpenAI 分頁的互動細節。這一半的功能面**不完整**，需要另派。
+
+### 發現
+
+| # | 位置 | 類別 | 觸發情境 | 嚴重度／信心 | 處理 |
+|---|---|---|---|---|---|
+| 1 | web/src/components/BotSettingsPanel.tsx:563 | i18n | 英文介面，bot 的 role_pending 為真：橫幅標題已翻，內文仍中文（「此 bot 啟動時未取得 daemon 位址」「設定角色」「執行中的政策」「未分配」「未知」） | 低／高 | 已開 #2216 |
+| 2 | web/src/components/ApiBotCostOverview.tsx（`colorVar: '#d97706'` 等六處） | 深色 | 深色主題開成本總覽；分類色是 JS 寫死的 hex，不走 #2213 的 `--usage-*` token | 低／中（截圖上仍可辨） | 已開 #2217 |
+| 3 | web/src/components/ApiTurnTimeline.tsx:2521 | i18n | `setError(err?.message \|\| '載入失敗')` 的 fallback 是中文；元件目前沒有掛載點（見 #2213 留言），實際不可達 | 極低／高 | 不另開，待掛載點決定時一併處理 |
+| 4 | web/src/components/OutboxFiles.tsx、lib/htmlPreview.ts（121ba320a） | 安全（需使用者再確認） | bot 產的 `.html` 以 blob URL 在 AG Man 同源新分頁執行，可呼叫同源 API。這是使用者 2026-11-18 的明確裁示（commit 訊息已寫明「接受風險」）。若 bot 被提示注入寫出惡意 HTML，同源執行會帶來實際風險 | 中／高（風險已知、非實作錯誤） | 不開 issue；請使用者重新確認威脅模型，必要時改回沙箱或分來源 |
+| 5 | 3205b0116（feat!） | 功能移除 | 網頁「最近刪除」頁與 `GET /api/bots/deleted` 一併移除，刪掉的 bot 在網頁上無法復原 | 不是缺陷；需確認有替代入口 | 不開 issue，列為確認項 |
+
+### 不列為問題
+
+- `schedules.css` 等檔的 `var(--warn, #b7791f)` 形式 hex 後備值：token 都已定義，後備值不會生效，無可見影響（屬衛生問題）。
+- `var(--red, #e06c75)`：已在 `ebdc1e642` 前後改掉，`origin/main` 上已不存在。
+
+### 本節小結
+
+- 有具體觸發、可立即處理：#1（已開 #2216）、#2（已開 #2217）。
+- 需要使用者裁示：#4（html 同源執行）、#5（最近刪除的替代入口）。
+- 未完成：草稿／附件、排程卡片與窄螢幕的功能面（見覆蓋）。
