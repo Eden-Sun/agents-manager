@@ -118,6 +118,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 ### 3.1 daemon（`agents-managerd`）
 
 - axum + tokio + serde；SQLite 用 sqlx（每條連線 `foreign_keys=ON`、`journal_mode=WAL`）。
+  - **效能索引與 optimize（db-perf 2026-11-26，SCHEMA 111）**：`turns_queued_lane`（`status='queued'`）與 `turns_active_status`（`status IN ('queued','in_flight')`）只收排隊與送達臨界區會問的列；`DELIVERY_CRITICAL_PREDICATE` 自己帶 `status IN (…)`，否則 SQLite 不會用 partial index。`PRAGMA optimize`（`analysis_limit=1000`）啟動後跑一次、之後每 24 小時一次（`runners/db_optimize.rs`）。`/api/state` 超過 200 ms 寫一行 `slow /api/state`，附各段毫秒（`state_timing.rs`）。
 - **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor 的 migration），不升級更舊的檔案；
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
   **trigger 例外**（issue #186）：內容由程式產生的守衛（`turns_status_transition`、`supervisor_assignments_status_transition`，

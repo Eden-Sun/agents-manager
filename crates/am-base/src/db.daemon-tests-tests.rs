@@ -1338,6 +1338,12 @@
     /// 兩者都移除 #1944 B 的 api_bot 表，並把 `bots.kind` CHECK 還原成四種（agy 之前不含 claude-api）。
     /// 最後以該版本的歷史 pin 核對，確定真的是那個版本的 schema，而不只是版本號。
     /// 試跑（v86）之前的排程表：去掉 `schedule_dry_run_requests`，`source` 的 CHECK 還原成沒有 'dry_run'。
+    /// `turns` 的 partial index（SCHEMA 111 才有）：歷史 fixture 不該帶著它。
+    async fn drop_turn_lane_indexes(conn: &mut sqlx::SqliteConnection) {
+        sqlx::query("DROP INDEX IF EXISTS turns_queued_lane").execute(&mut *conn).await.unwrap();
+        sqlx::query("DROP INDEX IF EXISTS turns_active_status").execute(&mut *conn).await.unwrap();
+    }
+
     async fn drop_dry_run_schema(conn: &mut sqlx::SqliteConnection) {
         sqlx::query("DROP TABLE schedule_dry_run_requests").execute(&mut *conn).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS kind_prefs").execute(&mut *conn).await.unwrap();
@@ -1382,6 +1388,7 @@
         sqlx::query("DROP TABLE IF EXISTS ledger_items").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
+        drop_turn_lane_indexes(&mut *tx).await;
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&mut *tx).await.unwrap();
@@ -1557,6 +1564,7 @@
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
         sqlx::query("ALTER TABLE turns DROP COLUMN stop_reason").execute(&pool).await.unwrap();
+        drop_turn_lane_indexes(&mut *pool.acquire().await.unwrap()).await;
         drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;
         {
             let mut conn = pool.acquire().await.unwrap();
