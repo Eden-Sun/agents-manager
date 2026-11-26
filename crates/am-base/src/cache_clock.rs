@@ -199,6 +199,8 @@ pub use crate::db::predicates::{
 /// 「不用保溫」旗標，以及最近一次保溫回覆（完成的保溫回合，且之後沒有非保溫回合）。
 /// **熱壓不算讓 cache 變熱**（使用者 2026-10-05）：熱壓之後視為涼掉，所以比最近一次熱壓訊息早的保溫不再算——
 /// 晶片從熱壓那刻起顯示涼，直到真的活動重新計時（新的保溫時間自然比熱壓晚）。
+/// 兩個保溫欄位各自只算一次最大值再比較（「比門檻大的最大值」＝「最大值比門檻大時的最大值」；「之後沒有非保溫回合」＝「最新的保溫回合比最新的非保溫回合晚」），
+/// 配 `turns_keep_warm`／`messages_system_conv` partial index：以前子查詢逐列重算，長對話一段就幾十 ms。
 static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     let kw_k = keep_warm_crid_sql("k.client_request_id");
     let kw_u = keep_warm_crid_sql("u.client_request_id");
@@ -207,20 +209,22 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     let any_note = any_compact_note_sql("m.content");
     format!(
         "SELECT c.bot_id, t.status, t.completed_at,
-       NULLIF(COALESCE((SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
-                         WHERE k.conversation_id = c.id AND {kw_k}
-                           AND k.status IN ('in_flight','completed','completed_fallback')
-                           AND COALESCE(k.completed_at, k.created_at) > COALESCE((SELECT MAX(m.created_at) FROM messages m
-                                WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')), ''), '') AS kept_warm_at,
+       NULLIF((SELECT CASE WHEN mk > COALESCE(w, '') THEN mk END FROM (
+                 SELECT (SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
+                          WHERE k.conversation_id = c.id AND {kw_k}
+                            AND k.status IN ('in_flight','completed','completed_fallback')) AS mk,
+                        (SELECT MAX(m.created_at) FROM messages m
+                          WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}) AS w)), '') AS kept_warm_at,
        (SELECT NULLIF(MAX(m.created_at), '') FROM messages m WHERE m.conversation_id = c.id AND m.role = 'system' AND {any_note}
           AND m.created_at > t.created_at) AS compacted_at,
        t.cache_ttl_secs AS cache_ttl_secs,
        EXISTS(SELECT 1 FROM keep_warm_skip s WHERE s.bot_id = c.bot_id) AS keep_warm_skip,
-       (SELECT COALESCE(k.completed_at, k.created_at) FROM turns k
-         WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')
-           AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.conversation_id = c.id
-                             AND (u.client_request_id IS NULL OR NOT {kw_u}) AND u.rowid > k.rowid)
-         ORDER BY k.rowid DESC LIMIT 1) AS keep_warm_replied_at
+       (SELECT CASE WHEN kr > COALESCE(ur, 0) THEN ka END FROM (
+          SELECT kr, ka, (SELECT MAX(u.rowid) FROM turns u WHERE u.conversation_id = c.id
+                            AND (u.client_request_id IS NULL OR NOT {kw_u})) AS ur
+            FROM (SELECT k.rowid AS kr, COALESCE(k.completed_at, k.created_at) AS ka FROM turns k
+                   WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')
+                   ORDER BY k.rowid DESC LIMIT 1))) AS keep_warm_replied_at
      FROM conversations c
      JOIN turns t ON t.id = (SELECT id FROM turns WHERE conversation_id = c.id AND status != 'queued'
                               AND NOT (status = 'failed' AND delivery = 'failed')

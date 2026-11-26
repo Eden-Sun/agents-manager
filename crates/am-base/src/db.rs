@@ -733,6 +733,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // turn 的停止原因（2026-11-26，issue #2218）：`turns.stop_reason`，回合被呼叫上限或軟時限提早收尾時寫入，排程據此判未完成。
     (110, "faa899d4cb32f7de"),
     (111, "7ccc79bda6fd7d45"),
+    // 最近回合查詢的保溫與系統訊息 partial index（2026-11-26）：`turns_keep_warm`、`messages_system_conv`。
+    (112, "56f8895dd103439d"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1025,6 +1027,14 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         .execute(&mut *tx)
         .await
         .context("index turns active status")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS turns_keep_warm ON turns(conversation_id, completed_at) WHERE (client_request_id LIKE 'keep-warm:%' OR client_request_id LIKE 'keepalive:%')")
+        .execute(&mut *tx)
+        .await
+        .context("index turns keep warm")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS messages_system_conv ON messages(conversation_id, created_at) WHERE role = 'system'")
+        .execute(&mut *tx)
+        .await
+        .context("index messages system")?;
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_source_event ON turns(source_event_id) WHERE source_event_id IS NOT NULL")
         .execute(&mut *tx)
         .await
