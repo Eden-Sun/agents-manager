@@ -25,17 +25,6 @@
 - **2c1ac676b StaleFence／StaleRevision ✅（部分）**：typed error 取代字串比對，錯誤文字維持一致。`SaveDiag` 只放 id 與數字，不放 prompt 或金鑰，符合注釋。未讀完 journal 的 2c1ac676b 其餘部分。
 - ✗ 其餘約 14 個 api_bot fix 未讀（列在 `git log --grep api.bot` 的結果裡）。
 
-## 4. 網頁 98 個 commit（✗ 未讀）
-
-近 3 週 `web/` 共 330 個 commit，範圍內 98 個沒有逐一對照，也沒有做 UI 截圖。這一段**未完成**，需要另派（建議分 2–3 批，各看一段 `git log` 的使用者可見改動）。
-
-## 結論
-
-- 有具體觸發情境、可立即處理的：無高嚴重度項目。
-- 需要使用者確認的：1801dad13 的總上限是否真的存在（1 項）；32036abb1 在 quarantine 下回 ActiveRun 是否可接受（1 項）。
-- 候選（低）：93ac0fb18 SQL 判準寬、68eb5cc55 游標不可見時的 Down、has_prompt_cue 的 PageUp/PageDown 寬鬆規則。
-- 未覆蓋：web 98 個 commit、api_bot 其餘約 14 個 fix、d143c2bc3 與 2c1ac676b 的完整 diff。本報告**不完整**，不應視為 #2214 的完成版。
-
 ## 4. 網頁 commit 前半（#2214 補審）
 
 範圍：`git log --since=2026-11-11 --reverse origin/main -- web/` 的前一半，114 個 commit（`e419f291d..e521fb229`）。唯讀。
@@ -66,3 +55,115 @@
 - 有具體觸發、可立即處理：#1（已開 #2216）、#2（已開 #2217）。
 - 需要使用者裁示：#4（html 同源執行）、#5（最近刪除的替代入口）。
 - 未完成：草稿／附件、排程卡片與窄螢幕的功能面（見覆蓋）。
+
+## 5. 網頁 commit 後半（#2214 補審，`1bef36e26..a14d7e58e`，114 個）
+
+### 覆蓋
+
+- **精讀**：28131f39c、1e11d9d37＋ec95c9678、d8e4167fc、aec4ef485（連同 3205b0116 的脈絡）、3f352a446、c6c3e1e09＋bba9cb87b、7953bcc71、d6c524d03、43e7507f8、f3c957e63、bb3baa388。
+- **抽讀**：額度列系列（773eaeb34、5215e2c72、8bbf49f04、913f27917、b873e6eb9、f5698492f、9587622c3）。
+- **未讀**：其餘約 90 個 feat／refactor／test 只看標題與 diff 大小。**未讀但建議優先**：9e5d9d06a（執行者群集「全部刪除」）、3f352a446 的對話框細節、ledger／translate 複盤系列（fabdd9748、e8766990d、85a564f41、42219a58e）。
+
+### 發現
+
+| # | 位置 | 說明 | 嚴重度／信心 | 處理 |
+|---|---|---|---|---|
+| 1 | 28131f39c（去除 web 一般註解） | 同時刪掉 64 行 `i18n-ignore` 標記（約 40 檔，例 PreviewPanel.tsx 9 行、runtimeDrift.ts 9 行、QuotaStrip.tsx 7 行）。`findHardcodedCjk`（`web/src/lib/i18n/i18nScan.ts`）只給 `i18n-report` 用、不是 gate，所以影響是報表把刻意不翻的行（假資料、協定標記）全列為「寫死中文」。 | 低／高 | 不開 issue；建議把標記補回這些行。 |
+| 2 | 1e11d9d37＋ec95c9678（手機前景抑制推播） | `phone_in_foreground()`（`daemon/src/webpush.rs:500`）為真時，`broadcast`（`webpush.rs:240`）丟掉**所有非 `close` 推播**，且被抑制的**不補送**；排程失敗與 ops 告警同樣受影響。手機頁面 90 秒內持續回報 visible 即抑制。若鎖屏後頁面仍回報 visible（iOS／Android 行為未驗），推播會被長期吞掉。 | 中／低（需實機） | 不開 issue；待實機：鎖屏後 `visibilitychange` 與 presence 是否停送。 |
+| 3 | aec4ef485＋3205b0116（執行者單顆刪除不再確認；移除「最近刪除」頁） | 直接 `removeBot`，無確認框。後端 `guard_bot_delete`（`daemon/src/supervisor_owned.rs:59`）會擋掉被排程引用的 bot；前端也會先查排程。但最近刪除頁一併移除，網頁上**沒有還原路徑**（DB 仍是軟刪除）。 | 低；需使用者裁示（同 §4 #5） | 列入裁示。 |
+| 4 | 7953bcc71（Claude 模型縮寫） | `opu-5.5`、`son-5.5`、`hai-5.5`、`fab-5.2`；只影響顯示，可讀性差。 | 低／高（主觀） | 不開 issue。 |
+| 5 | 43e7507f8（換版橫幅） | 文案「請關閉後重新開啟」，按鈕是「重新載入」（`StaleBundleBanner.tsx`），文案與行為不一致。 | nit／高 | 不開 issue。 |
+| 6 | 額度列系列（773eaeb34、5215e2c72、b873e6eb9、f5698492f、9587622c3 等，至少 7 個 commit 反覆改收合與量測） | 最後狀態有 jsdom 測試，但 jsdom 不做真版面；桌機窄寬與手機 390px 沒有截圖證據。 | 低／中（無具體觸發） | 不開 issue；建議截圖確認。 |
+| 7 | f3c957e63（agy 基準複本清除） | `remove_script`（`crates/am-lifecycle/src/lifecycle/agy_session.rs:281`）以 `rm -rf` 刪路徑，路徑由 DB 的複本 id 組成。已有「不跟隨 link、只刪指定複本」的測試。 | 低／中 | 建議確認 id 只可能是 ULID。 |
+| 8 | bb3baa388（英文判定 CJK ≤ 1/4） | 中文技術回覆若拉丁字母 ≥ 4 倍 CJK 字，會被判英文而預先翻譯（中譯中）。抽樣三句中文技術句比值 1.5–2.9，未觸發。 | 低／低 | 不開 issue。 |
+
+### 已確認無問題
+
+- d6c524d03（預設帳號改名 ag0）：舊資料 `agy` 名稱照解析，有測試。
+- d8e4167fc（新模型推播）：第一次只記 seen 不推；抓取失敗不動 seen；開關關閉仍更新 seen。
+- 3f352a446（從本機複製身份）：只複製設定與 alias，不碰 token 與登入檔（`docs/UI-DECISIONS.md` 明載）。
+- c6c3e1e09＋bba9cb87b（一鍵升級＋重啟）：確認框列出要安裝、要重啟、忙碌中的排程；全部安裝成功才重啟；忙的 bot 排程閒下來重啟。
+
+## 6. api_bot 其餘 fix（取代 §3；`grep -E '^[0-9a-f]+ fix'` 扣掉已讀）
+
+`git log --since=2026-11-11 --grep 'api.bot\|openai-api'` 中 `fix` 前綴共 30 個，扣掉 1801dad13、32036abb1、2c1ac676b 之後 **30 個都看過**（其中 4 個只讀到關鍵段落，已註明）。
+
+| sha | 結論 |
+|---|---|
+| 598caf7da 圖片／PDF 不再 400 | ✅ 只擋 bot 請教帶附件；使用者附件交 native 驗格式與大小。 |
+| 797a8f2fd 撞上限正常完成 | ⚠ 結果可能被判「任務成功」→ **#2218** |
+| 41172e5f0 每小時上限不限使用者回合 | ⚠ 排程回合也標成 user 類、繞過上限 → **#2219** |
+| 76466db1e 明確拒絕收掉 api_pending | ✅ `definitive_rejection`：4xx（408 除外）、429、529 才算確定沒處理；逾時、斷線仍 unknown。 |
+| b0eb6a29a owner failed 後結算 api_pending | ✅ 規則集中於 `pending_settled_after_failed_owner`；tool_pending 永不放寬。注意：結算後下一回合重送同一批訊息即重新計費（attempt 保留 unknown 預留，偏保守）。 |
+| 8f93e251a 壓縮後修剪＋增量上界 | ✅ 上界取 `min(整包 bytes+8192, 前次 usage＋增量)`，前次 usage 含 cache 讀寫，壓縮回應排除。 |
+| 1439f83b9 壓縮 iterations 驗證與計價 | ✅ 有 iterations 時逐項讀取，缺欄位 `UntrustedUsage`。 |
+| 2bcc1aa07 thinking 綁定丟棄 | ⚠ **需裁示**：所有請求一律帶 `thinking: adaptive` 與 `block_binding`，先前只有 Fable 帶（測試原本斷言 Opus 不帶 thinking）。Opus 5.5 因此開始思考，output 計費與延遲上升，commit 訊息未提。另加 beta header `thinking-binding-controls-2026-08-01`，外部行為本環境未驗證。 |
+| cfdf2f061 壓縮 iteration 計價 | ✅ cache 讀寫依欄位計價，有測試。 |
+| f6243f1b2 凍結 system prompt | ⚠ 未逐段讀（753 行）。看到 checkpoint 有效性判斷新增 `system` 欄位。 |
+| b48e818ce 保留 4xx/5xx 細節、前次用量估預留 | ⚠ 只讀到 envelope 帶 `previous_response` 與 `failure_explanation` 改動（481 行，未逐段）。 |
+| de45f30ec claude-api fast 設定可存 | ✅ 寫入 config 與 DB，有測試。 |
+| ae764ef02 母子模式頂層對頂層請教 | ✅ 走 `api_bot_consultable` 政策；非 bot dispatch 維持舊判斷。 |
+| a7ba29812 openai-api 網頁與傳輸層收尾 | ✅ `cache_ttl` 對 openai-api 回 `cache_ttl_unsupported_for_kind`，不再誤報 api_bot_only。 |
+| ff8c39dbd 測試 import 修正 | ✅ 只動測試模組。 |
+| 7b700a406 送 prompt 不重複 start | ✅ 回 `api_run_already_active`，與 32036abb1 同一路徑。 |
+| 153bf28ff 模型清單單一來源 | ✅ `openai_api_efforts_for_model` 單一來源；provider 建不起來回具名錯誤。 |
+| 4f86728c0 設定頁單回合上限 | ✅ 0 拒絕、null＝不設（同 1801dad13 題）。 |
+| 6240aa16a openai 串流進度與 Claude 一致 | ✅ 有 paced server 測試。 |
+| 4dc72dafb completed 缺 usage 等 | ✅ 缺 usage 回 `MissingUsage`；預留上界用 wire bytes＋8192（bytes ≥ tokens，偏保守）。 |
+| fef09ef42 終態後雜訊、Luna 長文價 | ✅ 終態後事件不解析；長文價門檻 272k、12h 快取寫入價。計價數字未對官方價表核對。 |
+| 682bdbde7 串流中途 error → StreamAborted | ✅ 不當成確定拒絕，計費保守。 |
+| 3266526c5 強制中斷結清整批 tool_result | ✅ 有測試。 |
+| a85c5bb38 owner 無 receipt 不隔離全部 bot | ✅ 有 `owner_settled` 判斷與測試。 |
+| be3ad399f 壓縮後重啟不隔離全部 bot | ✅ 壓縮前的工具 id 不再算未結清（`declared_in_responses`）。 |
+| 62ab6d042 sweeper 不動進行中回合 | ⚠ 看了 `has_live_turn` 與 stale reserved 只算帳務；generation 圍欄細節未逐段讀。 |
+| 74ecebdb4、49e013091 換模型後可接續 | ✅ 換模型先 `prove_on`，不支援才 409 `api_model_changed`。依賴 drop_block 處理舊 thinking 綁定（見 2bcc1aa07）。 |
+| 9425ca408 回應內容不合法仍記 recorded | ✅ `invalid_content_reason` 檢查 model、tool 數（>32）、重複 tool id。 |
+
+## 7. d143c2bc3 對 fixture（#2123 相關，`tui_prompts.rs`）
+
+**fixture 現況**：實機 2.1.326 fixture 只有 `claude-2.1.326-failed-empty-hint.ansi`、`claude-2.1.326-failed-typed.ansi`、`claude-2.1.326-trust.ansi`（9c3165313）。**沒有** queued 與 plan 卡片的實機擷取。
+
+| d143c2bc3 內容 | 現況（origin/main） | 判定 |
+|---|---|---|
+| `norm_line` 去掉 `✘⚠✔` 前綴 | 保留 | ✅ 沒有 fixture 反證。 |
+| `composer_is_idle` 的 `❯`＋placeholder 分支、`awaits_input` 同樣分支 | **已撤回**（7d4c38a2d）。原因：含 try／retry／`/help` 的使用者草稿被當成空框。`is_claude_placeholder` 已無引用。 | ✅ 回歸已修。 |
+| 空框失敗提示判讀 | 以實機 fixture 重做（9c3165313）：dim 字看樣式，plain 只認完全相等。 | ✅ |
+| `is_status_chrome` 加 `Queued`／`queued` | 保留，無 2.1.326 實機 queued 畫面（`claude-2.1.287-bash-with-held-queued.txt` 是舊版）。`starts_with("queued")` 也會把使用者草稿開頭為 queued 的行當狀態列忽略。 | ⚠ 未驗證，低。 |
+| `has_prompt_cue` 加 `trust this folder`、`trust the contents`、`use arrow keys` | 保留；`screen_has_answerable_prompt` 先看 `composer_is_idle`，空框時不看提示字，風險低。 | ✅ |
+| `is_plan_approval_dialog`（+ `permission_prompt` 回 `"Plan"`） | 文字來自 changelog（"Yes, and switch to default (ask each time) for this session"／"No"）。測試畫面是合成的，且選項**無編號**。若實機有 `1.` 編號，`line_starts_with` 失敗，卡片不被辨識。 | ⚠ 需實機 plan 卡片 fixture。 |
+| 測試 `TRUST_PROMPT`（合成） | 文字是 "Do you trust the contents of this project?"＋"Settings files that will be loaded:"，與實機 2.1.326 信任畫面（"Quick safety check…"，`claude-2.1.326-trust.ansi`）不同。測試仍過，因為其他 cue 命中。 | ⚠ 低：合成測試不忠實；真實畫面由 9c3165313 釘住。 |
+| 符號前綴的 switch-model 測試（合成） | 依 norm_line 規則通過 | 低。 |
+
+## 結論（完整版，2026-11-26；取代前文 §3、§4 原結論）
+
+**已開 issue**（本輪新增）
+
+- #2216 Bot 設定「待套用」橫幅英文仍中文（前半 §4 #1）
+- #2217 成本總覽分類色寫死 hex，深色不跟 token（前半 §4 #2）
+- #2218 撞 API 呼叫上限的排程可能被判「任務成功」（後半 §6，797a8f2fd）
+- #2219 排程回合繞過每小時請求數上限（後半 §6，41172e5f0）
+
+**需使用者裁示**
+
+- html 同源執行（前半 §4 #4）：121ba320a 已寫明接受風險，請重新確認威脅模型。
+- 「最近刪除」頁移除後的還原入口（前半 §4 #5、後半 §5 #3）。
+- Opus 5.5 是否應開 adaptive thinking（§6 2bcc1aa07）：先前不帶，現在每回合帶，計費與延遲會變。
+- claude-api 與 openai-api 的總上限、每小時上限預設都不設（§6 41172e5f0、1801dad13）：若接受，請在文件標明。
+
+**待實機**
+
+- 手機前景推播抑制（§5 #2）：鎖屏後是否仍抑制、是否吞掉排程失敗。
+- plan 卡片與 queued 的 2.1.326 實機 fixture（§7）。
+- 額度列系列改版（§5 #6）：桌機窄寬與手機 390px 截圖。
+
+**候選（低，不開 issue）**
+
+- 93ac0fb18 SQL 判準寬；68eb5cc55 游標不可見時仍送 Down；has_prompt_cue 的 PageUp／PageDown 寬鬆規則（前半）。
+- 28131f39c 遺失 64 行 `i18n-ignore`（§5 #1）；7953bcc71 縮寫（#4）；43e7507f8 文案（#5）；bb3baa388 門檻（#8）；f3c957e63 rm 路徑（#7）。
+
+**未覆蓋（本報告仍不完整，#2214 不應視為完成）**
+
+- 網頁前半：草稿與附件、排程卡片、窄螢幕逐段 diff（前半 §4 已列）。
+- 網頁後半：約 90 個 feat／refactor／test 只看標題；優先未讀 9e5d9d06a（執行者「全部刪除」）與 ledger／translate 複盤系列。
+- api_bot：f6243f1b2、b48e818ce、62ab6d042 未逐段讀（§6 已標）。
+- 前文 §1–§3 的「未讀」標記已由 §6 取代，§3 標題保留原樣未改。
