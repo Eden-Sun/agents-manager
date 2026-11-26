@@ -23,6 +23,10 @@ const CUT_CONFIRM_40: &str = include_str!("claude_2.1.332_rewind_confirm_cut_40c
 const CUT_CONFIRM_60: &str = include_str!("claude_2.1.332_rewind_confirm_cut_60cols.txt");
 const FULL_CONFIRM_80: &str = include_str!("claude_2.1.332_rewind_confirm_full_80cols.txt");
 const CUT_MENU_60: &str = include_str!("claude_2.1.332_rewind_menu_cut_60cols.txt");
+const WIDE_CONFIRM_210: &str = include_str!("claude_2.1.33x_rewind_confirm_wide_cut_mark.txt");
+const WIDE_MENU_210: &str = include_str!("claude_2.1.33x_rewind_menu_wide_cut_mark.txt");
+/// 實機（claude 2.1.33x，m4p，pane 寬約 210）：目標是三行，第二行是網址；網址網址不變，`…` 單獨成一行。
+const THREE_LINE_TARGET: &str = "查\nhttps://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE0123456789abcdEFGH/edit?gid=4#gid=4\n是我要給錠嵂的，是否合理";
 /// 實機（claude 2.1.332，tmux 40／60／80 欄）倒回確認頁的目標：單行、雙空白、超長網址。網址是假的。
 const LONG_URL_TARGET: &str = "查  https://docs.google.com/spreadsheets/d/1FAKEfakeFAKEfakeFAKEfakeFAKE0123456789abcdEFGH/edit?gid=4#gid=4  是我要給錠嵂的，是否合理";
 const REFILLED: &str = include_str!("claude_2.1.280_rewind_restored_composer_refilled.txt");
@@ -124,6 +128,36 @@ fn a_narrow_pane_confirm_cut_with_an_ellipsis_matches_by_prefix() {
         assert!(c.quoted.last().unwrap().ends_with('…'));
         assert!(confirm_matches(&c.quoted, LONG_URL_TARGET), "{cols} 欄的截斷頁要對得上");
     }
+}
+
+/// 寬 pane（2.1.33x 實機）：截斷記號 `…` 單獨成一行，前面的網址完整。前綴是網址，不是只有「查」。
+#[test]
+fn a_wide_pane_confirm_with_a_lone_ellipsis_line_matches_the_three_line_target() {
+    let c = parse_confirm(WIDE_CONFIRM_210).expect("確認頁");
+    assert_eq!(c.quoted.len(), 3, "{:?}", c.quoted);
+    assert_eq!(c.quoted.last().map(String::as_str), Some("…"));
+    assert!(confirm_matches(&c.quoted, THREE_LINE_TARGET));
+    let other_url = THREE_LINE_TARGET.replace("1FAKEfakeFAKEfakeFAKEfakeFAKE", "1OTHERotherOTHERotherOTHER");
+    assert!(!confirm_matches(&c.quoted, &other_url), "網址不同就不是同一則");
+    assert!(!confirm_matches(&quoted("查\n…"), THREE_LINE_TARGET), "只剩一個字的前綴不算");
+}
+
+/// 寬 pane 的選單：多行的只顯示第一行，後面接 `…`（`查 …`）。第一行對上，確認頁才是那道防線。
+#[test]
+fn the_wide_pane_menu_entry_shows_the_first_line_and_matches() {
+    let entry = WIDE_MENU_210.lines().map(str::trim).find(|l| l.starts_with("查")).expect("選單列");
+    assert_eq!(entry, "查 …");
+    assert!(entry_matches(entry, THREE_LINE_TARGET));
+    assert!(!entry_matches(entry, "嗨\n是我要給錠嵂的"), "第一行不同");
+}
+
+/// 選項和標題都被捲掉，只剩說明句（2.1.33x 的新字樣）也認得出確認頁。
+#[test]
+fn the_confirm_note_alone_identifies_the_confirm_page() {
+    let screen = "  Rewind\n\n  Restore to the point before you sent this message:\n\n  │ 查\n  │ …\n  │ (1m ago)\n\n  The conversation goes back to before this message.\n  The code will be unchanged.\n";
+    let c = parse_confirm(screen).expect("只看得到說明句也要認得出");
+    assert_eq!(c.quoted, vec!["查".to_string(), "…".to_string()]);
+    assert!(!confirm_matches(&c.quoted, THREE_LINE_TARGET), "前綴只有一個字");
 }
 
 /// 80 欄沒截斷：整則照常整則對上。

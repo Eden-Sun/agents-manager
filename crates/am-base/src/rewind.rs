@@ -110,14 +110,18 @@ fn is_option_one(line: &str) -> bool {
     body(line).trim_start_matches('❯').trim().starts_with("1. Restore conversation")
 }
 
-/// 確認頁：標題 `Confirm you want to restore…` 或選項 `1. Restore conversation` 至少看得到一個（證明是這個對話框），
-/// 以及說明 `The conversation will be forked.`（或選項）上面緊鄰的 `│` 區塊。pane 矮的時候選項會被擠出畫面、
+/// 確認頁的說明句：舊版 `The conversation will be forked.`，2.1.33x 起是 `The conversation goes back to before this message.`。
+const CONFIRM_NOTES: [&str; 2] = ["The conversation will be forked.", "The conversation goes back to before this message."];
+
+/// 確認頁：標題 `Confirm you want to restore…`、選項 `1. Restore conversation` 或說明句至少看得到一個（證明是這個對話框），
+/// 以及說明句（或選項）上面緊鄰的 `│` 區塊。pane 矮的時候選項會被擠出畫面、
 /// 標題也可能被捲掉，兩個都看不到就不算；區塊上面被捲掉的話對到的只是後半段，比對自然會失敗。
 pub fn parse_confirm(screen: &str) -> Option<Confirm> {
     let lines: Vec<&str> = screen.lines().collect();
-    let anchor = lines.iter().rposition(|l| body(l) == "The conversation will be forked." || is_option_one(l))?;
+    let anchor = lines.iter().rposition(|l| CONFIRM_NOTES.iter().any(|n| body(l) == *n) || is_option_one(l))?;
     let titled = lines[..anchor].iter().any(|l| body(l).starts_with("Confirm you want to restore"));
-    if !titled && !lines.iter().any(|l| is_option_one(l)) {
+    let noted = lines.iter().any(|l| CONFIRM_NOTES.iter().any(|n| body(l) == *n));
+    if !titled && !noted && !lines.iter().any(|l| is_option_one(l)) {
         return None;
     }
     let mut i = anchor;
