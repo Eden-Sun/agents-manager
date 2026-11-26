@@ -77,6 +77,25 @@ test('狀態點：上次失敗＋現在等待 → 黃（waiting）；上次失�
   assert.equal(idle.dot, 'fail', '沒有未結束的 occurrence 才看上次結果：紅')
 })
 
+test('停用但仍有執行中的 occurrence：下次行顯示執行中（附已停用），狀態點不變成灰；沒有 occurrence 才顯示已停用', () => {
+  const now = new Date('2026-11-12T04:00:00Z').getTime()
+  const base = { id: 's', project_id: 'p', bot_id: 'b', name: 'n', prompt: 'x', tz: 'UTC', generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', mode: 'daily', spec: { mode: 'daily', time: '18:01' }, enabled: false, next_due: null } as const
+  const failedLast: Record<string, unknown> = { status: 'failed', outcome: 'failure', started_at: '2026-11-11T18:01:00Z', updated_at: '2026-11-11T18:02:00Z', duration_ms: 1000 }
+  const running: Record<string, unknown> = { id: 'o1', schedule_id: 's', source: 'scheduled', scheduled_for: '2026-11-12T03:00:00Z', generation: 1, bot_id: 'b', prompt: 'x', status: 'queued', waiting_reason: null, turn_status: 'in_flight', running_since: '2026-11-12T03:59:00Z', merged_count: 0, conversation_id: null, turn_id: null }
+  const r = scheduleRowLines({ ...base, open: running, last: failedLast } as never, undefined, now)
+  assert.equal(r.next.label, '現在')
+  assert.match(r.next.text, /^執行中 · 已 .+ · 已停用$/)
+  assert.notEqual(r.dot, 'off', '執行中的停用排程不變灰')
+  assert.equal(r.dot, 'fail', '沿用上次結果的顏色，與同一顆啟用時相同')
+  const pending: Record<string, unknown> = { ...running, status: 'pending', turn_status: null, running_since: null }
+  const waiting = scheduleRowLines({ ...base, open: pending, last: failedLast } as never, undefined, now)
+  assert.equal(waiting.next.text, '等待送出 · 已停用')
+  assert.equal(waiting.dot, 'waiting')
+  const idle = scheduleRowLines({ ...base, open: null, last: failedLast } as never, undefined, now)
+  assert.match(idle.next.text, /^已停用 · 原訂/, '沒有 occurrence 才是已停用')
+  assert.equal(idle.dot, 'off')
+})
+
 test('狀態點：執行中沿用上次結果的顏色（不是黃）', () => {
   const now = new Date('2026-11-12T04:00:00Z').getTime()
   const base = { id: 's', project_id: 'p', bot_id: 'b', name: 'n', prompt: 'x', tz: 'UTC', generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', mode: 'daily', spec: { mode: 'daily', time: '18:01' }, enabled: true, next_due: '2026-11-12T18:01:00Z' } as const

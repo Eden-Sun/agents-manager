@@ -207,12 +207,13 @@ export function scheduleRowLines(s: Schedule, liveTurnStatus: string | undefined
   let next: RowLine
   if (s.bot_available === false) {
     next = { text: t('⚠ 需要重新指定 Bot'), title: t('⚠ 需要重新指定 Bot'), tone: 'needs-rebind' }
+  } else if (s.open) {
+    const base = openText(s.open, liveTurnStatus, nowMs)
+    const text = s.enabled === false ? `${base} · ${t('已停用')}` : base
+    next = { label: t('現在'), text, title: text }
   } else if (s.enabled === false) {
     const c = cadenceText(s)
     next = { text: `${t('已停用')} · ${t('原訂{c}', { c })}`, title: `${t('已停用')} · ${t('原訂{c}', { c })}` }
-  } else if (s.open) {
-    const text = openText(s.open, liveTurnStatus, nowMs)
-    next = { label: t('現在'), text, title: text }
   } else if (!s.next_due) {
     next = { text: t('已完成，沒有下一次'), title: t('已完成，沒有下一次') }
   } else {
@@ -231,7 +232,7 @@ function scheduleLastOk(s: Schedule): boolean {
 }
 
 function rowDot(s: Schedule, liveTurnStatus: string | undefined): RowDot {
-  if (s.enabled === false) return 'off'
+  if (s.enabled === false && !s.open) return 'off'
   if (s.open && !openRunning(s.open, liveTurnStatus)) return 'waiting'
   if (!s.last || s.last.status === 'cancelled') return 'never'
   return scheduleLastOk(s) ? 'ok' : 'fail'
