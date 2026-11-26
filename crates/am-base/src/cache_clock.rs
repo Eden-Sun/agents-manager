@@ -237,8 +237,11 @@ fn last_turn_of(row: LastTurnRow) -> (String, LastTurn) {
 }
 
 /// 每顆 bot 最近一筆送出去的回合，一次讀完（`/api/state` 用，免得逐顆查）。
+/// 軟刪的 bot 不算：呼叫端只看活著的 bot，而對話絕大多數屬於軟刪 bot（2026-11-26 實測 2218 段中只有 68 段是活的），
+/// 每段都要跑好幾個子查詢，全算的話 `/api/state` 光這裡就 400–530 ms。
 pub async fn last_turns_by_bot(pool: &SqlitePool) -> anyhow::Result<HashMap<String, LastTurn>> {
-    let rows: Vec<LastTurnRow> = sqlx::query_as(&LAST_TURN_SQL).fetch_all(pool).await?;
+    let sql = format!("{} WHERE c.bot_id NOT IN (SELECT id FROM bots WHERE deleted_at IS NOT NULL)", *LAST_TURN_SQL);
+    let rows: Vec<LastTurnRow> = sqlx::query_as(&sql).fetch_all(pool).await?;
     Ok(rows.into_iter().map(last_turn_of).collect())
 }
 
@@ -354,7 +357,11 @@ mod tests {
              CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
                                     content TEXT NOT NULL, created_at TEXT NOT NULL);
              CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
-             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5'),('c6','b6');
+             CREATE TABLE bots (id TEXT PRIMARY KEY, deleted_at TEXT);
+             INSERT INTO bots VALUES ('b1',NULL),('b7','2026-10-04T09:00:00.000Z');
+             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5'),('c6','b6'),('c7','b7');
+             INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
+               ('t7x','c7','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL);
              INSERT INTO keep_warm_skip VALUES ('b4','2026-10-04T11:30:00.000Z');
              -- 「之後」以寫入順序（rowid）判：t3 要排在 k1 後面插入。
              INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
@@ -388,6 +395,7 @@ mod tests {
         assert_eq!(all.get("b1"), Some(&b1));
         assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_warm_at.as_deref())), Some(("in_flight", None)));
         assert!(!all.contains_key("b3"));
+        assert!(!all.contains_key("b7"), "軟刪的 bot 不算");
         assert_eq!(b1.keep_warm_replied_at, None);
         let b4 = all.get("b4").unwrap();
         assert_eq!(b4.keep_warm_replied_at.as_deref(), Some("2026-10-04T11:21:00.000Z"));
