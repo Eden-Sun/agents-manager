@@ -1020,6 +1020,7 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
             "Notification": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "Stop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "PreCompact": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            "PostCompact": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],

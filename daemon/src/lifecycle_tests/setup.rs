@@ -328,7 +328,7 @@ mod hook_cmd_parts_tests {
     use crate::lifecycle::setup::write_private;
     /// issue #79：claude 的 `--settings` 要訂 `StopFailure`，daemon 才收得到「回合失敗收尾」的原生訊號；
     /// 既有的兩個 hook 一個都不能掉，三個都指向同一支 hook 指令（分類在 daemon 裡做）。
-    /// issue #1770：`PreCompact` 也訂，壓縮中的標記才有來源。
+    /// issue #1770：`PreCompact` 也訂，壓縮中的標記才有來源；issue #2227：`PostCompact` 也訂，壓縮結束才送得到。
     #[test]
     fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
         let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, true, "Asia/Taipei");
@@ -337,10 +337,10 @@ mod hook_cmd_parts_tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["Notification", "PostToolUse", "PreCompact", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "UserPromptSubmit"],
+            vec!["Notification", "PostCompact", "PostToolUse", "PreCompact", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "UserPromptSubmit"],
             "{hooks:?}"
         );
-        for name in ["SessionStart", "Stop", "StopFailure", "PreCompact", "SubagentStart", "SubagentStop", "PostToolUse", "UserPromptSubmit", "Notification"] {
+        for name in ["SessionStart", "Stop", "StopFailure", "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "PostToolUse", "UserPromptSubmit", "Notification"] {
             let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
         }
