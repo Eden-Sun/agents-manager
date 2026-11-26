@@ -148,6 +148,7 @@ const dict: Dict = {
   "無法導向預覽分頁": "Unable to navigate to preview tab",
   "這顆 bot 交給你的檔案": "Files delivered to you by this bot",
   "bot 給你的檔案": "Files from bot",
+  "無檔案": "No files",
   "重新讀取 bot 給你的檔案": "Reload files from bot",
   "重新讀取（bot 剛放進去的檔案按這裡才會出現）": "Reload (files newly written by bot appear here)",
   "下載 {name}": "Download {name}",

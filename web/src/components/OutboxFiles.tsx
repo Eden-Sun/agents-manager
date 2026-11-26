@@ -35,13 +35,22 @@ export function OutboxFiles() {
     [botId],
   )
 
+  const loading = Boolean(botId) && loadedFor !== botId
+  const quietEmpty = files.length === 0 && !loading && Boolean(botId) && reason === null
+  const headTip = quietEmpty ? (dir ? `${emptyReason(null, true, kept)}\n${dir}` : emptyReason(null, true, kept)) : dir || undefined
+
   return (
-    <section className="outbox-files" aria-label={t("這顆 bot 交給你的檔案")}>
+    <section className={`outbox-files${quietEmpty ? ' compact' : ''}`} aria-label={t("這顆 bot 交給你的檔案")}>
       <div className="outbox-head">
-        <span className="outbox-title" title={dir || undefined}>
+        <span className="outbox-title" title={headTip}>
           {t('bot 給你的檔案')}
         </span>
         {files.length > 0 ? <span className="outbox-count">{files.length}</span> : null}
+        {quietEmpty ? (
+          <span className="outbox-empty-inline" title={headTip}>
+            {t('無檔案')}
+          </span>
+        ) : null}
         <span className="spacer" />
         <button
           type="button"
@@ -54,9 +63,9 @@ export function OutboxFiles() {
           ↻
         </button>
       </div>
-      {files.length === 0 ? (
+      {quietEmpty ? null : files.length === 0 ? (
         <p className={`outbox-empty${reason === LOAD_FAILED ? ' failed' : ''}`} role={reason === LOAD_FAILED ? 'alert' : undefined}>
-          {botId && loadedFor !== botId ? t('讀取中…') : emptyReason(reason, Boolean(botId), kept)}
+          {loading ? t('讀取中…') : emptyReason(reason, Boolean(botId), kept)}
         </p>
       ) : (
         <ul className="outbox-list" role="list">

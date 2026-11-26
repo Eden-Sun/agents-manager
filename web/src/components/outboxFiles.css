@@ -23,8 +23,16 @@
   color: var(--text-faint);
 }
 
+.outbox-files.compact {
+  padding: 6px 8px;
+}
+
 .outbox-title {
   font-weight: 600;
+}
+
+.outbox-empty-inline {
+  opacity: 0.7;
 }
 
 .outbox-count {
