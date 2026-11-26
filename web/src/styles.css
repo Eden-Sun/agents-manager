@@ -3845,3 +3845,13 @@ button.model-tag:hover:not(:disabled) {
 }
 
 .bot-state-reason { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; font-weight: 400; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+@media (width <= 1366px) {
+  .app:has(> .preview-col.rail) > .notices {
+    right: calc(max(12px, env(safe-area-inset-right)) + 40px);
+  }
+
+  .app:has(> .preview-col.rail):has(> .shelf:not(.open)) > .notices {
+    right: calc(max(12px, env(safe-area-inset-right)) + 80px);
+  }
+}

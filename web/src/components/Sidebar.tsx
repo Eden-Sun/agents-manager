@@ -1642,10 +1642,10 @@ export function Sidebar() {
           onClick={() => setOpen('env')}
         >
           <GearIcon /> {t('環境設定')}
-          <span className="disclosure-note">
-            {hosts.length === 0 ? t('本機') : t('本機 + {n}', { n: hosts.length })}
-            {hostsDown > 0 ? t('・ {n} 未連線', { n: hostsDown }) : ''}
-            {t('・ 身份 {n}', { n: identityCount })}
+          <span className="disclosure-note env-note">
+            <span className="env-note-part">{hosts.length === 0 ? t('本機') : t('本機 + {n}', { n: hosts.length })}</span>
+            {hostsDown > 0 ? <span className="env-note-part">{t('・ {n} 未連線', { n: hostsDown }).trim()}</span> : null}
+            <span className="env-note-part">{t('・ 身份 {n}', { n: identityCount }).trim()}</span>
           </span>
         </button>
       </div>

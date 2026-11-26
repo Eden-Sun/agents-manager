@@ -92,3 +92,10 @@
     max-width: 18em;
   }
 }
+
+@media (width >= 641px) and (width <= 1024px) {
+  .bot-head .main-title {
+    flex: 0 1 auto;
+    max-width: 14em;
+  }
+}
