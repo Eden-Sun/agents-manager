@@ -8,7 +8,8 @@
 //! agy 沒有原生 fork：鎖基準時把對話複成一份凍結的複本（`agy_session::clone_conversation`），基準＝複本的對話 id；
 //! 執行時再從複本複出新對話、`--conversation=<新 id>` 接續（`start.rs` 的 fork 分支），複本與基準都不會被改。
 //! 儲存排程勾 `from_base` 時目標 bot 沒有基準：[`spawn_ensure`] 在背景自動製作（有 session 就鎖，沒有就啟動 bot 取得 session 再鎖），
-//! 儲存請求不等它。到點時基準還在建立就延後（`base_building`），建立失敗就該次 failed（`base_snapshot_create_failed`，可依重試額度重試）。
+//! 儲存請求不等它。到點時沒有基準、也沒在建立：延後並開始建立（daemon 重啟、清除基準後都靠這條自動恢復）；建立中就延後（`base_building`）；
+//! 建立失敗後 [`BUILD_COOLDOWN`] 內到點的排程直接 failed（`base_snapshot_create_failed`，可依重試額度重試），冷卻過了才再建，避免每個 tick 狂建。
 
 use super::runner;
 use super::store::{self, Occurrence, Schedule};
@@ -172,9 +173,17 @@ fn building() -> &'static Mutex<std::collections::HashMap<String, usize>> {
 }
 
 /// 每顆 bot 最近一次自動製作失敗的訊息；製作成功時清掉。
-fn last_failure() -> &'static Mutex<std::collections::HashMap<String, String>> {
-    static FAILED: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+fn last_failure() -> &'static Mutex<std::collections::HashMap<String, (String, std::time::Instant)>> {
+    static FAILED: OnceLock<Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>> = OnceLock::new();
     FAILED.get_or_init(Default::default)
+}
+
+/// 同一顆 bot 製作失敗後，這段時間內到點的排程直接 failed、不再重建（避免每個 tick 狂建）。
+const BUILD_COOLDOWN: Duration = Duration::from_secs(600);
+
+/// 冷卻期內最近一次製作失敗的訊息。
+fn recent_failure(bot_id: &str) -> Option<String> {
+    last_failure().lock().unwrap().get(bot_id).filter(|(_, at)| at.elapsed() < BUILD_COOLDOWN).map(|(m, _)| m.clone())
 }
 
 /// 基準的建立狀態：`building`（製作中），或 `failed`（最近一次失敗，附訊息）；都不是就是 None。
@@ -182,13 +191,19 @@ pub(super) fn build_state(bot_id: &str) -> Option<(&'static str, Option<String>)
     if building().lock().unwrap().get(bot_id).is_some_and(|n| *n > 0) {
         return Some(("building", None));
     }
-    last_failure().lock().unwrap().get(bot_id).map(|m| ("failed", Some(m.clone())))
+    last_failure().lock().unwrap().get(bot_id).map(|(m, _)| ("failed", Some(m.clone())))
 }
 
 #[cfg(test)]
 pub(super) fn set_building_for_test(bot_id: &str, on: bool) {
     let mut b = building().lock().unwrap();
     if on { *b.entry(bot_id.to_string()).or_default() += 1 } else { b.remove(bot_id); }
+}
+
+#[cfg(test)]
+pub(super) fn set_failure_for_test(bot_id: &str, msg: &str, age: Duration) {
+    let at = std::time::Instant::now().checked_sub(age).unwrap();
+    last_failure().lock().unwrap().insert(bot_id.to_string(), (msg.to_string(), at));
 }
 
 async fn progress(app: &Arc<App>, bot_id: &str, state: &str, message: Option<&str>) {
@@ -246,12 +261,29 @@ fn failure_message(e: &LcError) -> String {
 
 /// 在背景製作基準，不擋呼叫端（儲存排程、改綁、重試都走這裡）。已有基準或已在製作的，後到的會等同一把鎖、不重做。
 pub(super) fn spawn_ensure(app: &Arc<App>, bot_id: &str, project_id: &str) {
+    // 計入「製作中」要在 spawn 當下做，不然下一個 tick 會看不到，又開一份。
+    begin_build(bot_id);
     let (app, bot_id, project_id) = (app.clone(), bot_id.to_owned(), project_id.to_owned());
     tokio::spawn(async move {
         if let Err(e) = ensure(&app, &bot_id, &project_id).await {
             tracing::warn!(bot = %bot_id, error = ?e, "base snapshot: background build failed");
         }
+        end_build(&bot_id);
     });
+}
+
+fn begin_build(bot_id: &str) {
+    *building().lock().unwrap().entry(bot_id.to_string()).or_default() += 1;
+}
+
+fn end_build(bot_id: &str) {
+    let mut b = building().lock().unwrap();
+    if let Some(n) = b.get_mut(bot_id) {
+        *n -= 1;
+        if *n == 0 {
+            b.remove(bot_id);
+        }
+    }
 }
 
 /// 勾 `from_base` 時目標 bot 沒有基準就自動製作（不回 400）。有 native session 就鎖；完全沒有就照正常方式啟動一次、
@@ -262,24 +294,14 @@ async fn ensure(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<(), Lc
     if get(&app.db, bot_id).await.map_err(up)?.is_some() {
         return Ok(());
     }
-    *building().lock().unwrap().entry(bot_id.to_string()).or_default() += 1;
     let out = ensure_locked(app, bot_id, project_id).await;
-    {
-        let mut b = building().lock().unwrap();
-        if let Some(n) = b.get_mut(bot_id) {
-            *n -= 1;
-            if *n == 0 {
-                b.remove(bot_id);
-            }
-        }
-    }
     match &out {
         Ok(true) => {
             last_failure().lock().unwrap().remove(bot_id);
         }
         Ok(false) => {}
         Err(e) => {
-            last_failure().lock().unwrap().insert(bot_id.to_string(), failure_message(e));
+            last_failure().lock().unwrap().insert(bot_id.to_string(), (failure_message(e), std::time::Instant::now()));
         }
     }
     out.map(|_| ())
@@ -332,7 +354,7 @@ async fn ensure_once(app: &Arc<App>, bot_id: &str, project_id: &str) -> Result<b
     lock_latest(app, &bot, "schedule").await.map(|_| true)
 }
 
-/// `DELETE /api/bots/{id}/base-snapshot`：清除基準（沒有也回成功）。仍勾著 `from_base` 的排程之後會 failed（`base_snapshot_missing`）。
+/// `DELETE /api/bots/{id}/base-snapshot`：清除基準（沒有也回成功）。仍勾著 `from_base` 的排程之後到點會重新製作基準並延後，不會失敗。
 pub async fn clear(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(p): Extension<crate::api::RequestPrincipal>) -> Result<Response, LcError> {
     authorize(&app, &p, &id).await?;
     sqlx::query("DELETE FROM bot_base_snapshots WHERE bot_id = ?").bind(&id).execute(&app.db).await.map_err(up)?;
@@ -380,14 +402,14 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         return Ok(false);
     }
     let Some(snap) = get(pool, &bot.id).await? else {
-        match build_state(&bot.id) {
-            Some(("building", _)) => set_wait_reason(app, &sched, occurrence_id, "base_building").await,
-            Some((_, msg)) => {
-                spawn_ensure(app, &bot.id, &bot.project_id);
-                let why = format!("基準快照建立失敗，不在舊 context 執行：{}", msg.unwrap_or_default());
-                fail(app, &sched, &occ, "base_snapshot_create_failed", &why, true).await?;
-            }
-            None => fail(app, &sched, &occ, "base_snapshot_missing", "這顆 bot 沒有基準快照（可能已被清除），不在舊 context 執行", false).await?,
+        if matches!(build_state(&bot.id), Some(("building", _))) {
+            set_wait_reason(app, &sched, occurrence_id, "base_building").await;
+        } else if let Some(msg) = recent_failure(&bot.id) {
+            let why = format!("基準快照建立失敗（冷卻中，不重建），不在舊 context 執行：{msg}");
+            fail(app, &sched, &occ, "base_snapshot_create_failed", &why, true).await?;
+        } else {
+            spawn_ensure(app, &bot.id, &bot.project_id);
+            set_wait_reason(app, &sched, occurrence_id, "base_building").await;
         }
         return Ok(false);
     };

@@ -1229,7 +1229,7 @@ mod from_base {
     }
 
     #[tokio::test]
-    async fn a_due_occurrence_waits_while_the_base_is_building_and_fails_after_a_failed_build() {
+    async fn a_due_occurrence_waits_while_building_and_fails_only_inside_the_build_cooldown() {
         let e = testing::env().await;
         let bot = codex_bot(&e, "cx").await;
         let s = from_base_schedule(&e, &bot.id, 0).await;
@@ -1240,30 +1240,44 @@ mod from_base {
         assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("base_building")), "製作中就延後，不失敗");
         base::set_building_for_test(&bot.id, false);
 
-        base::spawn_ensure(&e.app, &bot.id, &e.project_id);
-        wait_build_failed(&e, &bot.id).await;
+        base::set_failure_for_test(&bot.id, "等不到", std::time::Duration::from_secs(0));
         assert!(!base::dispatch(&e.app, &occ).await.unwrap());
         let (status, error) = status_and_error(&e, &occ).await;
         assert_eq!(status, "failed");
-        assert!(error.unwrap().starts_with("base_snapshot_create_failed"), "製作失敗要講清楚");
+        assert!(error.unwrap().starts_with("base_snapshot_create_failed"), "冷卻中失敗要講清楚");
+        assert_eq!(base::build_state(&bot.id).map(|x| x.0), Some("failed"), "冷卻中不重建");
     }
 
     #[tokio::test]
-    async fn a_missing_base_fails_without_running_in_the_old_context() {
+    async fn a_failed_build_is_retried_on_demand_only_after_the_cooldown() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        base::set_failure_for_test(&bot.id, "等不到", std::time::Duration::from_secs(11 * 60));
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("base_building")), "冷卻過了就重建並延後");
+        assert!(matches!(base::build_state(&bot.id), Some(("building", _))), "重建已開始");
+    }
+
+    #[tokio::test]
+    async fn a_missing_base_is_built_on_demand_and_the_due_run_waits_then_forks() {
         let e = testing::env().await;
         let bot = codex_bot(&e, "cx").await;
         ended_session(&e, &bot.id, "sid-base", None).await;
         let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
         let before = started_args(&e).len();
-        let s = from_base_schedule(&e, &bot.id, 3).await;
+        let s = from_base_schedule(&e, &bot.id, 0).await;
         let occ = pending(&e.app, &s).await;
         assert!(!base::dispatch(&e.app, &occ).await.unwrap());
-        let (status, error) = status_and_error(&e, &occ).await;
-        assert_eq!(status, "failed");
-        assert!(error.unwrap().contains("base_snapshot_missing"));
-        assert_eq!(started_args(&e).len(), before, "不重啟、不在舊 context 送");
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("base_building")), "沒有基準就開始建立並延後，不失敗");
+        assert_eq!(started_args(&e).len(), before, "建立前不重啟、不在舊 context 送");
         assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1);
-        assert_eq!(count(&e.app, "SELECT COUNT(*) FROM turns WHERE conversation_id IN (SELECT id FROM conversations WHERE bot_id = ?)", &bot.id).await, 0);
+        wait_base(&e, &bot.id).await;
+        assert!(base::dispatch(&e.app, &occ).await.unwrap(), "建好後下一輪照常 fork");
+        assert_eq!(&started_args(&e).last().unwrap()[..2], ["fork", "sid-base"]);
     }
 
     #[tokio::test]

@@ -55,6 +55,7 @@ export const OCCURRENCE_LABEL: Record<OccurrenceStatus, string> = {
 
 const WAIT_LABEL: Record<string, string> = {
   bot_busy: msg('Bot 忙碌，前面已有排隊的回合'),
+  base_building: msg('基準快照建立中，建好後照常執行'),
   stopping: msg('Bot 正在停止，停完後再送'),
 }
 
@@ -194,6 +195,7 @@ function openText(o: ScheduleOccurrence, liveTurnStatus: string | undefined, now
     return t('執行中 · 已 {d}', { d: formatDuration(ms) })
   }
   if (o.status === 'pending' && o.waiting_reason === 'bot_busy') return t('等待 Bot（忙碌中）')
+  if (o.status === 'pending' && o.waiting_reason === 'base_building') return t('等待基準快照建立')
   return occurrenceLine(o, liveTurnStatus)
 }
 
