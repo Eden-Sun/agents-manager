@@ -65,7 +65,7 @@ fn after_resource_exhausted(s: &str) -> Option<&str> {
     Some(&rest[colon + "): ".len()..])
 }
 
-const BANNER_MAX_CHARS: usize = 200;
+const BANNER_MAX_CHARS: usize = 300;
 
 /// `usage limit` 桶的橫幅（`You've hit your usage limit. …`、`Claude usage limit reached. …`、`Usage limit reached · …`）：`limit` 之後要接橫幅收尾。
 fn usage_limit_banner(lower: &str) -> bool {
@@ -1266,6 +1266,17 @@ mod quota_limit_tests {
         }
         let long_prose = format!("You've hit your usage limit. {}", "x".repeat(300));
         assert!(!is_quota_exhaustion(&long_prose));
+    }
+
+    /// 上游文案變長（250 字）的真橫幅形狀仍認得；長度上限（[`BANNER_MAX_CHARS`]）以內。
+    #[test]
+    fn a_long_real_banner_under_the_length_cap_is_still_an_exhaustion() {
+        let head = "You've hit your usage limit · resets Sep 20 · ";
+        let filler = "upgrade your plan for more capacity or ask your workspace admin to raise the limit ";
+        let banner: String = format!("{head}{}", filler.repeat(3)).chars().take(250).collect();
+        assert_eq!(banner.chars().count(), 250);
+        assert!(is_quota_exhaustion(&banner), "{banner}");
+        assert!(is_quota_exhaustion(&format!("API Error: {banner}")));
     }
 
     /// 真橫幅（行首、狀態列樣式前綴、`API Error:`／`ERROR:`）在 grok 回覆與 hook 細節裡都要認得。
