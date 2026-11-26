@@ -1148,6 +1148,20 @@ impl AuthQuotaNotifier {
         let mut g = self.login_expiry_sent.lock().unwrap_or_else(|e| e.into_inner());
         g.remove(&(host.to_string(), account.to_string()));
     }
+
+    /// 已經記下、但最後沒有送出（手機前景抑制）的這一次：把 stage 收回，下一輪重新整理時才會再判一次。
+    fn forget_login_expiry(&self, host: &str, account: &str, stage: &'static str) {
+        let key = (host.to_string(), account.to_string());
+        let mut g = self.login_expiry_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if g.get(&key).copied() == Some(stage) {
+            g.remove(&key);
+        }
+    }
+}
+
+/// 手機正在前景時這一次不收（也不記 stage）；其餘照舊去重。
+fn login_expiry_admitted(foreground: bool, n: &AuthQuotaNotifier, host: &str, account: &str, stage: &'static str) -> bool {
+    !foreground && n.admit_login_expiry(host, account, stage)
 }
 
 pub(crate) fn clear_auth_push(host: &str, kind: &str, identity: &str) {
@@ -1171,7 +1185,7 @@ pub(crate) fn spawn_login_expiry_push(app: &Arc<App>, host: &str, account: &str,
     if !auth_enabled(&app.data_dir) {
         return;
     }
-    if !notifier().admit_login_expiry(host, account, stage) {
+    if !login_expiry_admitted(phone_in_foreground(), notifier(), host, account, stage) {
         return;
     }
     let (app, host, account) = (app.clone(), host.to_string(), account.to_string());
@@ -1198,6 +1212,10 @@ pub(crate) fn spawn_login_expiry_push(app: &Arc<App>, host: &str, account: &str,
             )
         };
         let payload = plain_payload(title, &body, &format!("claude_expiry:{host}:{account}:{stage}"), "/");
+        if phone_in_foreground() {
+            notifier().forget_login_expiry(&host, &account, stage);
+            return;
+        }
         let subject = app.cfg.get().await.server.push_subject.clone();
         let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
     });
@@ -2771,6 +2789,23 @@ pub(crate) mod tests {
         assert!(!user_is_watching("b2"));
         assert!(user_is_present());
         clear_presence();
+    }
+
+    #[test]
+    fn a_login_expiry_notice_skipped_for_the_phone_is_not_marked_sent() {
+        let _ = SENDER_TESTS.try_lock();
+        clear_presence();
+        clear_notifier();
+        let n = notifier();
+        record_presence("m1", Presence { bot_id: None, visible: true, idle_secs: 0, mobile: true, received: std::time::Instant::now() });
+        assert!(!login_expiry_admitted(phone_in_foreground(), n, "h", "a", "3d"), "手機在前景：這一次不收");
+        assert!(n.login_expiry_sent.lock().unwrap().is_empty(), "被前景擋下就不記 stage");
+        clear_presence();
+        assert!(login_expiry_admitted(phone_in_foreground(), n, "h", "a", "3d"), "離開前景，下一輪照樣送");
+        assert!(!login_expiry_admitted(false, n, "h", "a", "3d"), "同一 stage 仍去重");
+        n.forget_login_expiry("h", "a", "3d");
+        assert!(login_expiry_admitted(false, n, "h", "a", "3d"), "送出前才被抑制（broadcast 丟掉）→ 收回後可再送");
+        clear_notifier();
     }
 
     #[tokio::test]
