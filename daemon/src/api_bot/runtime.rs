@@ -587,7 +587,13 @@ impl ApiBotRuntime {
         );
         let system = serde_json::Value::String(fresh_system_text.clone());
         let queue_class: Option<String> = sqlx::query_scalar("SELECT queue_class FROM turns WHERE id=?").bind(&key.turn_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?;
-        let hourly_fuse = hourly_fuse_for(queue_class.as_deref(), limits.max_requests_per_hour);
+        let scheduled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schedule_occurrences WHERE turn_id=?) OR EXISTS(SELECT 1 FROM schedule_attempts WHERE turn_id=?)")
+            .bind(&key.turn_id)
+            .bind(&key.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .map_err(|_| ApiBotError::Upstream)?;
+        let hourly_fuse = hourly_fuse_for(queue_class.as_deref(), scheduled, limits.max_requests_per_hour);
         let adapter_limits = super::adapter::AdapterLimits {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
@@ -2067,8 +2073,10 @@ fn map_runner_result(
 }
 
 /// 這一回合適用的每小時請求數上限：使用者發起的回合（`queue_class='user'`）一律不限（0）；其餘（relay、daemon、查不到來源）照設定，設定 0＝不限。
-pub(crate) fn hourly_fuse_for(queue_class: Option<&str>, configured: u32) -> i64 {
-    if queue_class == Some("user") { 0 } else { i64::from(configured) }
+/// 每小時請求數上限（`max_requests_per_hour`）。使用者手打的回合不限；排程觸發的回合（`scheduled`：有 `schedule_occurrences`／`schedule_attempts` 綁著這個 turn）
+/// 佇列類別仍是 user，但也照設定限，否則每分鐘的排程會繞過上限（#2219）。查不到來源照設定。
+pub(crate) fn hourly_fuse_for(queue_class: Option<&str>, scheduled: bool, configured: u32) -> i64 {
+    if queue_class == Some("user") && !scheduled { 0 } else { i64::from(configured) }
 }
 
 /// 回合時限 `turn_timeout_secs` 的兩道期限：軟期限＝時限的 85%（到了不再開始新動作，送一次收尾請求要摘要；
@@ -2683,10 +2691,16 @@ mod hourly_fuse_tests {
 
     #[test]
     fn user_turns_are_never_rate_limited_and_others_follow_the_config() {
-        assert_eq!(hourly_fuse_for(Some("user"), 60), 0, "使用者回合完全不限，即使設定了 60");
-        assert_eq!(hourly_fuse_for(Some("relay"), 60), 60);
-        assert_eq!(hourly_fuse_for(Some("daemon"), 60), 60);
-        assert_eq!(hourly_fuse_for(None, 60), 60, "查不到來源保守照設定");
-        assert_eq!(hourly_fuse_for(Some("relay"), 0), 0, "0＝不限");
+        assert_eq!(hourly_fuse_for(Some("user"), false, 60), 0, "使用者回合完全不限，即使設定了 60");
+        assert_eq!(hourly_fuse_for(Some("relay"), false, 60), 60);
+        assert_eq!(hourly_fuse_for(Some("daemon"), false, 60), 60);
+        assert_eq!(hourly_fuse_for(None, false, 60), 60, "查不到來源保守照設定");
+        assert_eq!(hourly_fuse_for(Some("relay"), false, 0), 0, "0＝不限");
+    }
+
+    #[test]
+    fn scheduled_turns_are_capped_even_though_they_queue_as_user() {
+        assert_eq!(hourly_fuse_for(Some("user"), true, 60), 60, "排程回合佇列類別是 user，也要照上限");
+        assert_eq!(hourly_fuse_for(Some("user"), true, 0), 0, "0＝不限");
     }
 }
