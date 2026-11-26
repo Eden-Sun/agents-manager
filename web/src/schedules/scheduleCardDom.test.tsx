@@ -1,5 +1,6 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { ProjectSchedules } from './ProjectSchedules'
 
@@ -66,4 +67,12 @@ test('日期格式：今天、明天、昨天、7 天內帶星期、跨年加年
   const [row] = await rows([{ ...base, id: 'x', code: 'S9', name: '日期', next_due: '2027-01-05T09:30:00Z', last: null }])
   assert.match(row.textContent ?? '', /下次2027\/01\/05 09:30/)
   assert.ok(row.querySelector('.project-schedule-fact[title]')?.getAttribute('title')?.includes('2027'), 'tooltip 放完整日期時間')
+})
+
+test('排程標題不被右側 Bot 連結擠壓：Bot 移到獨立列、標題只預留選單寬度', async () => {
+  const css = readFileSync(new URL('./schedules.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(css, /\.project-schedule-head\.with-side\s*\{[^}]*padding-right:\s*12em/)
+  const [row] = await rows([{ ...base, id: 'n1', code: 'S1', name: 'WT-上班打卡通知', last: done('success') }])
+  assert.equal(row.querySelector('.project-schedule-side .project-schedule-bot'), null, 'Bot 鈕不在右側浮層裡搶標題寬度')
+  assert.equal(row.querySelector('.project-schedule-name')?.textContent, 'WT-上班打卡通知')
 })

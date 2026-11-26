@@ -21,29 +21,31 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
   return (
     <li className={`project-schedule-item${s.enabled === false ? ' off' : ''}`}>
       {selecting ? <input type="checkbox" aria-label={t('選取排程 {name}', { name: s.name })} checked={selected} onChange={() => onSelect(s.id)} /> : null}
-      {}
-      <button type="button" className="project-schedule-row" title={s.name} onClick={() => onOpen(s.id, s.bot_available === false)}>
-        <span className="project-schedule-head with-side">
-          <span className={`project-schedule-dot ${dot}`} aria-hidden="true" />
-          {s.code ? <span className="project-schedule-code">{s.code}</span> : null}
-          <span className="project-schedule-name">{s.name}</span>
-        </span>
-        <span className={`project-schedule-fact${next.tone ? ' needs-rebind' : ''}`} title={next.title}>
-          <span className="project-schedule-k">{next.label ?? ''}</span>
-          <span className="project-schedule-v">{next.text}</span>
-        </span>
-        <span className="project-schedule-fact" title={last.title}>
-          <span className="project-schedule-k">{last.label}</span>
-          <span className="project-schedule-v">{last.text}</span>
-        </span>
-      </button>
-      {}
-      <div className="project-schedule-side">
+      <div className="project-schedule-body">
+        <button type="button" className="project-schedule-row" title={s.name} onClick={() => onOpen(s.id, s.bot_available === false)}>
+          <span className="project-schedule-head with-side">
+            <span className={`project-schedule-dot ${dot}`} aria-hidden="true" />
+            {s.code ? <span className="project-schedule-code">{s.code}</span> : null}
+            <span className="project-schedule-name">{s.name}</span>
+          </span>
+          <span className={`project-schedule-fact${next.tone ? ' needs-rebind' : ''}`} title={next.title}>
+            <span className="project-schedule-k">{next.label ?? ''}</span>
+            <span className="project-schedule-v">{next.text}</span>
+          </span>
+          <span className="project-schedule-fact" title={last.title}>
+            <span className="project-schedule-k">{last.label}</span>
+            <span className="project-schedule-v">{last.text}</span>
+          </span>
+        </button>
         {s.bot_available !== false && botName ? (
-          <button type="button" className={`project-schedule-bot${s.bot_dedicated === false ? ' warn' : ''}`} title={dedicatedNote ? `${t('執行這個排程的 Bot')}\n${dedicatedNote}` : t('執行這個排程的 Bot')} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
-            <BotIcon /> {botName}
-          </button>
+          <div className="project-schedule-bot-row">
+            <button type="button" className={`project-schedule-bot${s.bot_dedicated === false ? ' warn' : ''}`} title={dedicatedNote ? `${t('執行這個排程的 Bot')}\n${dedicatedNote}` : t('執行這個排程的 Bot')} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
+              <BotIcon /> {botName}
+            </button>
+          </div>
         ) : null}
+      </div>
+      <div className="project-schedule-side">
         <ScheduleRowMenu schedule={s} onOpen={onOpen} onChanged={onTurnChange} />
       </div>
     </li>
