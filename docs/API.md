@@ -2520,7 +2520,7 @@ issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[
     { "id": "codex.config.toml:features.hooks", "action": "merge_key", "severity": "warn",
       "target": "codex/config.toml", "key": "features.hooks", "value": true },
     { "id": "tool.rtk", "action": "install_tool", "severity": "warn", "target": "tool/rtk",
-      "command": "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh" },
+      "command": "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/v1.2.1/install.sh | RTK_VERSION=v1.2.1 sh" },
     { "id": "tool.jq", "action": "manual", "severity": "warn", "target": "tool/jq", "reason": "needs_sudo", "command": "sudo apt install jq" },
     { "id": "claude.cc1.RTK.md", "action": "write_file", "severity": "warn", "target": "claude:cc1/RTK.md" } ] }
 ```

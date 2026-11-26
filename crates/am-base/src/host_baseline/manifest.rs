@@ -92,6 +92,8 @@ struct RawTool {
     #[serde(default)]
     note: Option<String>,
     #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
     install: Option<RawInstall>,
 }
 
@@ -263,15 +265,37 @@ pub struct Install {
     pub darwin: Option<String>,
     pub linux: Option<String>,
     pub linux_sudo: bool,
+    /// 宣告檔釘的版本（`tools.version`）；安裝指令裡的 `{version}` 已代入。
+    pub version: Option<String>,
 }
 
-fn install_command(c: Option<String>, at: &str) -> Result<Option<String>, String> {
+/// 釘版的版本字串（會拼進 sh 指令，只收安全字元；浮動的參照（`latest`、分支名）不收，釘版才有意義）。
+fn tool_version(v: Option<String>, at: &str) -> Result<Option<String>, String> {
+    let Some(v) = v else { return Ok(None) };
+    let safe = !v.is_empty() && v.len() <= 64 && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if !safe {
+        return Err(format!("{at}: a version must be 1..=64 chars of [A-Za-z0-9._-]"));
+    }
+    if matches!(v.to_ascii_lowercase().as_str(), "latest" | "master" | "main" | "head" | "stable") {
+        return Err(format!("{at}: `{v}` is a floating ref; pin an exact release tag"));
+    }
+    Ok(Some(v))
+}
+
+fn install_command(c: Option<String>, version: Option<&str>, at: &str) -> Result<Option<String>, String> {
+    let Some(c) = c else { return Ok(None) };
+    let c = match version {
+        Some(v) => c.replace("{version}", v),
+        None => c,
+    };
+    if c.contains("{version}") {
+        return Err(format!("{at}: `{{version}}` in an install command needs `version` on the tool"));
+    }
     match c {
-        None => Ok(None),
-        Some(c) if c.trim().is_empty() || c.chars().count() > 300 || c.chars().any(char::is_control) => {
+        c if c.trim().is_empty() || c.chars().count() > 300 || c.chars().any(char::is_control) => {
             Err(format!("{at}: an install command must be one non-empty line of at most 300 chars"))
         }
-        Some(c) => Ok(Some(c.trim().to_string())),
+        c => Ok(Some(c.trim().to_string())),
     }
 }
 
@@ -336,12 +360,16 @@ impl Manifest {
             if tools.iter().any(|i| i.name == n) {
                 return Err(format!("tools: `{n}` is listed twice"));
             }
+            let version = tool_version(t.version, "tools.version")?;
             if let Some(i) = t.install {
-                let (darwin, linux) = (install_command(i.darwin, "tools.install")?, install_command(i.linux, "tools.install")?);
+                let (darwin, linux) = (
+                    install_command(i.darwin, version.as_deref(), "tools.install")?,
+                    install_command(i.linux, version.as_deref(), "tools.install")?,
+                );
                 if darwin.is_none() && linux.is_none() {
                     return Err(format!("tools.install: `{n}` has no command"));
                 }
-                values.installs.insert(n.clone(), Install { darwin, linux, linux_sudo: i.linux_sudo });
+                values.installs.insert(n.clone(), Install { darwin, linux, linux_sudo: i.linux_sudo, version: version.clone() });
             }
             tools.push(Item { severity: severity(&t.severity, "tools")?, name: n, note: note(t.note, "tools")?, only_if_tool: None });
         }
@@ -511,6 +539,46 @@ mod tests {
     #[test]
     fn a_minimal_manifest_parses() {
         Manifest::parse(MIN).unwrap();
+    }
+
+    fn tool_manifest(version: &str, linux: &str) -> String {
+        format!("version = 1\n[[tools]]\nname = \"x\"\nseverity = \"warn\"\nversion = \"{version}\"\ninstall = {{ linux = \"{linux}\" }}\n")
+    }
+
+    #[test]
+    fn version_is_substituted_into_the_install_command() {
+        let (_, values) = Manifest::parse_with_values(&tool_manifest("v1.2.3", "curl {version} | sh {version}")).unwrap();
+        let i = values.installs.get("x").unwrap();
+        assert_eq!(i.linux.as_deref(), Some("curl v1.2.3 | sh v1.2.3"));
+        assert_eq!(i.version.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn a_version_placeholder_without_a_version_is_refused() {
+        let src = "version = 1\n[[tools]]\nname = \"x\"\nseverity = \"warn\"\ninstall = { linux = \"curl {version} | sh\" }\n";
+        assert!(Manifest::parse_with_values(src).is_err());
+    }
+
+    #[test]
+    fn floating_refs_and_unsafe_versions_are_refused() {
+        for v in ["latest", "master", "main", "HEAD", "stable", "Master", "", "v1 2", "v1;rm", "v1$x"] {
+            assert!(Manifest::parse_with_values(&tool_manifest(v, "echo {version}")).is_err(), "{v:?} must be refused");
+        }
+        let long = "v".repeat(65);
+        assert!(Manifest::parse_with_values(&tool_manifest(&long, "echo {version}")).is_err(), "over 64 chars");
+        assert!(Manifest::parse_with_values(&tool_manifest("v1.2.3", "echo {version}")).is_ok());
+    }
+
+    #[test]
+    fn the_shipped_rtk_and_bun_installs_are_pinned_to_release_tags() {
+        let (_, values) = Manifest::parse_with_values(SOURCE).unwrap();
+        for (tool, tag) in [("rtk", "v1.2.1"), ("bun", "bun-v1.4.5")] {
+            let i = values.installs.get(tool).unwrap_or_else(|| panic!("{tool} has no install"));
+            assert_eq!(i.version.as_deref(), Some(tag), "{tool}");
+            let linux = i.linux.as_deref().unwrap();
+            assert!(linux.contains(tag), "{tool}: {linux}");
+            assert!(!linux.contains("master") && !linux.contains("latest") && !linux.contains("{version}"), "{tool}: {linux}");
+        }
     }
 
     #[test]
