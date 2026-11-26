@@ -6050,7 +6050,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - 一次執行（occurrence）的總花費時間＝各 attempt「開始→結束」加總，重試的等待間隔不算。開始＝turn 綁定送出的那刻；勾 `from_base` 的從 fork 重啟成功那刻起算（重啟要等的時間算在內，因為那是這次執行的一部分；等 bot 閒置、被擋下的不算）。結束＝該 attempt 收斂成終態的時間（寫進 `schedule_attempts.finished_at`）。沒有 attempt 列就終結的（取消）用最後更新時間當結束。
 - 存放：`schedule_occurrences.first_started_at`（第一次開始，之後不變）、`attempt_started_at`（目前這次，重試時清空）、`schedule_attempts.started_at`（該次開始，結束時從 occurrence 複製）。三欄都是 ALTER ADD，舊資料為 NULL（舊 attempt 沒有耗時、不計入總和）。
 - API 回 `started_at`、`duration_ms`、`running_since`、`attempts[].duration_ms`、排程的 `last`（見 API.md）；畫面把進行中那次用 `running_since` 即時補上。顯示：最近執行列、結果詳情（總計＋各 attempt）、排程列表「上次」旁；格式「2 分 14 秒」。
-- 每次執行的 bot／模型快照（2026-11-25）：attempt 開始時（`mark_started_tx`）寫 `schedule_occurrences.runner_json`（`bot_name`、`kind`、`model`、`effort`、`identity`、`source`），attempt 結束時複製到 `schedule_attempts.runner_json`，重試清空再重記；有執行中的 run 取其 `runtime_*`，沒有退回 Bot 設定並標 `source=bot`。排程換 bot 或改模型後，舊紀錄各自保有當時的值；舊資料 `runner` 為 `null`。API 回 `runner`、`attempts[].runner`。
+- 每次執行的 bot／模型快照（2026-11-25）：attempt 開始時（`mark_started_tx`）寫 `schedule_occurrences.runner_json`（`bot_name`、`kind`、`model`、`effort`、`identity`、`source`），attempt 結束時複製到 `schedule_attempts.runner_json`，重試清空再重記；送出前就失敗（`base::fail`，還沒 mark_started）同樣現場取快照寫進 occurrence 與該筆 attempt，「最近執行」才看得到當時的 bot 與模型；有執行中的 run 取其 `runtime_*`，沒有退回 Bot 設定並標 `source=bot`。排程換 bot 或改模型後，舊紀錄各自保有當時的值；舊資料 `runner` 為 `null`。API 回 `runner`、`attempts[].runner`。
 
 ### 排程的手動執行去重（2026-10-13 補）
 

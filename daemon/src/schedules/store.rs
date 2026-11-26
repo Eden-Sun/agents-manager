@@ -279,7 +279,7 @@ pub async fn mark_started_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &s
     Ok(())
 }
 
-async fn runner_snapshot_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str) -> Result<Option<String>> {
+pub(super) async fn runner_snapshot_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str) -> Result<Option<String>> {
     type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
     let row: Option<Row> = sqlx::query_as(
         "SELECT b.name, b.kind, b.model, b.effort, b.identity, r.id, r.runtime_model, r.runtime_effort, r.runtime_identity

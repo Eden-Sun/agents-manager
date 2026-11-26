@@ -1247,6 +1247,21 @@ mod from_base {
     }
 
     #[tokio::test]
+    async fn a_failure_before_sending_still_records_the_runner() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        base::fail(&e.app, &s, &o, "base_snapshot_missing", "沒有基準", false).await.unwrap();
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        let v = store::occurrence_view(&e.app.db, &o).await.unwrap();
+        assert_eq!((v["runner"]["bot_name"].as_str(), v["runner"]["kind"].as_str(), v["runner"]["source"].as_str()), (Some(bot.name.as_str()), Some("codex"), Some("bot")));
+        assert_eq!(v["attempts"][0]["runner"]["bot_name"].as_str(), Some(bot.name.as_str()));
+        assert_eq!(v["attempts"][0]["runner"]["kind"], "codex");
+    }
+
+    #[tokio::test]
     async fn without_the_option_nothing_forks() {
         let e = testing::env().await;
         let bot = codex_bot(&e, "cx").await;
