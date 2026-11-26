@@ -732,6 +732,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (109, "44979bd0e42fa14c"),
     // turn 的停止原因（2026-11-26，issue #2218）：`turns.stop_reason`，回合被呼叫上限或軟時限提早收尾時寫入，排程據此判未完成。
     (110, "faa899d4cb32f7de"),
+    (111, "7ccc79bda6fd7d45"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1013,6 +1014,17 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             .await
             .with_context(|| format!("index turns queued {class} lane"))?;
     }
+    // 排隊與送達臨界區的查詢（flush、safety 每 15 秒逐 bot、`acquire_lease`）原本都會全表掃 turns（4 萬列）：
+    // `status` 只有 queued／in_flight 會被問到，partial index 只收這兩種（SQLite 要看到查詢的 status 條件才用得上，
+    // 所以 `DELIVERY_CRITICAL_PREDICATE` 自己也帶 `status IN (…)`）。
+    sqlx::query("CREATE INDEX IF NOT EXISTS turns_queued_lane ON turns(conversation_id) WHERE status = 'queued'")
+        .execute(&mut *tx)
+        .await
+        .context("index turns queued lane")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS turns_active_status ON turns(status, conversation_id) WHERE status IN ('queued', 'in_flight')")
+        .execute(&mut *tx)
+        .await
+        .context("index turns active status")?;
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_source_event ON turns(source_event_id) WHERE source_event_id IS NOT NULL")
         .execute(&mut *tx)
         .await

@@ -184,6 +184,34 @@ mod tests {
             "the quiet lease becomes available after both rows leave the queue",
         );
     }
+    /// db-perf：安全檢查與排隊查詢要用 partial index（`turns_active_status`／`turns_queued_lane`），不是全表掃 turns。
+    #[tokio::test]
+    async fn the_delivery_critical_lookups_use_the_partial_turn_indexes() {
+        use sqlx::Row;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let plan = |sql: String| {
+            let pool = app.db.clone();
+            async move {
+                sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.get::<String, _>(3))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            }
+        };
+        let anywhere = plan(crate::supervisor::store::delivery_critical_anywhere_sql()).await;
+        assert!(anywhere.contains("turns_active_status"), "{anywhere}");
+        assert!(!anywhere.contains("SCAN t"), "{anywhere}");
+        let for_bot = plan(crate::supervisor::store::delivery_critical_for_bot_sql().replace("c.bot_id = ?", "c.bot_id = 'b'")).await;
+        assert!(for_bot.contains("turns_active_status") && !for_bot.contains("SCAN t"), "{for_bot}");
+        let queued = plan("SELECT t.id FROM turns t WHERE t.status = 'queued'".to_string()).await;
+        assert!(queued.contains("turns_queued_lane"), "{queued}");
+    }
+
     /// #2223：排著的一則帶**有效**的額度暫扣（`until` 未過，或沒寫 `until`）時不算送達臨界區、窗口拿得到；
     /// 暫扣過期、被清掉、或憑據壞掉時立刻回到臨界區；in_flight＋pending 不受暫扣影響。
     #[tokio::test]
