@@ -25,9 +25,9 @@
 }
 
 .api-overview-panel.error {
-  color: var(--danger, #dc2626);
-  border-color: color-mix(in srgb, var(--danger, #dc2626) 30%, var(--border));
-  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+  background: var(--danger-soft);
 }
 
 .api-overview-header {
@@ -65,7 +65,7 @@
 }
 
 .api-overview-chip.today {
-  border-color: color-mix(in srgb, var(--accent, #2563eb) 35%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   color: var(--text);
 }
 
@@ -129,8 +129,8 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: var(--warn-soft, rgba(217, 119, 6, 0.12));
-  border: 1px solid color-mix(in srgb, var(--warn, #d97706) 30%, var(--border));
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
   border-radius: 4px;
   color: var(--text);
   font-size: 12px;
@@ -138,7 +138,7 @@
 }
 
 .api-overview-suggestion-icon {
-  color: var(--warn, #d97706);
+  color: var(--warn);
   font-size: 13px;
 }
 
@@ -265,7 +265,7 @@
 }
 
 .api-overview-turn-row:hover {
-  border-color: color-mix(in srgb, var(--accent, #2563eb) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
 .turn-rank {
@@ -307,7 +307,7 @@
 .api-overview-jump-btn {
   background: var(--bg-hover);
   border: 1px solid var(--border);
-  color: var(--accent, #2563eb);
+  color: var(--accent);
   padding: 3px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -318,8 +318,8 @@
 }
 
 .api-overview-jump-btn:hover {
-  background: color-mix(in srgb, var(--accent, #2563eb) 12%, var(--bg-hover));
-  border-color: var(--accent, #2563eb);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-hover));
+  border-color: var(--accent);
 }
 
 @media (max-width: 640px) {

@@ -1899,3 +1899,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 
 - **右下角升級通知只講一行（2026-11-25，使用者裁示）**：有上游新版時 toast 只顯示 `claude 2.1.284 可更新`（網頁用 `kind`／`latest_version` 組字、走 i18n，英文 `claude 2.1.284 available`；不直接顯示後端中文），動作「查看」打開頁首升級晶片的確認框或選單（grok／agy／herdr 開各自的說明框；claude／codex 開安裝並重啟的確認框）。主機、版本對照與 `claude install` 指令不進 toast，只留在晶片 tooltip 與確認框（`text` 仍是完整說明）。抓不到上游是 `查 claude 新版失敗`（同樣由網頁組字）＋「詳情」，展開才看到原因。舊的 toast 長句（「需安裝到共同版本…」）與「重啟套用」字樣一併移除。
 - **測試**：`web/src/store/upstreamUpdate.test.ts`（短句、「查看」「詳情」的動作）；`web/src/hooks/updateChipRequestDom.test.tsx`（晶片只響應自己的種類）。
+
+## API bot 用量／時間軸色走主題 token（2026-11-26，fb-scan #12，issue #2213）
+
+- `apiBotUsageBar.css`、`translateRetro.css`、`apiTurnTimeline.css`、`apiBotCostOverview.css` 不再寫死色碼，連 `var(--x, #hex)` 的後備值也不留；顏色一律來自 `styles.css` 的主題 token。`themeTokens.test.ts` 守門這四檔不得出現色碼。
+- 時間軸與用量條的分類色（輸入、輸出、快取讀、快取寫、其他）是新的 `--usage-*` token，亮色、系統深色、`data-theme="dark"` 三組都定義，深色版提亮以在深底上保持對比。

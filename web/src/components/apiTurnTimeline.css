@@ -132,7 +132,7 @@
 .api-conclusion-badge {
   font-size: 11px;
   font-weight: 700;
-  color: var(--accent-text, #fff);
+  color: var(--accent-text);
   background: var(--accent);
   padding: 1px 6px;
   border-radius: 4px;
@@ -205,12 +205,12 @@
   transition: width 0.2s ease;
 }
 
-.seg-cache_write, .dot-cache_write { background: #d97706; }
-.seg-cache_read, .dot-cache_read { background: #16a34a; }
-.seg-input, .dot-input { background: #2563eb; }
-.seg-output, .dot-output { background: #7c3aed; }
-.seg-compaction, .dot-compaction { background: #64748b; }
-.seg-server_tool, .dot-server_tool { background: #64748b; }
+.seg-cache_write, .dot-cache_write { background: var(--usage-cache-write); }
+.seg-cache_read, .dot-cache_read { background: var(--usage-cache-read); }
+.seg-input, .dot-input { background: var(--usage-input); }
+.seg-output, .dot-output { background: var(--usage-output); }
+.seg-compaction, .dot-compaction { background: var(--usage-neutral); }
+.seg-server_tool, .dot-server_tool { background: var(--usage-neutral); }
 
 .api-breakdown-section {
   width: 100%;
@@ -378,8 +378,8 @@
   border: 2px solid var(--bg-panel);
 }
 
-.req-dot { background: #2563eb; }
-.tool-dot { background: #d97706; }
+.req-dot { background: var(--usage-input); }
+.tool-dot { background: var(--usage-cache-write); }
 .tool-dot.is-err { background: var(--danger); }
 .end-dot { background: var(--status-ok); }
 
@@ -392,8 +392,8 @@
 }
 
 .timeline-request.is-compaction .timeline-card {
-  border-color: color-mix(in srgb, #64748b 40%, var(--border));
-  background: color-mix(in srgb, #64748b 6%, var(--bg-panel));
+  border-color: color-mix(in srgb, var(--usage-neutral) 40%, var(--border));
+  background: color-mix(in srgb, var(--usage-neutral) 6%, var(--bg-panel));
 }
 
 .timeline-card-content {
@@ -425,8 +425,8 @@
 }
 
 .chip-comp {
-  background: color-mix(in srgb, #64748b 15%, transparent);
-  border: 1px solid color-mix(in srgb, #64748b 30%, transparent);
+  background: color-mix(in srgb, var(--usage-neutral) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--usage-neutral) 30%, transparent);
   color: var(--text);
 }
 
