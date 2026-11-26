@@ -26,6 +26,12 @@ test('英文回覆內含一段繁中引用（約 6 行中文＋10 行英文）�
   assert.equal(isMostlyEnglish(englishLines + chineseLines), true)
 })
 
+test('英文回覆夾中文專有名詞（約 12%–16%，整段或逐行）：是', () => {
+  const twelve = 'Please keep the 中信 table, the 保經 notes, and the 業務員報告書 wording in the branch, then rerun the checks and send the 錠嵂 result back to the lead.'
+  const sixteen = 'The 中信 and 保經 notes plus the 業務員報告書 and KYC 招攬書 wording need one review before the batch ships to the lead, so keep them.'
+  assert.equal(isMostlyEnglish(twelve.repeat(6)), true)
+  assert.equal(isMostlyEnglish(Array(6).fill(sixteen).join('\n')), true)
+})
 test('繁中回覆夾英文指令／路徑：否', () => {
   assert.equal(isMostlyEnglish('已經修好了，請執行 `cd /home/ubuntu/project/am-wt-eng` 並確認狀態。'), false)
 })

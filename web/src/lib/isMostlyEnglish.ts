@@ -18,7 +18,7 @@ export function isMostlyEnglish(text: string): boolean {
     if (latin === 0 && cjk === 0) continue;
     nonEmptyLineCount++;
 
-    if (latin > 10 * cjk) {
+    if (latin > 4 * cjk) {
       englishDominantLineCount++;
       totalLatinCount += latin;
     }

@@ -228,7 +228,7 @@ fn load(path: &Path) -> Option<CacheEntry> {
         .ok()
         .filter(|e: &CacheEntry| {
             !e.translation.trim().is_empty()
-                && !is_mostly_english(&e.translation)
+                && !is_mostly_english_reply(&e.translation)
                 && !has_japanese_kana(&e.translation)
         })
 }
@@ -835,7 +835,7 @@ const RECORD_TEXT_MAX_CHARS: usize = 1_500;
 
 fn local_check_flags(source: &str, reply: &str) -> Value {
     json!({
-        "untranslated": is_mostly_english(source) && is_mostly_english(reply),
+        "untranslated": is_mostly_english(source) && is_mostly_english_reply(reply),
         "partially_untranslated": partially_untranslated(source, reply),
         "markdown_structure": !markdown_structure_matches(source, reply),
         "japanese_output": !has_japanese_kana(source) && has_japanese_kana(reply),
@@ -1122,7 +1122,7 @@ pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
     if !has_japanese_kana(source) && has_japanese_kana(reply) {
         return Some("japanese_output");
     }
-    if is_mostly_english(source) && is_mostly_english(reply) {
+    if is_mostly_english(source) && is_mostly_english_reply(reply) {
         return Some("untranslated");
     }
     if partially_untranslated(source, reply) {
@@ -1371,8 +1371,17 @@ pub(crate) fn markdown_structure_matches(source: &str, reply: &str) -> bool {
     roughly_matches(s.headings, d.headings) && roughly_matches(s.list_items, d.list_items)
 }
 
-/// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過十分之一）。
+/// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過四分之一）。
 pub(crate) fn is_mostly_english(text: &str) -> bool {
+    english_by_cjk_ratio(text, 4)
+}
+
+/// 譯文品質檢查用（`untranslated`、快取讀取）：CJK 不超過十分之一，中文譯文夾英文專有名詞不會被當成沒翻。
+pub(crate) fn is_mostly_english_reply(text: &str) -> bool {
+    english_by_cjk_ratio(text, 10)
+}
+
+fn english_by_cjk_ratio(text: &str, max_cjk_multiple: usize) -> bool {
     let mut prose = String::new();
     let mut rest = text;
     while let Some(i) = rest.find("```") {
@@ -1396,7 +1405,7 @@ pub(crate) fn is_mostly_english(text: &str) -> bool {
         if c.is_ascii_alphabetic() { latin += 1 }
         else if matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') { cjk += 1 }
     }
-    latin >= 20 && cjk * 10 <= latin
+    latin >= 20 && cjk * max_cjk_multiple <= latin
 }
 
 const PQ_CACHE_PREFIX: &str = "pq-";
@@ -1665,6 +1674,15 @@ mod tests {
         assert!(is_mostly_english(english));
         assert!(!is_mostly_english("這次的結果如下，所有檢查都已通過。\n| 項目 | 數量 |\n|---|---|\n| 1 | 18 |\n| 2 | 9 |"));
         assert!(!is_mostly_english("|---:|---|\n| 1 | | 18 |\n| 2 | | 9 |\n---"));
+    }
+
+    #[test]
+    fn english_with_chinese_proper_nouns_still_counts_as_english() {
+        let twelve = "Please keep the 中信 table, the 保經 notes, and the 業務員報告書 wording in the branch, then rerun the checks and send the 錠嵂 result back to the lead.";
+        let sixteen = "The 中信 and 保經 notes plus the 業務員報告書 and KYC 招攬書 wording need one review before the batch ships to the lead, so keep them.";
+        assert!(is_mostly_english(&twelve.repeat(6)));
+        assert!(is_mostly_english(&sixteen.repeat(6)));
+        assert!(!is_mostly_english("我把 parser 的 bug 修好了，並且補了一個 regression test 放在 tests 目錄"));
     }
     use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, MessagesRequest, Usage};
     use std::future::Future;
