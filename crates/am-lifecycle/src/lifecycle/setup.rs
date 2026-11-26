@@ -999,9 +999,15 @@ fn codex_notification_args(legacy: Vec<String>, trusted: anyhow::Result<bool>) -
 /// issue #1884：Bash 工具跑之前先過廣域 kill 守門。同一支 `agents-managerd hook claude`——它看到 PreToolUse 只判斷、不送 daemon、
 /// 只有要擋時才印決策 JSON（`kill_guard`）。只給本機 bot：遠端的 `hook.sh` 是 POSIX sh、沒有這段邏輯，把 PreToolUse 交給它只會每個
 /// Bash 呼叫多 spool 一筆（SPEC「廣域 kill 守門」寫明遠端目前沒有守門）。
+///
+/// 守門失效（hook 起不來、逾時、退出碼不對）一律擋下：`onFailure: "block"`（Claude Code 2.1.295 起；舊版忽略這個欄位，
+/// 外層的 `|| …` 仍會擋下並印原因）。擋下時 stderr 的訊息告訴 agent 這是暫時狀態、稍後重試，不要改寫成別的殺法。
 fn with_kill_guard(settings: &mut Value, hook_cmd: &str) {
-    settings["hooks"]["PreToolUse"] = json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}]);
+    let guarded = format!("{hook_cmd} || {{ echo {} >&2; exit 2; }}", sh_quote(KILL_GUARD_UNAVAILABLE_MSG));
+    settings["hooks"]["PreToolUse"] = json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": guarded, "timeout": 5, "onFailure": "block"}]}]);
 }
+
+const KILL_GUARD_UNAVAILABLE_MSG: &str = "擋下 Bash：廣域 kill 守門暫時無法執行（daemon 換版或 hook 逾時），為安全起見先不放行。請稍後重試同一條指令。";
 
 /// 每顆 claude bot 自己的 `claude-settings.json`。
 ///
@@ -1606,6 +1612,23 @@ pub fn model_args(bot: &db::Bot) -> Vec<String> {
 #[cfg(test)]
 mod hook_cmd_parts_tests {
     use super::{claude_settings, hook_cmd_parts_for, write_private};
+    #[test]
+    fn kill_guard_fails_closed_with_a_retry_hint() {
+        use super::{with_kill_guard, KILL_GUARD_UNAVAILABLE_MSG};
+        let mut v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
+        with_kill_guard(&mut v, "/no/such/agents-managerd hook claude");
+        let hook = &v["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(hook["onFailure"], "block");
+        let cmd = hook["command"].as_str().expect("command");
+        let run = |c: &str| std::process::Command::new("sh").arg("-c").arg(c).output().expect("sh");
+        let broken = run(cmd);
+        assert_eq!(broken.status.code(), Some(2), "hook 起不來要擋");
+        assert!(String::from_utf8_lossy(&broken.stderr).contains(KILL_GUARD_UNAVAILABLE_MSG));
+        let mut ok = claude_settings("hook", "sl", false, true, "Asia/Taipei");
+        with_kill_guard(&mut ok, "true");
+        let ok_cmd = ok["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().expect("command").to_string();
+        assert_eq!(run(&ok_cmd).status.code(), Some(0), "hook 正常時不改變退出碼");
+    }
     #[test]
     fn every_claude_command_hook_has_a_five_second_timeout() {
         let v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
@@ -3229,7 +3252,8 @@ mod claude_settings_tests {
         let groups = v["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["matcher"], json!("Bash"), "只在 shell 指令跑之前");
-        assert_eq!(groups[0]["hooks"][0]["command"], "hook");
+        assert!(groups[0]["hooks"][0]["command"].as_str().unwrap().starts_with("hook || "), "同一支 hook 指令，失敗時擋下");
+        assert_eq!(groups[0]["hooks"][0]["onFailure"], "block");
         assert_eq!(groups[0]["hooks"][0]["timeout"], json!(5));
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "hook", "別的 hook 原樣");
     }

@@ -982,6 +982,8 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 被擋時的訊息都寫明正確做法：啟動時把 PID 記下來（`cmd & echo $!`），收尾時 `kill $!` 或 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。
 
+**守門本身失效時一律擋下**（issue #2228）：PreToolUse 的 command hook 帶 `"onFailure": "block"`（Claude Code 2.1.295 起），hook 起不來（daemon 換版瞬間）、逾時或退出碼不對都會擋下 Bash；指令外層另包 `|| { echo <提示> >&2; exit 2; }`，舊版忽略 `onFailure` 時仍會擋並印出「暫時無法執行、稍後重試」。這只改 claude 本機 bot 的 PreToolUse；遠端 bot 沒有 PreToolUse 守門（見上），agy 的 PreToolUse 守門未改。
+
 受保護名單（`PROTECTED_NAMES`，不加 `-f` 時比對行程名）：`claude codex grok herdr agents-managerd agy antigravity node sh bash zsh sshd`（`node`：claude／codex 的 npm 安裝版行程名就是 node；shell：herdr pane 的 shell）。
 `-f` 時比對整條命令列，拿 `PROTECTED_CMDLINES` 的樣本試（claude 帶 bot 的 `--settings …/bots/<id>/…`、npm 版 `node …/claude-code/cli.js`、codex、grok、`herdr server`、`agents-managerd serve`、agy）。
 `killall` 加 `-r`（Linux）或 `-m`（BSD）時名稱是 regex，一樣用下面的迷你 ERE 試。
