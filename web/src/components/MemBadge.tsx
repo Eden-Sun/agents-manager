@@ -27,6 +27,8 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
   const machine = row.machine
   const freePct = machine && machine.total_bytes > 0 ? (machine.available_bytes / machine.total_bytes) * 100 : null
   const low = freePct !== null && freePct < 15
+  const cpuPct = machine && typeof machine.cpu_pct === 'number' && Number.isFinite(machine.cpu_pct) ? Math.round(machine.cpu_pct) : null
+  const cpuHot = cpuPct !== null && cpuPct >= 85
   const hostLabel = remote ? host : t('本機')
   const tip = [
     t('{host}：herdr 進程樹現在佔用的記憶體', { host: hostLabel }),
@@ -40,6 +42,7 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
             used: humanBytes(machine.total_bytes - machine.available_bytes),
             pct: Math.round(freePct ?? 0),
           }),
+          ...(cpuPct !== null ? [t('整機 CPU：{pct}%', { pct: cpuPct })] : []),
           ...(low ? [t('剩餘不到 15%，再開 bot 之前先關一些東西。')] : []),
         ]
       : []),
@@ -57,7 +60,7 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
   return (
     <MemPopover host={host}>
       <span
-        className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}${low ? ' mem-low' : ''}`}
+        className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}${low ? ' mem-low' : ''}${cpuHot ? ' cpu-hot' : ''}`}
         title={`${tip.join('\n')}\n\n${t('點一下看有哪些程序。')}`}
       >
         <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
@@ -73,7 +76,13 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
             {t('剩 {bytes}', { bytes: humanBytes(machine.available_bytes) })}
           </span>
         ) : null}
-        {}
+        {cpuPct !== null ? (
+          <span className={`mem-cpu${cpuHot ? ' hot' : ''}`} title={t('整機 CPU：{pct}%', { pct: cpuPct })}>
+            <span className="mem-cpu-sep" aria-hidden="true">· </span>
+            <span className="mem-cpu-k">CPU </span>
+            {cpuPct}%
+          </span>
+        ) : null}
         {tabsHot ? <span className="mem-tabs" aria-label={t('{n} 個瀏覽器分頁', { n: tabs })}>⧉{tabs}</span> : null}
       </span>
     </MemPopover>

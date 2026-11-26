@@ -1659,8 +1659,8 @@ export class MockTransport implements Transport {
             : [],
         machine:
           h.name === 'local'
-            ? { total_bytes: 16 * 1024 ** 3, available_bytes: 5.5 * 1024 ** 3 }
-            : { total_bytes: 32 * 1024 ** 3, available_bytes: 3 * 1024 ** 3 },
+            ? { total_bytes: 16 * 1024 ** 3, available_bytes: 5.5 * 1024 ** 3, cpu_pct: 23 }
+            : { total_bytes: 32 * 1024 ** 3, available_bytes: 3 * 1024 ** 3, cpu_pct: 41 },
       }
     })
     return {

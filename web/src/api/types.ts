@@ -847,6 +847,7 @@ export interface HostMem {
 export interface MachineMem {
   total_bytes: number
   available_bytes: number
+  cpu_pct?: number | null
 }
 
 export interface BrowserMem {

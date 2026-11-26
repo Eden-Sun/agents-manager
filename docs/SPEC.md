@@ -4445,13 +4445,13 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 每台主機每 15 秒 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走 ssh master），變化超過 1 MiB 才推 `mem_updated`。量不到用 `error` 回報，不從清單消失。端點 `GET /api/mem`。
 `GET /api/mem`、`GET /api/mem/processes` 與任意 pane 畫面預覽僅 User principal 可讀；Bot（包含 AGM 角色）在解析主機或讀 pane 前即被拒絕，Service principal 的 scope 不包含這些路徑。Bot 讀取自己的 bot tree 中的終端，應使用其有權限的 `/api/bots/{id}/terminal`。
 
-### 15.1a 這台機器還剩多少
-同一次取樣多帶 `hosts[].machine: {total_bytes, available_bytes}`（一次 shell 往返）：
-- Linux：`/proc/meminfo` 的 `MemTotal` / `MemAvailable`。
-- macOS：`sysctl -n hw.memsize`；可用 = `vm_stat` 的 free + inactive + speculative + purgeable × page size（inactive／purgeable 是可回收快取）。
+### 15.1a 這台機器還剩多少與整機 CPU 使用率
+同一次取樣多帶 `hosts[].machine: {total_bytes, available_bytes, cpu_pct}`（一次 shell 往返）：
+- Linux：`/proc/meminfo` 的 `MemTotal` / `MemAvailable`；CPU 由同一趟指令內兩次讀取 `/proc/stat` 首列 `cpu `（間隔 0.2s）的 `1 - Δ(idle + iowait) / Δtotal` 算出百分比。
+- macOS：`sysctl -n hw.memsize`；可用 = `vm_stat` 的 free + inactive + speculative + purgeable × page size（inactive／purgeable 是可回收快取）；CPU 由 `top -l 2 -n 0 -s 1 | grep 'CPU usage'` 取第二筆的 `100 - idle%`（第一筆是開機以來平均，第二筆才是當下視窗差值，比 `ps -A -o %cpu` 的程序衰減平均加總更能反映整機含 kernel 的即時負載）。
 
-`available` 不是 `total − 我們用掉的`（還有瀏覽器與系統）。認不出輸出就回 `null`，UI 只顯示已用量——不猜。
-UI：左上格「已用 · 剩 N」，本機與每台遠端各一顆（`@mac_builder`）；剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
+`available` 不是 `total − 我們用掉的`（還有瀏覽器與系統）。認不出記憶體輸出就回 `null`，UI 只顯示已用量——不猜；`cpu_pct` 取不到時為 `null`，前端不顯示 CPU 段且不影響記憶體顯示。
+UI：左上格「已用 · 剩 N · CPU X%」（窄螢幕／平板縮成「· X%」），本機與每台遠端各一顆（`@mac_builder`）；剩餘 < 15% 或 CPU ≥ 85% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …） · 整機 CPU：X%」。
 
 ### 15.1b 每個專案佔多少（2026-09-15）
 

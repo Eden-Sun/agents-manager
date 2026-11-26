@@ -145,6 +145,7 @@ export default {
     'other': '{n} processes',
   },
   '這台機器：剩 {free} / 共 {total}（已用 {used}，剩 {pct}%）': 'This machine: {free} free / {total} total ({used} used, {pct}% left)',
+  '整機 CPU：{pct}%': 'Machine CPU: {pct}%',
   '剩餘不到 15%，再開 bot 之前先關一些東西。': 'Less than 15% remaining, close some programs before starting more Bots.',
   '瀏覽器：{info}': 'Browser: {info}',
   '（超過 {warn} 個分頁，關一些）': ' (over {warn} tabs, close some)',

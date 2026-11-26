@@ -14,9 +14,9 @@ const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// `-ww` so macOS does not clip long agent argv to the terminal width.
 const PS_CMD: &str = "ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null";
 
-/// 使用者 2026-09-12：「除了已用量，也要能夠 show 出剩餘 ram 量」；同一次 ssh 往返帶回。
-/// macOS 沒有 `/proc/meminfo`，改用 `sysctl hw.memsize` + `vm_stat` 自己算。
-const MACHINE_CMD: &str = "cat /proc/meminfo 2>/dev/null || { sysctl -n hw.memsize 2>/dev/null; vm_stat 2>/dev/null; }";
+/// 使用者 2026-09-12：「除了已用量，也要能夠 show 出剩餘 ram 量」；2026-11-26 加整機 CPU 使用率 %，同一次 ssh 往返帶回。
+/// Linux 讀 `/proc/meminfo` + 兩次 `/proc/stat`（間隔 0.2s）；macOS 讀 `sysctl hw.memsize` + `vm_stat` + `top -l 2 -n 0 -s 1`（取第二筆全機差值，比 `ps -A -o %cpu` 衰減平均準確）。
+const MACHINE_CMD: &str = "if [ -r /proc/meminfo ]; then cat /proc/meminfo 2>/dev/null; head -n 1 /proc/stat 2>/dev/null; sleep 0.2 2>/dev/null; head -n 1 /proc/stat 2>/dev/null; else sysctl -n hw.memsize 2>/dev/null; vm_stat 2>/dev/null; top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage'; fi";
 
 const MACHINE_MARK: &str = "__AM_MACHINE__";
 const PS_MARK: &str = "__AM_PS__";
@@ -64,11 +64,13 @@ pub struct HostMem {
 }
 
 /// SPEC §15。`available` 不是 `total - 我們用掉的`：macOS 快取隨時可回收，算成已用會像見底。
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MachineMem {
     pub total_bytes: u64,
     /// Linux `MemAvailable`；macOS free + inactive + speculative + purgeable 頁。
     pub available_bytes: u64,
+    #[serde(default)]
+    pub cpu_pct: Option<f32>,
 }
 
 impl MachineMem {
@@ -78,8 +80,46 @@ impl MachineMem {
     }
 }
 
+pub fn parse_cpu_pct(out: &str) -> Option<f32> {
+    let mut stat_rows = out.lines().filter_map(|l| {
+        let rest = l.trim_start().strip_prefix("cpu ")?;
+        let vals: Vec<u64> = rest.split_whitespace().filter_map(|n| n.parse::<u64>().ok()).collect();
+        if vals.len() < 4 {
+            return None;
+        }
+        let total: u64 = vals.iter().sum();
+        let idle = vals[3] + vals.get(4).copied().unwrap_or(0);
+        Some((total, idle))
+    });
+    if let (Some((t1, i1)), Some((t2, i2))) = (stat_rows.next(), stat_rows.next()) {
+        let dt = t2.saturating_sub(t1);
+        let di = i2.saturating_sub(i1);
+        if dt > 0 {
+            let busy = dt.saturating_sub(di);
+            return Some(((busy as f64 / dt as f64) * 100.0).clamp(0.0, 100.0) as f32);
+        }
+    }
+    let top_lines: Vec<&str> = out.lines().filter(|l| l.contains("CPU usage:")).collect();
+    if top_lines.len() >= 2 {
+        let last = top_lines.last()?;
+        for part in last.split(',') {
+            let part = part.trim();
+            if let Some(num_str) = part.strip_suffix("idle") {
+                let num_str = num_str.trim().trim_end_matches('%').trim();
+                if let Ok(idle) = num_str.parse::<f32>() {
+                    if idle.is_finite() {
+                        return Some((100.0 - idle).clamp(0.0, 100.0));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 認不出來就回 `None`：少一個數字沒關係，猜一個會誤導。
 pub fn parse_machine(out: &str) -> Option<MachineMem> {
+    let cpu_pct = parse_cpu_pct(out);
     let kib = |key: &str| -> Option<u64> {
         out.lines()
             .find(|l| l.trim_start().starts_with(key))
@@ -88,7 +128,7 @@ pub fn parse_machine(out: &str) -> Option<MachineMem> {
     };
     if let (Some(total), Some(avail)) = (kib("MemTotal:"), kib("MemAvailable:")) {
         if total > 0 {
-            return Some(MachineMem { total_bytes: total * 1024, available_bytes: avail * 1024 });
+            return Some(MachineMem { total_bytes: total * 1024, available_bytes: avail * 1024, cpu_pct });
         }
     }
     let total = out.lines().map(str::trim).find_map(|l| l.parse::<u64>().ok())?;
@@ -109,7 +149,7 @@ pub fn parse_machine(out: &str) -> Option<MachineMem> {
             .unwrap_or(0)
     };
     let avail = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page;
-    Some(MachineMem { total_bytes: total, available_bytes: avail.min(total) })
+    Some(MachineMem { total_bytes: total, available_bytes: avail.min(total), cpu_pct })
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -400,7 +440,13 @@ fn host_signals_changed(prev: &[HostMem], next: &[HostMem]) -> bool {
             || a.browsers.len() != b.browsers.len()
             || a.browsers.iter().zip(&b.browsers).any(|(x, y)| x.name != y.name || x.tabs != y.tabs)
             || match (&a.machine, &b.machine) {
-                (Some(x), Some(y)) => x.available_bytes.abs_diff(y.available_bytes) >= 64 * 1024 * 1024,
+                (Some(x), Some(y)) => {
+                    x.available_bytes.abs_diff(y.available_bytes) >= 64 * 1024 * 1024
+                        || match (x.cpu_pct, y.cpu_pct) {
+                            (Some(cx), Some(cy)) => (cx.round() as i32) != (cy.round() as i32),
+                            (cx, cy) => cx.is_some() != cy.is_some(),
+                        }
+                }
                 (x, y) => x.is_some() != y.is_some(),
             }
     })
@@ -471,6 +517,48 @@ Pages purgeable:                                 809.\n";
         let m = parse_machine(out).unwrap();
         assert_eq!(m.total_bytes, 16_316_412 * 1024);
         assert_eq!(m.available_bytes, 9_381_234 * 1024);
+        assert_eq!(m.cpu_pct, None);
+    }
+
+    #[test]
+    fn linux_cpu_usage_comes_from_proc_stat_delta() {
+        let out = "MemTotal:       16316412 kB\n\
+MemAvailable:    9381234 kB\n\
+cpu  1000 100 500 8000 400 0 0 0 0 0\n\
+cpu  1150 100 580 8650 520 0 0 0 0 0\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 16_316_412 * 1024);
+        let cpu = m.cpu_pct.expect("解析出 Linux CPU%");
+        assert!((cpu - 23.0).abs() < 0.01, "expected ~23%, got {cpu}");
+    }
+
+    #[test]
+    fn macos_cpu_usage_comes_from_second_top_sample() {
+        let out = "17179869184\n\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                                     8261.\n\
+Pages inactive:                               299465.\n\
+Pages speculative:                             29406.\n\
+Pages purgeable:                                 809.\n\
+CPU usage: 11.11% user, 22.22% sys, 66.66% idle\n\
+CPU usage: 14.25% user, 9.75% sys, 76.0% idle\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 17_179_869_184);
+        let cpu = m.cpu_pct.expect("解析出 macOS CPU%");
+        assert!((cpu - 24.0).abs() < 0.01, "expected 24%, got {cpu}");
+    }
+
+    #[test]
+    fn missing_or_single_cpu_sample_keeps_memory_intact() {
+        let single_stat = "MemTotal:       1048576 kB\nMemAvailable:    524288 kB\ncpu  1000 0 0 9000 0 0 0 0 0 0\n";
+        let m1 = parse_machine(single_stat).unwrap();
+        assert_eq!(m1.total_bytes, 1_048_576 * 1024);
+        assert_eq!(m1.cpu_pct, None);
+
+        let single_top = "17179869184\nPages free: 8261.\nCPU usage: 10.0% user, 5.0% sys, 85.0% idle\n";
+        let m2 = parse_machine(single_top).unwrap();
+        assert_eq!(m2.total_bytes, 17_179_869_184);
+        assert_eq!(m2.cpu_pct, None);
     }
 
     #[test]

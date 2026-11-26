@@ -12,6 +12,11 @@
   color: var(--text-faint);
 }
 
+.mem-pop-cpu.hot {
+  color: var(--danger);
+  font-weight: 650;
+}
+
 .mem-pop-browsers {
   margin: 0 0 8px;
   font-size: 12px;

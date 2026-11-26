@@ -255,6 +255,12 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
                   tree: humanBytes(row.total_bytes),
                 })}
               </span>
+              {typeof row.machine.cpu_pct === 'number' && Number.isFinite(row.machine.cpu_pct) ? (
+                <span className={`mem-pop-cpu${Math.round(row.machine.cpu_pct) >= 85 ? ' hot' : ''}`}>
+                  {' · '}
+                  {t('整機 CPU：{pct}%', { pct: Math.round(row.machine.cpu_pct) })}
+                </span>
+              ) : null}
             </p>
           ) : null}
           {row?.browsers.length ? (

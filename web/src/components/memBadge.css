@@ -33,13 +33,27 @@
   font-variant-numeric: tabular-nums;
 }
 
-.mem-badge.mem-low {
+.mem-badge .mem-cpu {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mem-badge.mem-low,
+.mem-badge.cpu-hot {
   border-color: var(--danger);
 }
 
-.mem-badge.mem-low .mem-free {
+.mem-badge.mem-low .mem-free,
+.mem-badge .mem-cpu.hot {
   color: var(--danger);
   font-weight: 650;
+}
+
+@media (width <= 1366px) {
+  .mem-badge .mem-cpu-k {
+    display: none;
+  }
 }
 
 .mem-badge.tabs-hot {
