@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { findHardcodedCjk, isUiSource, scanKeys } from './i18nScan'
+import { findHardcodedCjk, staleIgnores, isUiSource, scanKeys } from './i18nScan'
 
 const head = "import { t, msg } from '../lib/i18n'\n"
 
@@ -30,7 +30,7 @@ test('沒 import i18n 的檔案不掃（別的 t 函式不算）', () => {
   assert.deepEqual(scanKeys('a.ts', "const t = (x) => x\nt(foo)\n").uses, [])
 })
 
-test('寫死中文：JSX 文字、字串、樣板字串都抓；t()／import／註解／i18n-ignore 不算', () => {
+test('寫死中文：JSX 文字、字串、樣板字串都抓；t()／import／註解不算（刻意不翻的走 ignore.json）', () => {
   const src = [
     "import { t } from './i18n'",
     "import x from './中文路徑'",
@@ -40,14 +40,27 @@ test('寫死中文：JSX 文字、字串、樣板字串都抓；t()／import／�
     "    {t('已翻譯')}",
     '    {`第${n}個`}',
     '    {/* 註解中文 */}',
-    "    {'繁體中文' /* i18n-ignore */}",
+    "    {'繁體中文'}",
     '  </div>',
     ')',
-    "const ok = 'English' // i18n-ignore 中文",
+    "const ok = 'English' // 中文註解",
     "const bad = '沒抽'",
   ].join('\n')
   const hits = findHardcodedCjk('a.tsx', src).map((h) => h.text)
-  assert.deepEqual(hits, ['標題', '哈囉', '第', '個', '沒抽'])
+  assert.deepEqual(hits, ['標題', '哈囉', '第', '個', '繁體中文', '沒抽'])
+})
+
+test('排除清單：只壓同一個檔、同一段文字；其他檔的同字串照報', () => {
+  const src = "const a = '繁體中文'\nconst b = '別的'\n"
+  assert.deepEqual(findHardcodedCjk('a.ts', src, [{ file: 'a.ts', text: '繁體中文' }]).map((h) => h.text), ['別的'])
+  assert.deepEqual(findHardcodedCjk('b.ts', src, [{ file: 'a.ts', text: '繁體中文' }]).map((h) => h.text), ['繁體中文', '別的'])
+})
+
+test('過期條目：檔案不在了、或檔案裡已經沒有這段字，都會被列出', () => {
+  const files: Record<string, string> = { 'a.ts': "const a = '還在'" }
+  const source = (f: string) => files[f]
+  const stale = staleIgnores([{ file: 'a.ts', text: '還在' }, { file: 'a.ts', text: '已刪' }, { file: 'gone.ts', text: '還在' }], source)
+  assert.deepEqual(stale, [{ file: 'a.ts', text: '已刪' }, { file: 'gone.ts', text: '還在' }])
 })
 
 test('哪些檔案要翻：略過測試、字典、i18n 工具、mock 假資料與 testing', () => {

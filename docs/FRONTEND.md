@@ -128,12 +128,12 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 3. 全形標點跟著原句留在 key 裡，英文字典改成半形＋空格（`'（{account}）'` → `' ({account})'`）。程式裡自己組字串的分隔符（`join('、')`、`` `${a}：${b}` ``）不要寫死全形：用 `t('、')`／`t('：')`／`t('；')`，字典已有半形對應；`i18nDict.test.ts` 會擋英文字典裡的全形標點。
 4. 同一句出現在多處、或不同區塊重複：**英文相同就沒事**，各寫一份不必協調；英文不同會被測試擋下（兩處語境不同就把 key 寫得不一樣）。
 5. 字典檔 `i18n/en/<區塊>.ts`：`export default { '原句': 'English', '{n} 個': { one: '{n} item', other: '{n} items' } } satisfies Dict`。key 一律加單引號、依出現順序，同一元件的放一起（註解標檔名）。需要拆小時在自己的區塊檔裡 import 子檔；**不要改 `i18n/en/index.ts`**。
-6. 不確定是否該翻、或刻意不翻的寫死中文：行尾（或獨立的上一行）寫 `// i18n-ignore`（JSX 文字旁用 `{/* i18n-ignore */}`），掃描就不再報。
+6. 不確定是否該翻、或刻意不翻的寫死中文：**不寫在程式裡，登記在 `web/src/i18n/ignore.json`**（`{"entries": [{"file": "src/…", "text": "…"}]}`）。`file` 是 `web/` 底下的路徑，`text` 是掃描報告那一欄顯示的文字（去頭尾空白、截 60 字）。不用行號，改行數不會失效；文字改了、檔案刪了，條目就**過期**，`i18nIgnore.test.ts` 會紅，`bun scripts/i18n-report.ts` 也會列出來，照列出的刪掉或改成新文字。同一檔裡同一段文字會一起被排除。
 
 ### 哪些不翻
 - **daemon 回傳的錯誤與系統訊息**、`ApiError.message`、daemon 事件裡的文字、bot 的對話內容、轉述的使用者內容與檔名——原樣顯示。前端自己產生的（「讀取失敗：」前綴、狀態字、按鈕）才翻；`${前綴}：${daemon 訊息}` 寫成 `t('讀取失敗：{reason}', { reason })`。
 - 模型名、指令與旗標（`herdr`、`claude login`、`--no-browser`）、kind 名（claude／codex／grok／agy）、branch／路徑／port／版本號。
-- 拿來**跟 daemon 或終端文字比對**的中文字串、regex（`lib/tui*`、`lib/blockedReason` 這類）：不翻、行尾加 `// i18n-ignore`。
+- 拿來**跟 daemon 或終端文字比對**的中文字串、regex（`lib/tui*`、`lib/blockedReason` 這類）：不翻，登記在 `src/i18n/ignore.json`。
 - 語言自稱（「繁體中文」「English」）。
 - `api/mock*.ts`、`share/shareMock.ts`、`testing/`、測試檔：假 daemon 的資料與測試不翻（掃描自動略過）。
 - 註解、`console.*`、throw 給開發者看的 Error 訊息不翻；**會顯示給使用者的 Error 訊息要翻**。
@@ -167,4 +167,4 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 | `updates` | 更新／安裝／部署：\*UpdateChip、Update\*、Deploy\*、\*InstallChip、環境準備、EnvShell、`store/*Update*` | 48 | 851（已含範本，實際更少） |
 | `core` | `store/store.ts`（notify 文字）、`api/*`、`schedules/*`、`share/*`（公開分享頁，自己的入口）、`App.tsx`、任務／issue／git 列、Modal／ConfirmDialog、其餘小檔 | 38 | 680 |
 
-每個區塊做完的驗收：`bun scripts/i18n-report.ts --area <區塊>` 剩 0（或只剩加了 `i18n-ignore` 的）；`bun test src/lib/i18n`（字典與原始碼對帳）；`bunx tsc -p tsconfig.app.json --noEmit`；`bunx oxlint src`；`CHECK_MAX_LOAD=40 scripts/check.sh changed`；英文畫面用 `VITE_MOCK=1 bunx vite --port <自己的>` 開 `/?lang=en` 以 agent-browser 走過自己的畫面，`__amI18n.missing()` 應為空。
+每個區塊做完的驗收：`bun scripts/i18n-report.ts --area <區塊>` 剩 0（或只剩 `src/i18n/ignore.json` 登記的）；`bun test src/lib/i18n`（字典與原始碼對帳）；`bunx tsc -p tsconfig.app.json --noEmit`；`bunx oxlint src`；`CHECK_MAX_LOAD=40 scripts/check.sh changed`；英文畫面用 `VITE_MOCK=1 bunx vite --port <自己的>` 開 `/?lang=en` 以 agent-browser 走過自己的畫面，`__amI18n.missing()` 應為空。

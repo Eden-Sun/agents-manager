@@ -1,7 +1,11 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { AREA_IDS, areaOf, type AreaId } from '../src/lib/i18n/areas'
-import { findHardcodedCjk, isUiSource, scanKeys } from '../src/lib/i18n/i18nScan'
+import { findHardcodedCjk, isUiSource, scanKeys, staleIgnores, type IgnoreEntry } from '../src/lib/i18n/i18nScan'
+import ignoreFile from '../src/i18n/ignore.json' with { type: 'json' }
+
+const IGNORE: IgnoreEntry[] = (ignoreFile as { entries: IgnoreEntry[] }).entries
+const sourceOf = (file: string): string | undefined => (existsSync(file) ? readFileSync(file, 'utf8') : undefined)
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -30,16 +34,21 @@ if (args[0] === '--missing') {
   console.log(`\n${seen.size} 個 key 還沒有英文`)
 } else if (args[0] === '--lines') {
   const f = args[1]
-  for (const h of findHardcodedCjk(f, readFileSync(f, 'utf8'))) console.log(`${f}:${h.line}  ${h.text}`)
+  for (const h of findHardcodedCjk(f, readFileSync(f, 'utf8'), IGNORE)) console.log(`${f}:${h.line}  ${h.text}`)
 } else {
   const area = args[0] === '--area' ? (args[1] as AreaId) : null
   if (args[0] === '--area' && !AREA_IDS.includes(area as AreaId)) throw new Error(`區塊要是 ${AREA_IDS.join('／')}`)
   const prefix = area ? '' : (args[0] ?? '')
   const rows = files
     .filter((f) => f.startsWith(prefix) && (!area || areaOf(f) === area))
-    .map((f) => ({ f, n: findHardcodedCjk(f, readFileSync(f, 'utf8')).length }))
+    .map((f) => ({ f, n: findHardcodedCjk(f, readFileSync(f, 'utf8'), IGNORE).length }))
     .filter((r) => r.n > 0)
     .sort((a, b) => b.n - a.n)
   for (const r of rows) console.log(`${String(r.n).padStart(4)}  ${r.f}`)
-  console.log(`\n共 ${rows.reduce((s, r) => s + r.n, 0)} 處寫死中文，分布在 ${rows.length} 個檔案`)
+  console.log(`\n共 ${rows.reduce((s, r) => s + r.n, 0)} 處寫死中文，分布在 ${rows.length} 個檔案（已排除 ${IGNORE.length} 條，src/i18n/ignore.json）`)
+  const stale = staleIgnores(IGNORE, sourceOf)
+  if (stale.length) {
+    console.log(`\n過期的排除條目（對不上任何寫死中文，請從 src/i18n/ignore.json 刪除）：`)
+    for (const e of stale) console.log(`  ${e.file}  ${e.text}`)
+  }
 }

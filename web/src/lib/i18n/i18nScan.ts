@@ -16,6 +16,10 @@ export interface CjkHit {
   line: number
   text: string
 }
+export interface IgnoreEntry {
+  file: string
+  text: string
+}
 
 const CJK = /[㐀-鿿＀-￯　-〿]/
 const I18N_IMPORT = /from\s+['"][^'"]*(?:\/i18n(?:\/index)?(?:\.ts)?|\/shareI18n(?:\.ts)?)['"]/
@@ -76,7 +80,7 @@ export function scanKeys(file: string, text: string): { uses: KeyUse[]; problems
   return { uses, problems }
 }
 
-export function findHardcodedCjk(file: string, text: string): CjkHit[] {
+export function findHardcodedCjk(file: string, text: string, ignore: IgnoreEntry[] = []): CjkHit[] {
   if (!CJK.test(text)) return []
   const sf = parse(file, text)
   const hits: CjkHit[] = []
@@ -87,14 +91,10 @@ export function findHardcodedCjk(file: string, text: string): CjkHit[] {
     }
     return false
   }
-  const lines = text.split('\n')
-  const ignored = (n: ts.Node) => {
-    const line = lineOf(sf, n)
-    const prev = (lines[line - 2] ?? '').trim()
-    return lines[line - 1].includes('i18n-ignore') || (/^(\/\/|\/\*|\{\/\*)/.test(prev) && prev.includes('i18n-ignore'))
-  }
+  const excluded = new Set(ignore.filter((e) => e.file === file).map((e) => e.text))
   const add = (n: ts.Node, s: string) => {
-    if (CJK.test(s) && !inI18nCall(n) && !ignored(n)) hits.push({ file, line: lineOf(sf, n), text: s.trim().slice(0, 60) })
+    const shown = s.trim().slice(0, 60)
+    if (CJK.test(s) && !inI18nCall(n) && !excluded.has(shown)) hits.push({ file, line: lineOf(sf, n), text: shown })
   }
   const visit = (n: ts.Node) => {
     if (ts.isJsxText(n)) add(n, n.text)
@@ -111,4 +111,12 @@ export function isUiSource(path: string): boolean {
   if (/\.(test|harness)\.(ts|tsx)$/.test(path)) return false
   if (/(^|\/)api\/mock[A-Za-z]*\.ts$|(^|\/)share\/shareMock\.ts$|(^|\/)share\/shareI18n\.ts$/.test(path)) return false
   return !/(^|\/)(testing|i18n|__fixtures__)\//.test(path)
+}
+
+export function staleIgnores(ignore: IgnoreEntry[], source: (file: string) => string | undefined): IgnoreEntry[] {
+  return ignore.filter((e) => {
+    const text = source(e.file)
+    if (text === undefined) return true
+    return !findHardcodedCjk(e.file, text).some((h) => h.text === e.text)
+  })
 }
