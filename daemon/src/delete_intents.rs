@@ -13,7 +13,7 @@
 use crate::runners::app_ports_p11 as ports;
 use crate::runners::app_ports_p11::{lock_bots_in_order, soft_delete_child, stop_for_delete_locked};
 use crate::db;
-use crate::intents::{self, Inserted, Intent};
+use crate::intents::{self, Intent};
 use crate::runners::restart_intents::Outcome;
 use crate::state::App;
 use serde_json::{json, Value};
@@ -22,17 +22,19 @@ use std::sync::Arc;
 /// 放置多久還沒補完就放棄（`failed`＋通知）。
 const DELETE_INTENT_TTL_SECS: i64 = 60 * 60;
 
-/// handler 在定案**之前**呼叫：寫 intent 並立刻認領（這個行程自己在做，同一個 boot 的 recovery 不會來搶）。
+/// handler 在定案**之前**呼叫：寫 intent 並認領，同一個交易（#2235：分兩次寫時，中間的 `pending` 會被主機重連的
+/// `recover_host` 搶先認領，空 bot 快照的專案刪除還會在定案前被它收成 `abandoned`）。
 /// 寫不進去＝什麼都還沒動，呼叫端不能繼續（fail closed）。
 pub async fn begin(app: &(impl crate::capabilities::BootId + crate::capabilities::Db), kind: &str, subject: &str, host: &str, payload: &Value) -> Result<String, crate::lifecycle::LcError> {
-    let id = match intents::insert(app.db(), kind, subject, host, payload, DELETE_INTENT_TTL_SECS).await {
-        Ok(Inserted::New(i)) | Ok(Inserted::AlreadyOpen(i)) => i.id,
-        Err(e) => return Err(crate::lifecycle::LcError::Upstream(format!("cannot record the {kind} intent: {e:#}"))),
-    };
-    if let Err(e) = intents::claim(app.db(), &id, app.boot_id()).await {
-        tracing::warn!(intent = %id, error = %e, "could not claim the delete intent");
+    match intents::insert_claimed(app.db(), kind, subject, host, payload, DELETE_INTENT_TTL_SECS, app.boot_id()).await {
+        Ok((id, claimed)) => {
+            if !claimed {
+                tracing::warn!(intent = %id, "the delete intent was already held by this boot");
+            }
+            Ok(id)
+        }
+        Err(e) => Err(crate::lifecycle::LcError::Upstream(format!("cannot record the {kind} intent: {e:#}"))),
     }
-    Ok(id)
 }
 
 /// 定案沒成（世界沒變）：收成 `abandoned`。
@@ -247,6 +249,7 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intents::Inserted;
 
     async fn child_bot(env: &crate::testing::Env, parent: &str) -> String {
         let id = db::ulid();
@@ -296,5 +299,33 @@ mod tests {
         assert!(matches!(outcome, Outcome::Retry(_)), "missing `bots` snapshot must remain retryable: {outcome:?}");
         assert_eq!(intents::get(&env.app.db, &intent.id).await.unwrap().unwrap().status, "pending");
         assert!(db::bot(&env.app.db, &child).await.unwrap().unwrap().deleted_at.is_none(), "the child remains live until its snapshot can be read");
+    }
+
+    /// #2235：`begin` 的 intent 從來不以 `pending` 出現在表裡（主機重連的 `recover_host` 撈 `pending` 認領），寫進去就已經是
+    /// 這顆 boot 的 `running`。舊的「先 insert pending、再 claim」在這個 trigger 下第一步就失敗。
+    #[tokio::test]
+    async fn begin_never_exposes_a_pending_intent_for_recovery_to_claim() {
+        let env = crate::testing::env().await;
+        sqlx::query("CREATE TRIGGER refuse_pending_intent BEFORE INSERT ON intents WHEN NEW.status = 'pending' BEGIN SELECT RAISE(ABORT, 'pending is claimable by recover_host'); END")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let id = begin(env.app.as_ref(), "delete_project", "p-2235", crate::config::LOCAL_HOST, &json!({"bots": []})).await.unwrap();
+        let i = intents::get(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!((i.status.as_str(), i.owner_boot.as_deref(), i.attempts), ("running", Some(env.app.boot_id.as_str()), 1));
+        assert_eq!(drive_once(&env.app, &id).await, Outcome::Finished, "同一顆 boot 的 recovery 認領不到：handler 自己握著");
+    }
+
+    /// #2235：已經開著（`pending`，例如背景重試中）的同一件，`begin` 在同一個交易裡就地認領，不另開一件。
+    #[tokio::test]
+    async fn begin_claims_an_already_open_intent_in_place() {
+        let env = crate::testing::env().await;
+        let Inserted::New(open) = intents::insert(&env.app.db, "delete_bot", "b-2235", crate::config::LOCAL_HOST, &json!({"bots": []}), 3600).await.unwrap() else {
+            panic!("test intent is new")
+        };
+        let id = begin(env.app.as_ref(), "delete_bot", "b-2235", crate::config::LOCAL_HOST, &json!({"bots": []})).await.unwrap();
+        assert_eq!(id, open.id);
+        let i = intents::get(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!((i.status.as_str(), i.owner_boot.as_deref(), i.attempts), ("running", Some(env.app.boot_id.as_str()), 1));
     }
 }

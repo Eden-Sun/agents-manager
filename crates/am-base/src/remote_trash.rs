@@ -83,7 +83,7 @@ pub async fn restore(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str
     let trash_dir = trash_dir_for(&home, remote_root);
     let guard = trash_root_guard(&home, "printf 'AM_NONE\\n'", false);
     let script = format!(
-        "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}B={id}\nbest=\nbm=0\n# 只認 `<id>.<毫秒>` 整段：`<id>.attachments.<毫秒>` 之類是別的回收項目，不能當成 bot 目錄搬回去（#1312）。\nfor e in \"$B\".*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e#\"$B.\"}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\n# 先確定有備份才動 `$D`（#1311）：沒有就什麼都不碰，連結原樣留著。\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nlink_aside=\nif [ -L \"$D\" ]; then\n  link_aside=\"$D.am-link-$$\"\n  mv \"$D\" \"$link_aside\"\nfi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  printf 'AM_KEPT\\n'; exit 0\nfi\nmkdir -p \"$(dirname \"$D\")\"\nif mv \"$best\" \"$D\"; then\n  [ -z \"$link_aside\" ] || rm \"$link_aside\"\n  printf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\nelse\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  exit 1\nfi\n",
+        "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}B={id}\nbest=\nbm=0\n# 只認 `<id>.<毫秒>` 整段：`<id>.attachments.<毫秒>` 之類是別的回收項目，不能當成 bot 目錄搬回去（#1312）。\nfor e in \"$B\".*; do\n  [ -d \"$e\" ] || continue\n  case \"$e\" in *.deleting) continue;; esac\n  ms=${{e#\"$B.\"}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\n# 先確定有備份才動 `$D`（#1311）：沒有就什麼都不碰，連結原樣留著。\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nlink_aside=\nif [ -L \"$D\" ]; then\n  link_aside=\"$D.am-link-$$\"\n  mv \"$D\" \"$link_aside\"\nfi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  printf 'AM_KEPT\\n'; exit 0\nfi\nmkdir -p \"$(dirname \"$D\")\"\nif mv \"$best\" \"$D\"; then\n  [ -z \"$link_aside\" ] || rm \"$link_aside\"\n  printf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\nelse\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  exit 1\nfi\n",
         d = sh_quote(dir),
         t = sh_quote(&trash_dir),
         guard = guard,
@@ -124,9 +124,10 @@ pub async fn backed_up_ids(conn: &HostConn, remote_root: &str) -> Result<Vec<Str
 /// 只有時間規則不夠：#141／#196 那兩次遠端磁碟被塞爆都是「清得不夠快」，而七天之內連刪十幾顆 bot 時，
 /// 時間規則一份都不會清。
 ///
-/// **跟 [`restore`] 不互斥**：`restore` 挑中一份剛好跨過期限的、而這裡在它 `mv` 之前就 `rm -rf` 掉，
-/// `restore` 的 `set -e` 會讓腳本失敗、[`restore_for`] 記一行 warn 不擋還原。窗口極窄（那一份本來下一輪
-/// 也要過期），代價是那個目錄拿不回來，不值得為它加鎖。
+/// **跟 [`restore`] 搶的是同一個 `mv`**（#2235，同本機 #513）：要清的那份先改名成 `<原名>.<pid>-<序號>.deleting`，
+/// 改名成功了才 `rm -rf`；`restore` 與 [`backed_up_ids`] 都不認 `.deleting`。還原先搬走，這裡的改名就失敗、一個檔都不動；
+/// 這裡先改名，還原就找不到那份——不會再出現「搬回一個 `rm -rf` 清到一半的目錄、還回報 `AM_RESTORED`」。
+/// 上一輪改名後沒刪完的 `.deleting`（id 在 `known` 裡的）每輪開頭收掉。哪些 bot 的備份這一輪可以清由 `gc_host` 在鎖內決定。
 /// `known`＝DB 認得的 bot id（#1313）：回收區裡只有 `<known id>.<毫秒>` 這類才是我們放的，別人的目錄不動、不算進總量。
 pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u64, known: &[String]) -> Result<(usize, usize)> {
     let cutoff = now_ms().saturating_sub(keep.as_millis());
@@ -165,12 +166,25 @@ pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u
          printf '%s %s %s\\n' \"$ms\" \"$k\" \"$b\"\n\
          done\n\
          }}\n\
+         seq=0\n\
+         am_take() {{\n\
+         seq=$((seq+1)); s=\"$1.$$-$seq.deleting\"\n\
+         if [ -e \"$T/$s\" ] || [ -L \"$T/$s\" ]; then return 1; fi\n\
+         mv \"$T/$1\" \"$T/$s\" 2>/dev/null || return 1\n\
+         rm -rf \"$T/$s\" 2>/dev/null\n\
+         return 0\n\
+         }}\n\
          if [ -d \"$T\" ]; then\n\
+         for d in \"$T\"/*.deleting; do\n\
+         [ -d \"$d\" ] && [ ! -L \"$d\" ] || continue\n\
+         b=${{d##*/}}; id=${{b%%.*}}\n\
+         case \" $KNOWN \" in *\" $id \"*) rm -rf \"$d\" 2>/dev/null;; esac\n\
+         done\n\
          for d in \"$T\"/*; do\n\
          [ -d \"$d\" ] || continue\n\
          b=${{d##*/}}\n\
          ms=$(am_owned \"$b\") || continue\n\
-         if [ \"$ms\" -le \"$C\" ]; then rm -rf \"$d\" && n=$((n+1)); fi\n\
+         if [ \"$ms\" -le \"$C\" ]; then am_take \"$b\" && n=$((n+1)); fi\n\
          done\n\
          list=$(am_list | sort -n)\n\
          unk=$(printf '%s\\n' \"$list\" | awk '$2==\"-\"{{n++}} END{{print n+0}}')\n\
@@ -183,7 +197,7 @@ pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u
          [ \"$unk\" -eq 0 ] || break\n\
          [ \"$total\" -gt \"$MAXK\" ] || break\n\
          k=$(am_size \"$T/$b\") || break\n\
-         if rm -rf \"$T/$b\"; then ev=$((ev+1)); total=$((total-k)); fi\n\
+         if am_take \"$b\"; then ev=$((ev+1)); total=$((total-k)); fi\n\
          done\n\
          fi\n\
          printf 'AM_TRASH_GC %s %s %s\\n' \"$n\" \"$ev\" \"$unk\"\n",

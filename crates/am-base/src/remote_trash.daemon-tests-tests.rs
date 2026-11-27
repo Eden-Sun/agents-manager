@@ -895,3 +895,98 @@
         assert_eq!(alerts().await, 1, "告警只發一次");
         std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+
+    /// #2235：遠端 gc 先把要清的那份改名成 `.deleting` 才 `rm -rf`。`rm -rf` 清到一半（這裡用一個刪不掉的子目錄讓它停在半路）時，
+    /// 原本的名字底下不能留著半空的目錄讓還原搬回去、還回報 `AM_RESTORED`。
+    #[tokio::test]
+    async fn a_half_removed_remote_backup_is_never_restored() {
+        use std::os::unix::fs::PermissionsExt;
+        let (env, root) = remote("trashbox-half-removed").await;
+        let app = env.app.clone();
+        let conn = app.hosts.get("trashbox-half-removed").await.unwrap();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let old = now_ms() - Duration::from_secs(8 * 86_400).as_millis();
+        let backup = trash.join(format!("{}.{old}", bot.id));
+        std::fs::create_dir_all(backup.join("spool")).unwrap();
+        std::fs::write(backup.join("spool/ev.json"), "pending").unwrap();
+        let stuck = backup.join("stuck");
+        std::fs::create_dir_all(&stuck).unwrap();
+        std::fs::write(stuck.join("f"), "x").unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        super::gc(&conn, &test_remote_root(), Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES, std::slice::from_ref(&bot.id)).await.unwrap();
+        let left = entries(&trash);
+        assert!(!backup.exists(), "清到一半的那份不能還留在原名底下：{left:?}");
+        assert!(left.iter().all(|n| n.ends_with(".deleting")), "{left:?}");
+
+        restore_for(&app, &bot.id).await;
+        assert!(!root.join("bots").join(&bot.id).exists(), "還原不搬 `.deleting`");
+
+        for n in &left {
+            let _ = std::fs::set_permissions(trash.join(n).join("stuck"), std::fs::Permissions::from_mode(0o700));
+        }
+        super::gc(&conn, &test_remote_root(), Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES, std::slice::from_ref(&bot.id)).await.unwrap();
+        assert!(entries(&trash).is_empty(), "上一輪沒刪完的 `.deleting` 下一輪收掉");
+    }
+
+    /// #2235：`restore_bot` 先拿 bot 鎖、再 commit `deleted_at = NULL`、再 ssh 搬回。gc 這一輪碰上它握著鎖：
+    /// 那顆還是已刪，補還原的名單看不到它，以前照樣被當成可以清，過期的備份就在還原搬回之前被刪掉。
+    #[tokio::test]
+    async fn a_backup_whose_restore_holds_the_bot_lock_is_not_cleaned() {
+        let (env, root) = remote("trashbox-restore-locked").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        let trash = root.join("bots-trash");
+        let old = now_ms() - Duration::from_secs(8 * 86_400).as_millis();
+        let backup = trash.join(format!("{}.{old}", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+
+        let lock = app.bot_lock(&bot.id).await;
+        let held = lock.lock().await;
+        crate::runners::remote_trash::gc_host(&app, "trashbox-restore-locked").await;
+        assert!(backup.exists(), "還原握著鎖：這一輪不清");
+        sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&bot.id).execute(&app.db).await.unwrap();
+        restore_for(&app, &bot.id).await;
+        drop(held);
+        assert_eq!(std::fs::read_to_string(root.join("bots").join(&bot.id).join("keep.txt")).unwrap(), "mine");
+    }
+
+    /// #2235：補還原讀完名單之後才變成活著的（還原的 DB 已 commit、ssh 還沒搬），它的過期備份這一輪不清。
+    #[tokio::test]
+    async fn a_bot_restored_after_the_list_keeps_its_backup_this_round() {
+        let (env, root) = remote("trashbox-restored-late").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        let trash = root.join("bots-trash");
+        let old = now_ms() - Duration::from_secs(8 * 86_400).as_millis();
+        let backup = trash.join(format!("{}.{old}", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+        let (app2, id) = (app.clone(), bot.id.clone());
+        crate::runners::app_ports_p11::race_point::arm("remote_restore_after_list", "trashbox-restored-late", move || async move {
+            sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app2.db).await.unwrap();
+        });
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-restored-late").await;
+        assert!(backup.exists(), "名單之後才活過來：這一輪不清");
+        crate::runners::remote_trash::gc_host(&app, "trashbox-restored-late").await;
+        assert_eq!(std::fs::read_to_string(root.join("bots").join(&bot.id).join("keep.txt")).unwrap(), "mine", "下一輪補還原搬回來");
+    }
+
+    /// 已刪、沒有人在還原的那顆，過期的備份照常清（鎖內重讀仍是已刪）。
+    #[tokio::test]
+    async fn a_deleted_bots_expired_backup_is_still_cleaned() {
+        let (env, root) = remote("trashbox-deleted-old").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        let old = now_ms() - Duration::from_secs(8 * 86_400).as_millis();
+        let backup = root.join("bots-trash").join(format!("{}.{old}", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        crate::runners::remote_trash::gc_host(&app, "trashbox-deleted-old").await;
+        assert!(entries(&root.join("bots-trash")).is_empty());
+    }

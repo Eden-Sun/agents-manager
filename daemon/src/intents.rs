@@ -51,6 +51,7 @@ impl Intent {
 }
 
 /// 同一目標同一種動作已經有一件開著：回那一件（重按＝同一件，天然冪等）。
+#[cfg(test)]
 pub enum Inserted {
     New(Intent),
     AlreadyOpen(Intent),
@@ -60,6 +61,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<Intent>> {
     Ok(sqlx::query_as("SELECT * FROM intents WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
+#[cfg(test)]
 async fn open_for(pool: &SqlitePool, kind: &str, subject_id: &str) -> Result<Option<Intent>> {
     Ok(sqlx::query_as("SELECT * FROM intents WHERE kind = ? AND subject_id = ? AND status IN ('pending','running')")
         .bind(kind)
@@ -69,6 +71,7 @@ async fn open_for(pool: &SqlitePool, kind: &str, subject_id: &str) -> Result<Opt
 }
 
 /// 寫一列 `pending`。`ttl_secs`＝放棄期限（超過還沒做完就 `failed`）。
+#[cfg(test)]
 pub async fn insert(pool: &SqlitePool, kind: &str, subject_id: &str, host: &str, payload: &Value, ttl_secs: i64) -> Result<Inserted> {
     let now = crate::db::now();
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -227,6 +230,55 @@ pub async fn claim(pool: &SqlitePool, id: &str, boot: &str) -> Result<bool> {
     .await?
     .rows_affected();
     Ok(n == 1)
+}
+
+/// 寫入並認領在同一個交易（#2235）：新的一件直接寫成 `running`（owner＝`boot`、`attempts=1`），已經開著的同一件就地
+/// [`claim`]。中間沒有 `pending` 可以被 `recover_host` 搶先認領。回 `(id, 這次拿到認領)`；已開著、被這顆 boot 自己握著的回 `false`。
+pub async fn insert_claimed(pool: &SqlitePool, kind: &str, subject_id: &str, host: &str, payload: &Value, ttl_secs: i64, boot: &str) -> Result<(String, bool)> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    let existing: Option<String> = sqlx::query_scalar("SELECT id FROM intents WHERE kind = ? AND subject_id = ? AND status IN ('pending','running')")
+        .bind(kind)
+        .bind(subject_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let now = crate::db::now();
+    let out = match existing {
+        Some(id) => {
+            let n = sqlx::query(
+                "UPDATE intents SET status = 'running', owner_boot = ?1, attempts = attempts + 1, updated_at = ?2
+                 WHERE id = ?3 AND (status = 'pending' OR (status = 'running' AND COALESCE(owner_boot, '') <> ?1))",
+            )
+            .bind(boot)
+            .bind(&now)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            (id, n == 1)
+        }
+        None => {
+            let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let id = crate::db::ulid();
+            sqlx::query(
+                "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, owner_boot, attempts, created_at, updated_at, expires_at)
+                 VALUES (?,?,?,?,?,'running',?,1,?,?,?)",
+            )
+            .bind(&id)
+            .bind(kind)
+            .bind(subject_id)
+            .bind(host)
+            .bind(payload.to_string())
+            .bind(boot)
+            .bind(&now)
+            .bind(&now)
+            .bind(expires)
+            .execute(&mut *tx)
+            .await?;
+            (id, true)
+        }
+    };
+    tx.commit().await?;
+    Ok(out)
 }
 
 async fn finish(pool: &SqlitePool, id: &str, status: &str, err: Option<&str>) -> Result<bool> {

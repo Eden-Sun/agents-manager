@@ -76,7 +76,7 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
     };
     #[cfg(test)]
     crate::runners::app_ports_p11::race_point::hit("remote_restore_after_list", host).await;
-    let mut out = Unrestored::default();
+    let mut out = Unrestored { live: ids.iter().cloned().collect(), backed: backed.clone(), ..Default::default() };
     for id in ids.iter().filter(|id| backed.contains(*id)) {
         match crate::remote_purge::restore_backoff(&app.db, host, id).await {
             Ok(Some((attempts, due))) if !due || attempts >= crate::remote_purge::RESTORE_GIVE_UP_AFTER => {
@@ -157,6 +157,10 @@ struct Unrestored {
     failed: HashSet<String>,
     /// 鎖忙而跳過（常態，每輪只記一筆 debug）。
     busy: HashSet<String>,
+    /// 讀名單那一刻這台主機上活著的 bot（#2235：之後才變成活著的＝還原正在進行，備份這一輪不清）。
+    live: HashSet<String>,
+    /// 回收區裡有 `<id>.<毫秒>` 備份的 id。
+    backed: HashSet<String>,
 }
 
 /// 還原成功（或已經不需要還原）：這顆的退避記號清掉（#1427）。寫不進去只記 log，下一輪照常試。
@@ -199,6 +203,25 @@ async fn forget_marks_without_backup(app: &Arc<App>, host: &str, backed: &HashSe
     }
 }
 
+/// 這一輪可以清哪幾顆的備份（#2235）：每顆先 `try_lock`、在鎖內重讀，鎖一直握到清完。`restore_bot` 從認領鎖、
+/// commit `deleted_at = NULL` 到 ssh 搬回都在鎖內，所以鎖忙的跳過；拿到鎖時已刪的可以清；活著的只有讀名單時就活著
+/// （補還原已處理過）才算，名單之後才變成活著的一律排除。還原失敗或鎖忙而沒還原成的照 #1413 排除。
+async fn cleanable(app: &Arc<App>, u: &Unrestored) -> (Vec<String>, Vec<tokio::sync::OwnedMutexGuard<()>>) {
+    let (mut known, mut guards) = (Vec::new(), Vec::new());
+    for id in u.backed.iter().filter(|id| !u.failed.contains(*id) && !u.busy.contains(*id)) {
+        let Ok(guard) = app.bot_lock(id).await.try_lock_owned() else { continue };
+        match crate::db::bot(&app.db, id).await {
+            Ok(Some(b)) if b.deleted_at.is_some() || u.live.contains(id) => {
+                known.push(id.clone());
+                guards.push(guard);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(bot = %id, error = %e, "could not re-read a bot before cleaning its remote bots-trash copy; kept this round"),
+        }
+    }
+    (known, guards)
+}
+
 /// 主機連上時：先補還原欠著的，再清一次過期的。補還原的清單拿不到就這一輪不清，免得過期清掉還沒還原的備份（#1307）。
 /// 還原失敗或鎖忙而沒還原成的那幾顆，它們的備份這一輪不算「我們放的」：不過期、不計入總量、不被淘汰；其他的照常清（#1406、#1413）。
 pub async fn gc_host(app: &Arc<App>, host: &str) {
@@ -216,11 +239,7 @@ pub async fn gc_host(app: &Arc<App>, host: &str) {
     if !unrestored.failed.is_empty() {
         tracing::warn!(host, failed = unrestored.failed.len(), "some pending remote restores failed; their bots-trash copies are kept this round");
     }
-    let known: Vec<String> = crate::bot_trash::known_bot_ids(&app.db)
-        .await
-        .into_iter()
-        .filter(|id| !unrestored.failed.contains(id) && !unrestored.busy.contains(id))
-        .collect();
+    let (known, _guards) = cleanable(app, &unrestored).await;
     match crate::remote_trash::gc(
         &conn,
         &remote_root(),
