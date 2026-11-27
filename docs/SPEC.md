@@ -782,6 +782,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   （這段期間沒有新回合）、使用者沒有從網頁中斷過，才排一則 queued 回合（`relay_from = daemon`）：「[來自 AG Man daemon] 上一輪回應被 API 斷線截斷（原因摘要）。
   請先確認最後一個工具的實際結果，再接著把原本的工作做完；如果已經做完，簡短回報即可。」`client_request_id = api-error-nudge:<turn_id>`。
   同一個被截斷的回合只補一次；補出去的那一輪又被暫時性錯誤截斷時（被截斷回合的 crid 帶此前綴）不再補，避免無限循環。daemon 在等待期間重啟就不補。
+  有 hook 的 claude 由 `StopFailure`（API／未分類／非額度的限流類）收掉回合時不走備援計時器：commit 之後在背景照 1／2／4／8 秒重讀畫面，
+  讀到錯誤列才 `capture`＋arm（錯誤列常比 hook 晚畫出來）；讀不到就不補。額度撞限的 `StopFailure` 不排。
 
 Codex 0.156 起，TUI 在回合失敗或被中斷時會把已收到的回答／計畫串流留在終端歷史裡（子代理完成事件也會先結清串流活動）。daemon 在 Codex
 錯誤或確認中斷時，若畫面仍有這一回合可辨識的部分內容，就先存成 `assistant` 訊息（`incomplete = 1`，UI 標「可能不完整」），再存失敗／中斷說明；

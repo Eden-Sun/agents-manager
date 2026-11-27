@@ -60,6 +60,7 @@ mod arc_port_2_hookhost {
         fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a { <T as crate::hookrecv::HookHost>::background_stop(self.as_ref(), run, payload) }
         fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a { <T as crate::hookrecv::HookHost>::transcript_allowed(self.as_ref(), bot, path) }
         fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a { <T as crate::hookrecv::HookHost>::local_transcript_allowed(self.as_ref(), bot, path) }
+        fn after_api_stop_failure(&self, bot_id: &str, run_id: &str) { <T as crate::hookrecv::HookHost>::after_api_stop_failure(self.as_ref(), bot_id, run_id) }
     }
 }
 

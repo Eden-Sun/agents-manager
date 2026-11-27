@@ -9,8 +9,11 @@
 //! 只認暫時性（[`is_transient`]）：撞額度、模型滿載、資安過濾、4xx 一律不補。同一個被截斷的回合只補一次
 //! （`client_request_id = api-error-nudge:<turn_id>`）；補出去的那一輪又被截斷，不再補（看被截斷回合的 crid 前綴）。
 //! 只有 claude；本機遠端都行（只靠畫面與 DB）。等待在這個行程的記憶體裡，daemon 重啟就不補。
+//!
+//! 有 hook 的 claude 不走 poller 的備援計時器：`StopFailure` 直接把回合收成 failed。那條路在 commit 之後叫
+//! [`after_stop_failure`]，在背景照 [`CAPTURE_DELAYS`] 重讀畫面（錯誤列可能比 hook 晚畫出來），讀到才 capture＋arm。
 
-use super::s6_ports::ResumeNudgeContext;
+use super::s6_ports::{ResumeNudgeContext, TurnErrorContext};
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -21,6 +24,9 @@ pub const CRID_PREFIX: &str = "api-error-nudge:";
 
 /// 錯誤被記下之後等這麼久才確認、才補。
 pub const WAIT: Duration = Duration::from_secs(30);
+
+/// `StopFailure` 之後重讀畫面的間隔（逐次累加）：hook 常比畫面上的錯誤列先到。
+pub const CAPTURE_DELAYS: [Duration; 4] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8)];
 
 fn nudge_text(reason: &str) -> String {
     format!(
@@ -80,6 +86,8 @@ struct State {
     armed: HashMap<String, Armed>,
     /// 每顆 bot 最後處理過（排過、取消、或判定不補）的被截斷回合：capture 在同一個畫面上會重複呼叫，不重複 arm。
     handled: HashMap<String, String>,
+    /// `StopFailure` 收掉回合後、還在等畫面錯誤列的 run（bot → run）。
+    pending: HashMap<String, String>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -96,6 +104,53 @@ pub fn retain_bots(live: &[String]) {
     let mut g = lock();
     g.armed.retain(|id, _| live.contains(id));
     g.handled.retain(|id, _| live.contains(id));
+    g.pending.retain(|id, _| live.contains(id));
+}
+
+/// hook 收到 `StopFailure`（API 類）並把回合收成 failed 之後叫（不持鎖也行）：在背景補 `turn_error::capture` 與 [`arm`]。
+pub fn after_stop_failure<C: TurnErrorContext + ResumeNudgeContext>(app: &C, bot_id: &str, run_id: &str) {
+    lock().pending.insert(bot_id.to_string(), run_id.to_string());
+    if cfg!(any(test, feature = "test-hooks")) {
+        return;
+    }
+    let app = (*app).clone();
+    let bot_id = bot_id.to_string();
+    let run_id = run_id.to_string();
+    tokio::spawn(Box::pin(async move {
+        capture_after_stop_failure(&app, &bot_id, &run_id, &CAPTURE_DELAYS).await;
+    }));
+}
+
+/// 測試看得到 [`after_stop_failure`] 記下的 run。
+pub fn pending_capture(bot_id: &str) -> Option<String> {
+    lock().pending.get(bot_id).cloned()
+}
+
+/// 每等一段就持 bot 鎖讀一次畫面：讀到錯誤列就 capture＋[`arm`] 回 `true`；這期間又來一次 `StopFailure`（換了 run）就讓給新的。
+pub async fn capture_after_stop_failure<C: TurnErrorContext + ResumeNudgeContext>(app: &C, bot_id: &str, run_id: &str, delays: &[Duration]) -> bool {
+    for delay in delays {
+        tokio::time::sleep(*delay).await;
+        let bot_lock = app.bot_lock(bot_id).await;
+        let _g = bot_lock.lock_owned().await;
+        if lock().pending.get(bot_id).map(String::as_str) != Some(run_id) {
+            return false;
+        }
+        match crate::turn_error::capture(app, bot_id, run_id).await {
+            Ok(true) => {
+                lock().pending.remove(bot_id);
+                arm(app, bot_id, run_id).await;
+                return true;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::debug!(bot = bot_id, run = run_id, error = ?e, "turn error capture after StopFailure failed"),
+        }
+    }
+    let mut g = lock();
+    if g.pending.get(bot_id).map(String::as_str) == Some(run_id) {
+        g.pending.remove(bot_id);
+    }
+    tracing::info!(bot = bot_id, run = run_id, "StopFailure left no API error line on screen; no continue nudge");
+    false
 }
 
 /// `capture` 之後叫（呼叫端持 bot 鎖）：這個 run 現在釘著暫時性錯誤、最後一回合不是 nudge 自己的，就記成候選並排 [`WAIT`] 後的確認。

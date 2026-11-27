@@ -1583,6 +1583,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             app.emit_message_added(&bot.id, message).await;
             app.emit_turn(&t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
+            if bot.kind == "claude" && matches!(reason, FailureReason::Api | FailureReason::Unknown | FailureReason::RateLimit)
+                && !detail.as_deref().is_some_and(|d| crate::turn_error::is_quota_limit(d) || crate::turn_error::is_quota_exhaustion(d)) {
+                app.after_api_stop_failure(&bot.id, &r.id);
+            }
             Ok(())
         }).await,
         HookKind::StatusLine if provider == "agy" => Box::pin(async move {
@@ -2681,6 +2685,8 @@ pub trait HookHost:
     /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
     fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
     fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
+    /// claude 的回合被 API 類 `StopFailure` 收成 failed 之後：背景補讀畫面錯誤列、排 `api_error_nudge`（不持鎖、不擋 hook 回應）。
+    fn after_api_stop_failure(&self, bot_id: &str, run_id: &str);
 }
 
 /// 線索晚到（2026-10-19 mac_builder `hub-5j3cjh-draft`）：遠端 hook 走 spool，比 `pane_agent_detected` 觸發的那輪對帳晚 20～50 秒，

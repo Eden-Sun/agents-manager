@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 mod agy_pre_invocation_delivery_tests;
 mod agy_tests;
+mod api_error_stop_failure_tests;
 mod codex_limit_clear_tests;
 mod codex_stop_delivery_tests;
 mod drain_tests;

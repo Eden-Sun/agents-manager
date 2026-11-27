@@ -50,6 +50,10 @@ impl HookHost for App {
     async fn local_transcript_allowed(&self, bot: &db::Bot, path: &str) -> bool {
         crate::app_ports_p5::local_transcript_allowed(&self.shared(), bot, path).await
     }
+
+    fn after_api_stop_failure(&self, bot_id: &str, run_id: &str) {
+        crate::lifecycle::api_error_nudge::after_stop_failure(&self.shared(), bot_id, run_id);
+    }
 }
 
 pub async fn receive(
