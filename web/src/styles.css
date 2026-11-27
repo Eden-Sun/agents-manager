@@ -333,15 +333,14 @@ button:disabled {
 }
 
 .head-ram .mem-badge {
-  flex-wrap: wrap;
-  white-space: normal;
+  flex-wrap: nowrap;
+  white-space: nowrap;
   max-width: 100%;
-  justify-content: center;
+  overflow: hidden;
 }
 
 .head-ram .mem-free {
-  flex: 1 0 100%;
-  text-align: center;
+  flex: none;
 }
 
 .browser-icon {

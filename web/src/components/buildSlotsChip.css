@@ -15,13 +15,6 @@
   color: var(--warn, #c98a00);
 }
 
-.head-ram:not(.multi):has(> .build-slots-chip) {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
 .head-ram.multi > .build-slots-chip {
   align-self: flex-start;
 }
