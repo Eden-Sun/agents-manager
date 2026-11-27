@@ -699,3 +699,88 @@
 - agy、grok、遠端 spool 重播與即時 hook 的差異。
 - hookless 的 claude（`adopted` 且沒注入 hook）走 `grok_transcript::sync_locked`，這支沒有讀。
 - 發現 2、3、4、5 都沒有實機重現；發現 4 需要先確認 codex 在 session 接不回時的實際行為。
+
+## §12 hook 收尾與 poller 備援的副作用對照（agy＋grok）與 spool 重播（2026-11-27，唯讀）
+
+行號以 main `5595ee4f6` 為準。接 §11。開出的 issue：**#2237**（發現 1）。其餘不到門檻，或是文件已寫明接受的風險。
+
+### 覆蓋
+
+| 範圍 | 覆蓋 | 說明 |
+|---|---|---|
+| hook 分類與 agy／grok 專屬處理 | ✅逐段 | `hookrecv.rs:280-330`、`:395-540`（`classify` 的 codex／grok／agy）、`:1014-1121`（`confirm_agy_pre_invocation_delivery`）、`:1161-1237`（`recent_fallback_turn`、`grok_success_at`、`fired_within`）、`:1592-1661`（agy `StatusLine`）、`:1806-1847`（`Identity`）；共用的 `TurnComplete`／`TurnFailed` 在 §11 已讀。 |
+| poller 的 agy／grok 分支 | ✅逐段 | `poller.rs:1626-1677`（`agy_hook_recent`、`agy_native_from_transcript`）、`try_fallback` 的 agy／grok 分支（§11 已讀全檔）、`grok_transcript.rs:200-569`（`sync_locked`、`import`、`settle_in_flight`）、`agy_busy.rs` 全檔、`agy_session.rs` 的 `load`、`screen.rs:32-103`（`capture_codex_usage_notices`）、`turn_error.rs:880-905`、`stuck_turns.rs:186-206`。 |
+| spool 重播 | ✅逐段 | `hookrecv.rs:2206-2262`（`drain_remote_locked`）、`:2367-2382`（`status_body`）、`:2537-2609`（`replay_spool_locked`）、`setup.rs:40-110`（遠端 `hook.sh` 前段）、`agy_remote.rs:60-135` 與 `agy_hook.rs:23-49`（agy 的遠端與本機 dispatcher）、`events.rs:610-660`（狀態邊觸發 drain）、`hook_inbox.rs` 的 `Source` 與排序。`claim_script`／`fold_spool` 的檔案折疊細節沒讀。 |
+| 身份登入標記 | ✅ | `runners/login_prompt.rs:28-90`、`runners/agy_auth.rs` 全檔、`quota_agy.rs` 的冷卻常數。 |
+| 沒做 | ✗ | 沒有任何實機驗證；`agy_screen::is_busy`、`limit_banner.rs`、`grok_limit_window` 內部沒讀；grok 的 hooks 安裝腳本（`grok-hook.sh`）沒讀。 |
+
+### 前提
+
+- agy 與 grok 都有 hook。只有「被接管（`adopted`）且沒注入 hook」的 run 才走對話檔同步（`grok_transcript.rs:251-253`）；一般由 AG Man 啟動的 bot，備援就是 `try_fallback` 讀畫面（agy 另讀對話檔取回覆）。
+- §11 的前提照舊：`working → idle` 一定啟動 5 秒計時器，之後 `capture_codex_usage_notices`（codex、grok）與 `turn_error::capture` 都會跑。
+
+### 對照表（agy）
+
+| # | hook 做的事（位置） | 備援的對應 | 判定 |
+|---|---|---|---|
+| 1 | 回合收成 `completed`／`failed`、寫回覆與事件 | `try_fallback`：先讀對話檔（`AgyNative::Reply`），沒有才讀畫面；撞限走 `agy_hit` 收成 failed（`poller.rs:1704-1735`、`:1809`） | ✅ |
+| 2 | `agy_busy::clear`（`:1455-1458`）、`fullyIdle:false` 記 `mark_not_idle`（`:1500-1506`） | 證據綁「run＋turn」，回合被備援收掉後不影響下一回合（`agy_busy.rs:122-138`）；備援與閒置收尾都先問 `should_hold` | ✅（不需要對應） |
+| 3 | `StatusLine`：寫 `native_session_id`、`agy_busy::note_statusline`、權限確認時把 run 改成 `blocked` 並在解除後 flush 佇列、寫 `status_json`、`cache_clock::on_statusline`、`adopt_statusline_model`（`:1592-1661`） | 沒有 statusLine 時：`agy_session::load` 綁對話並由 `record_status` 從對話檔估 `status_json`（`agy_session.rs:403-419`）；權限框靠畫面判讀（`agy_screen`） | ◐（狀態列不到時，模型與 context 是估的，文件已寫明） |
+| 4 | `Identity`（`SessionStart`／`PreInvocation`）：`consume_resume_session`（`:1811-1813`） | 有 hook 的 agy：沒有對應（`agy_session::load` 只綁對話，不比對）。hookless：`sync_locked` 會呼叫（`grok_transcript.rs:265`） | ✗ 低（同 §11 發現 4 的形狀；`resume_gate` 對 agy 不等待） |
+| 5 | `PreInvocation` 帶 `lastUserInput` 時補 `delivery_verified`（`:1039-1121`，只限本機） | 備援收尾時有畫面回音或對話檔回覆就設 `delivery_verified`（`poller.rs:1905-1908`） | ✅ |
+| 6 | `TurnFailed`：授權失敗 → `login_on_auth_failure`（`:1516-1518`） | 沒有。額度探測看到 `Authentication required` 會翻旗標（`quota_agy.rs` 的 `probe_identity`），是另一條路 | ◐；**hook 這一側本身有錯，見發現 1** |
+| 7 | `TurnFailed`：額度用完 → `mark_agy_limit_hit`（`:1520-1527`） | `agy_hit`＋`mark_agy_limit_hit`（`poller.rs:1952-1953`），以及 `turn_error::capture`（`turn_error.rs:455-459`） | ✅ |
+| 8 | `TurnComplete`：沒有 statusLine 時用 `lastInputTokens` 寫 `status_json`（`:1860-1873`） | `record_status` 從對話檔算 | ✅ |
+| 9 | 外部回合的使用者訊息與 `relay_from` | `begin_external_turn` 不標來源；hookless 的 `import` 會標（`grok_transcript.rs:440-443`、`:501-503`） | ✗ 低（§11 發現 5） |
+| 10 | 撞限後成功就清撞限 | hook 與備援**都不清**（hook 只對 codex、grok 清）；agy 靠額度探測的讀數 | 一致 |
+
+### 對照表（grok）
+
+| # | hook 做的事（位置） | 備援的對應 | 判定 |
+|---|---|---|---|
+| 11 | 回合收尾、寫回覆 | `try_fallback` 讀畫面；撞限走 `grok_limit_notice_lines`＋`mark_codex_limit_hit`（對 grok 會轉成 `Banner::Grok`，`turn_error.rs:893-904`） | ✅ |
+| 12 | 撞限標記 | hook **不標**（只避免誤清）；由計時器的 `capture_codex_usage_notices` 讀畫面標（`screen.rs:39-41`、`:86-96`） | ✅（兩條路都靠畫面） |
+| 13 | `clear_limit_hit_for_bot_if_older_than`：撞限之後才送出的回合成功收尾就清（`:1485-1491`、`:1183-1202`，只限本機） | 沒有 | ✗ 低（同 §11 發現 3） |
+| 14 | `consume_resume_session`（第一個 `Stop`，`:1855-1858`） | 有 hook 的 grok：沒有。hookless 的 `sync_locked` 對 grok **也不呼叫**（只有 agy 分支呼叫，`grok_transcript.rs:263-281`） | ✗ 低–中（同 §11 發現 4） |
+| 15 | `Identity`（`session_start`）：寫 `native_session_id`、`transcript_path` | 有 hook 的 grok 沒有其他來源；hookless 由 `session_for` 綁（`:207-237`） | ◐（hook 永遠不到就沒有 session id） |
+| 16 | 授權失敗 | hook 與備援**都不處理**（`login_on_auth_failure` 對 grok 直接 return，`login_prompt.rs:43-45`） | 一致 |
+| 17 | 外部回合的 `relay_from` | 同第 9 列 | ✗ 低 |
+
+### spool 重播與即時 hook 的差異
+
+即時 hook（HTTP）與重播（本機 spool、遠端 spool）**都先進 `hook_inbox`，再由同一支 `process_for` 處理**，`Source` 只是標籤。所以沒有「重播漏做某個副作用」；差異只在時間與順序：
+
+| # | 差異 | 位置 | 影響 |
+|---|---|---|---|
+| R1 | 延遲：遠端在 `working → idle`／`→ blocked` 的狀態邊先 drain（有時間上限），之後才啟動備援計時器；沒趕上的要等 30 秒一輪的掃描 | `events.rs:628-635`、`:654`；`hookrecv.rs:2161` | Stop 那一行若在 drain 之後才寫進 spool，備援會先收掉回合，Stop 以「遲到的 hook」處理（見發現 2） |
+| R2 | 順序：遠端 claude 的 statusLine 是單槽檔，drain 時**同步、先於**同一批 spool 事件處理，而且 `received_at` 用的是 drain 當下 | `hookrecv.rs:2249-2260`、`:2367-2382` | 只影響額度與狀態列顯示；沒有發現問題 |
+| R3 | `status_body` 寫死 `provider: "claude"` | `hookrecv.rs:2376` | 單槽檔只有 claude 的 statusLine 會寫（`setup.rs:70-77`）；遠端 agy 的 `state` 走 spool 佇列、provider 是 agy（`agy_remote.rs:118-125`），不受影響 |
+| R4 | 依賴「現在」的判斷：權限提示超過 120 秒就不處理；`grok_success_at`、`confirm_agy_pre_invocation_delivery` 只認本機 | `hookrecv.rs:551`、`:1192-1194`、`:1046` | 遠端 grok 成功回合不清撞限、遠端 agy 不補 `delivery_verified`，都是文件寫明的限制 |
+| R5 | 遲到的 Stop 與「120 秒內被備援收掉的回合」比對；超過 120 秒就不比 | `hookrecv.rs:1161-1171` | 主機斷線或 daemon 停機超過 2 分鐘後才重播的 Stop，會被當成外部回合另存一份回覆（原回合留著備援那份），或落到發現 2 的情況 |
+| R6 | 本機 daemon 重啟後，新進來的即時 hook 可能比 spool 裡較舊的事件先進收件匣 | `hookrecv.rs:2556-2609`；`hook_inbox.rs:286` | 同 R5，較舊的 Stop 會在較新的回合開始之後才被處理 |
+
+### 發現
+
+| # | 檔:行 | 觸發情境 | 嚴重度／信心 | 建議修法 | issue |
+|---|---|---|---|---|---|
+| 1 | `daemon/src/runners/agy_auth.rs:15-41`；`daemon/src/runners/login_prompt.rs:35-42` | 綁非預設身份（例如 ag1，自己的 `HOME`）的 agy bot 回合以授權失敗收尾：`on_turn_auth_failure` 不看 bot 的身份，一律把主機**預設帳號**標成未登入、清預設帳號的額度、讓它的探測冷卻 5 分鐘、推播「預設帳號被登出」；真正失效的 ag1 沒有被標記，要等 10 分鐘一輪的身份重驗。claude／codex 的同一條路會先解析身份（`login_prompt.rs:46-62`）。 | 中／中（未實機；沒有確認身份與預設帳號共用 `HOME` 時的期望行為） | 先解析 bot 生效的身份；不共用預設帳號的身份改走 `record_identity_login_fenced` 並清該身份的額度 key。 | #2237 |
+| 2 | `crates/am-lifecycle/src/hookrecv.rs:1945-1964`、`:1982-1991` | 遲到的 Stop 到達時已有**下一個**回合在途：只有在「120 秒內有被備援收掉的回合」**且** hook 帶得出使用者訊息原文時，才會改補回上一回合；否則直接把在途的回合收掉、把上一回合的回覆記在它底下。grok 的 Stop 不帶使用者訊息（`classify` 的 `user: None`），所以一定走後者；codex 新版 Stop 也不帶。下一回合真正的 Stop 之後變成另一個外部回合。重播（R1、R5、R6）讓這個時間差更容易出現。 | 中／中，但 **`docs/SPEC.md:4211` 已寫明是接受的殘餘風險**（grok 的 `promptId` 沒在送出時存下來），所以不開 issue | 若要收斂：本機 bot 可加一條「hook 的 `received_at` 早於在途回合的 `delivered_at` 就不認領」（`grok_success_at` 已經在比同一件事）。遠端因兩台時鐘不同，只能比到秒。 | —（文件已接受） |
+| 3 | `crates/am-lifecycle/src/lifecycle/grok_transcript.rs:263-281` | hookless 的 grok（被接管、沒注入 hook）以 resume 啟動：`sync_locked` 只有 agy 分支呼叫 `consume_resume_session`，grok 分支綁了 session 也不比對，`resume_outcome` 不會有結論，接回的不是原本那段也不會留 `context_lost`。 | 低／中（被接管的 run 通常不是 AG Man 以 resume 啟動的，實際觸發機會小） | grok 分支取得 `sid` 後同樣呼叫 `consume_resume_session`。 | — |
+| 4 | `crates/am-lifecycle/src/lifecycle/agy_busy.rs:122-126`；`stuck_turns.rs:197-203`；`poller.rs:1714-1717` | agy 最後一筆 statusLine 顯示忙碌（`task_count > 0` 或 `agent_state` 是工作中）之後沒有再收到新的 statusLine：`holds` 沒有時效，備援與閒置收尾都不收回合，回合一直在途，直到 run 結束或下一筆 statusLine。 | 低／低（需要 statusLine 事件遺失；本機有 spool、遠端走佇列，正常不會掉） | `LiveState` 記收到時間，超過一段時間（例如 `AGY_HOOK_QUIET` 的 180 秒）且畫面不忙就不再擋。 | — |
+
+§11 的發現 3（撞限後成功不清）、4（resume 不比對）、5（`relay_from`）在 grok 與 agy 也成立，見表中第 4、9、13、14、17 列，不另列。
+
+### 讀過、判定不是缺漏的
+
+- **grok 撞限標記**：hook 本來就不標，兩條路都靠計時器讀畫面（表 12）。
+- **agy 撞限後清除**、**grok 授權失敗**：hook 也不做，兩邊一致（表 10、16）。
+- **`agy_busy` 的 `fullyIdle:false` 證據**：綁回合 id，不需要備援去清（表 2）。
+- **重播的處理程式**：與即時 hook 是同一支，沒有只在其中一邊做的副作用。
+- **遠端 agy 的 statusLine**：走 spool 佇列，不經寫死 `claude` 的單槽檔（R3）。
+
+### 仍未覆蓋
+
+- 沒有任何實機驗證；發現 1 需要一顆綁非預設身份的 agy bot 實測。
+- `claim_script`、`fold_spool` 的檔案折疊與 `.claim` 卡住的處理沒讀。
+- grok 的 hook 安裝腳本與 `limit_banner.rs`、`agy_screen::is_busy` 的內部沒讀。
+- hookless 的 claude（`claude_child_log`）沒讀。
