@@ -371,3 +371,145 @@
 - 網頁前半的草稿與附件、窄螢幕各版面只做了 diff 層級的審查（§4、§5 補審）。
 
 這些未完成項目都列在上面，沒有遺漏；若需要另一批審查，請從附錄開始。
+
+## §8 補審（2026-11-27）
+
+唯讀。對象是上面「未完成」列出的四項。行號以 origin/main `3efab16ac` 為準。已在 #2216–#2224 處理的不重報。
+開出的 issue：**#2230**（發現 1）、**#2231**（發現 3）。其餘發現嚴重度或信心不到門檻，只列在這裡。
+
+### 覆蓋
+
+| 範圍 | 覆蓋 | 說明 |
+|---|---|---|
+| `f6243f1b2` api_bot system 固定 | ✅逐段 | 正式程式的 diff 全讀，加上現行 `runtime.rs:660-700`、`:2675-2703`、`prompt.rs:50-65`。測試只看名稱。 |
+| `b48e818ce` 預留與 HTTP 錯誤 | ✅逐段 | `http.rs`、`completion.rs`、`quote.rs`、`pricing.rs`、`adapter.rs`、`runtime.rs` 的 diff 全讀，加上現行 `pricing.rs:100-232`。 |
+| `62ab6d042` sweeper 圍欄 | ✅逐段 | `sweeper.rs`、`runtime.rs` 的 diff 全讀。沒有發現問題。 |
+| `459e72090` `ledger_deploy.rs` | ✅逐段 | 現行檔案 156 行全讀，加上 `ledger_api.rs` 的呼叫端、`deliverable_shas`、`normalize_deploy_sha`、`deploy_now::git`。 |
+| 附錄 85 個 web commit | 14 個讀過（其中 3 個是 fb-scan 已讀）、33 個 ✗未讀、38 個只看標題 | 明細見下方三張清單。 |
+| 草稿與附件 | ⚠抽樣 | 讀了現行 `composerAttachmentDrafts.ts` 全檔與 `attachmentsHelpers.ts:100-190` 的還原路徑，對過伺服器端附件保留時間（`attach.rs:356`，24 小時）。`0f95cb08b` 補打 composer-draft 的路徑沒有再讀。 |
+| 窄螢幕版面 | ✗未讀 | 沒有在瀏覽器實際操作，也沒有逐段讀 CSS。 |
+
+### 發現
+
+| # | sha、檔:行 | 觸發情境 | 嚴重度／信心 | 建議修法 | issue |
+|---|---|---|---|---|---|
+| 1 | `5bf73eeca`（疊在 `f6243f1b2` 上）`daemon/src/api_bot/runtime.rs:694`、`:2675-2703` | openai-api bot 在 session 中途改了指示（global／專案指示、persona、bot 名稱）。更新區塊與 prompt 接成同一個字串，`already_updated_with` 用完全相等比對，永遠不成立，之後**每個回合**都再附一次完整指示，直到 session 重置。claude-api 不受影響。 | 中／高 | 字串內容改用「等於或以區塊加分隔開頭」比對，或 openai 也送成獨立 part。補 openai 三回合測試。 | #2230 |
+| 2 | `f6243f1b2` `daemon/src/api_bot/runtime.rs:670-675` | 指示改成 Y（補了更新區塊）之後又改回原本的 X：`stored == fresh`，不再補更新，對話裡最後一份指示仍是 Y，bot 繼續照 Y 做，直到 session 重置。兩種 kind 都有。 | 低–中／高 | 判斷改成「目前生效的指示（最後一個更新區塊，沒有就用 stored）≠ fresh」。 | — |
+| 3 | `b48e818ce` `daemon/src/api_bot/pricing.rs:132`、`:147-190`、`:217`；`adapter.rs:811` | 預留金額把上一次回覆的 prefix 用 cache 讀取價算，沒有確認 cache 還活著。bot 閒置超過 TTL（預設 5 分鐘）或換模型後的第一個請求，實際是寫入價，預留低估 20 到 30 倍；`crates/am-base/src/db/api_bot.rs:375`、`:389` 的上限檢查會放行。超支以每次冷啟動一個請求為界。 | 中／中 | 上一次回覆距今小於 TTL 且模型、effort 沒變才用讀取價，否則整段寫入價。 | #2231 |
+| 4 | `b48e818ce` `daemon/src/api_bot/pricing.rs:106-127` `input_token_bound` | 增量上界只加「上一次回覆內容＋最後一則訊息」的位元組。上一次回覆之後若有超過一則訊息進了 transcript（例：前一個請求失敗但使用者訊息已寫入），上界會低估。 | 低／低（未確認這種 transcript 是否會出現） | 改成加總上一次回覆之後的所有訊息。 | — |
+| 5 | `b48e818ce` `daemon/src/api_bot/completion.rs:455-580`、`http.rs` | 錯誤說明寫死「Anthropic API 回了錯誤狀態碼」，openai-api 也顯示這句；request id 只讀 `request-id`，OpenAI 用的是 `x-request-id`，所以 openai 的錯誤沒有 request id。 | 低／高 | 依 kind 換字樣；兩個 header 都讀。 | — |
+| 6 | `459e72090` `daemon/src/ledger_api.rs:344-364`；`web/src/components/MessageLedgerBar.tsx:31-33` | 訊息清單附帶的 `ledger_items` 沒有 `deploy_state`（只有 `/ledger` 清單與 PATCH 回應有）。訊息下方的帳本列在載入時一律顯示「待驗收」，要等到該訊息收到 `ledger_updated` 才變成「等待部署／已部署待驗收」；訊息清單重新載入後又變回去。上方的「追蹤中」列不受影響。 | 低–中／高 | `attach_ledger_items_to_messages` 也算 `deploy_state`，或前端在掛載時補抓一次。 | — |
+| 7 | `459e72090` `daemon/src/ledger_deploy.rs:54-80` | 交件內容裡的 sha 若在 push 前被 rebase 或壓掉，舊 sha 還留在本機物件庫但不是 live 的祖先，該項會一直顯示「等待部署」，直到物件被 gc。 | 低／中 | 祖先判斷為否且 sha 不在任何遠端分支上時，回 `None`（顯示一般的待驗收）。 | — |
+| 8 | `459e72090` `daemon/src/ledger_deploy.rs:22-38` | `VERIFIED` 只快取成功的結果。交件內容裡不是 commit 的 7 位以上 hex 字（日期 `20261127`、編號）每次列帳本都各跑一次 `git rev-parse`；「追蹤中」列在任何專案的帳本更新時都會重抓。 | 低／高 | 失敗結果也快取（設短的有效時間）。 | — |
+| 9 | `c2267fbc6` `daemon/src/reset_offer_snooze.rs`（`load`／`set`／`clear`） | 檔案是讀出、修改、寫回，沒有鎖；`load` 遇到過期項目會順手寫回。`GET /api/quota` 與推播掃描的 `load` 若與 `set` 同時發生，剛設定的「不再提醒」可能被舊內容蓋掉。 | 低／中 | 包一個行程內的 mutex。 | — |
+| 10 | `c3e49701c` `web/src/components/TrackingBar.tsx:103-118` | 操作成功但緊接的重新抓清單失敗（斷線）時，顯示「帳本操作失敗」，使用者會以為沒有生效。 | 低／高 | 重新抓清單的錯誤另外處理，不顯示操作失敗。 | — |
+| 11 | `a1dc7d069` `web/src/components/identityEnv.ts`（`sharedHomeWith`） | 在遠端主機新增身份時，與「共用身份」（`host` 是空的）同目錄不會出現共用登入的警告，因為只比對 `(host || 'local') === 目前主機`。 | 低／中 | 遠端主機也把 `host` 為空的身份納入比對。 | — |
+| 12 | `0b3b4fb8b` `web/src/store/composerAttachmentDrafts.ts`（`openDb`、`tx`） | 每次讀寫都 `indexedDB.open` 一次，連線沒有 `close()`。長時間開著的分頁會累積連線。 | 低／中 | 連線只開一次並重用。 | — |
+| 13 | `0b3b4fb8b` 同上 | 兩個分頁同時開：甲分頁送出附件後，乙分頁的記憶體仍留著同一個已上傳附件的晶片，可以再送一次。 | 低／低（未實測伺服器對重複附件 id 的反應） | 用 BroadcastChannel 通知其他分頁移除。 | — |
+| 14 | `fb80eb9e8` `daemon/src/runners/claude_login_expiry.rs`（`read_local_expiry`、`read_remote_expiry`） | 只讀 `.credentials.json`。macOS 的 Claude Code 把憑證存在 Keychain，m4p 這類主機不會有到期提醒，畫面上也沒有說明。 | 低／中（未在 m4p 實測） | 讀不到檔案時在身份頁標示「無法偵測到期」。 | — |
+
+**讀過、沒有發現問題的**：`62ab6d042`（`session_busy` 四個條件與 `revision`＋`generation`＋`updated_at` 圍欄一致）；`7d0e3c35b` 的 `update_chain.rs`（同主機排隊、失敗後不再開新的、逾時處理）；`07753571b` 的 `apply.rs`／`plan.rs`／`api.rs`（安裝指令只來自編進程式的 `baseline.toml`，plan 由伺服器產生，路由 UserOnly，目標路徑有白名單、不跟符號連結、不覆寫既有檔，sudo 項目只列手動；預設 off）；`24e30af31`（`useDismiss`，行為差異只有 `ExpertClusterRow`、`Tools` 多了 Esc 關閉）；`deeb02ed6` 現行 `IdentityRow.tsx`（確認框走 portal，有 Bot 綁定時不能移除）。
+
+### 附錄 85 個 commit 的分類
+
+排序依據：正式程式的 diff 行數（扣掉測試、文件、CSS、i18n），再看是否碰到狀態同步、刪除或寫入、權限、安裝。
+
+**讀過（14 個）**
+
+- ✅ `459e72090`、`24e30af31`、`c2ee11a18`（現行 `MessageLedgerBar.tsx` 全檔）
+- ⚠ `7d0e3c35b`（`update_chain.rs` 讀完；`cli_update.rs` 與 `store.ts` 的部分沒讀）
+- ⚠ `07753571b`（`apply.rs`、`plan.rs`、`api.rs` 讀完；`HostBaselineApply.tsx` 與 248 行的 statusline 模板沒讀）
+- ⚠ `deeb02ed6`（現行 `IdentityRow.tsx` 前 470 行；`IdentityKindCard.tsx`、`identityRows.ts` 沒讀）
+- ⚠ `c2267fbc6`（daemon 部分讀完；網頁部分沒讀）
+- ⚠ `c3e49701c`（`TrackingBar.tsx` 的邏輯段；JSX 後半沒讀）
+- ⚠ `fb80eb9e8`（`claude_login_expiry.rs` 主要路徑；`webpush.rs` 與網頁部分沒讀，推播部分已有 #2222）
+- ⚠ `a1dc7d069`（`identityEnv.ts` 全檔；427 行的對話框只查了送出與共用目錄的段落）
+- ⚠ `0e6296e91`（`identity_sync.rs` diff 的前 120 行）
+- `773c0f3cf`、`f2c6640f5`、`bad3b6e17`：已在 `reports/fb-scan-2w-review.md` 讀過，這次沒有重讀。
+
+**✗未讀，風險中以上，建議另派（33 個）**
+
+- `5e7498690` refactor(web): 身份頁版面骨架：主機分頁＋CLI 卡＋統一列狀態（第 1 階段）
+- `a737c2c7c` feat(identities): 新增帳號對話框接上身份頁（頁首／CLI 卡入口、背景登入）
+- `94fecdaab` feat(web): 帳本追蹤任務 UI 重做（白話摘要＋面板，移除使用者端合併）
+- `1eeca5e9e` feat(ledger): 待驗收（answered）：管理者交件、使用者驗收（不改 schema）
+- `c6dba5659` fix(ledger): 預設不自動收件；使用者訊息可手動「加入追蹤」
+- `fb69cb281` fix(ledger): 待驗收的「還沒好」改為「不知道」，下一輪自動複查
+- `d8cadea59` feat(translate): 譯文「複盤」——完成的譯文可開複盤任務給管理者（分析翻不好的原因、改規則）
+- `b1047a48f` feat(translate): 訊息翻譯「重新翻譯」按鈕＋抓部分沒翻
+- `20a0674a2` feat(daemon,web): 分享功能 bot 於 bot menu 標示且預設 context 400K
+- `88e23f53b` fix(agy): 身份登入後立即重新探額度、未登入不進失敗冷卻，對話框輪詢真的重驗；無讀數時顯示「查詢中…／未登入」佔位
+- `8df02e2ca` refactor(sidebar): 合併側欄 bot 列渲染與重複的 BotRow props
+- `c00748a10` refactor(web): 抽 CapEditor 共用總花費上限編輯表單（去重 A3）
+- `5d738b155` feat(web): 側欄執行者 Wkr 精簡（單行群集、活躍優先、停派收納、整區收合）
+- `e75cfd00c` feat(web): agy 模型選單拆成「模型＋強度」兩排（前端分組，存值仍是完整 slug）
+- `9724d2d26` feat(web): 訊息翻譯切換改為微移淡入與圖示半旋轉動效
+- `2fdc129ea` feat(web): API 餘額在額度列與選單上全域可見（m4p 等無額度格主機也看得到）
+- `663260b48` feat(api-bot): openai-api 模型擴充為 gpt-6.2-astra（預設）／gpt-6.2-sol／gpt-6-luna
+- `9dd623538` fix(hosts): #719 auto 投影到 web、移除舊 accessor、retry 可隨 shutdown 取消
+- `9c718e3af` feat(daemon,web): support context_tokens and automatic compaction for agy bots
+- `d3880bd24` fix(agy): Gemini 4 Argon 週額度不再蓋掉 Gemini 週額度（獨立 argon_weekly 欄位與晶片段）
+- `3dc3d1ef3` fix(agy): agy 沒設 context 時預設 400k（自動壓縮門檻與網頁分母）；壓縮錨點改為上一個完成回合
+- `c83e90007` fix(agy): 進行中泡泡顯示 agy 活動列（讀檔／執行指令），有文字時也顯示
+- `ae511749a` fix(agy): 背景工作數改讀底部狀態列，側欄能看到 agy 的背景工作
+- `5bbb8b01f` feat(agy): prompt cache 倒數（12 分 TTL），不進保溫／熱壓
+- `86949766b` feat(cache): 將 agy prompt cache TTL 改為 1 小時（3600 秒）
+- `81d37e282` fix(agy): Orchestrator slug（gemini-pro-orchestrator-*）放行，第三方仍擋；web 標籤「Orchestrator Neon/Argon」並排在 Gemini 之後
+- `d7af5803a` feat(hosts): 移除 Grok baseline 項目，補 darwin 去重回歸測試（#719）
+- `11a009778` fix(web): 終端機連結不再跳原生 confirm，並禁止原生對話框
+- `d380c3569` feat(agy): 網頁 GUI 登入輔助——登入 pane 自動選 Google 並擷取授權網址
+- `687dd9522` fix(web): 保留 reset_offer_snoozed_until，修正重置券「不再提醒」reload 與 WS 更新後重跳
+- `7e559a4a4` fix: fb-scan 第 4、6、8 條（血統區塊主題 token、ops-alerts 呼叫者限制、kick 以執行中 daemon 為準）
+- `60eb85094` fix(web): 升級通知文字改由前端 i18n 組字，英文不再顯示後端中文
+- `c56079f55` fix(web): 右下角升級通知精簡成一行，細節留在頁首晶片
+
+其中最該先看的：`5e7498690`（1,487 行的身份頁改寫）、`a737c2c7c`、`94fecdaab`／`1eeca5e9e`／`c6dba5659`／`fb69cb281`（帳本的待驗收與收件流程，含 daemon）、`d8cadea59`／`b1047a48f`（翻譯，含 daemon）、`20a0674a2`（分享 bot 預設）、`8df02e2ca`（側欄 bot 列合併）。
+
+**只看標題，判定低風險（38 個）**：純 CSS、圖示、文案、排序、測試或死碼刪除，沒有讀 diff。
+
+- `81594406f` fix(web): Claude 餘額晶片標籤改 Claude、金額不加 ≈
+- `66892d3b6` fix(web): 手機對話區水平超版（openai token 拆解列 nowrap 撐寬 msg-list）
+- `f14e9e33c` feat(web): 餘額列改用圖示、openai-api 側欄同 codex 綠色加虛線與 API 字
+- `42a6e355e` feat(web): claude-api 與 openai-api 圖示改用實心 API 徽章加大醒目度
+- `54102b6d5` feat(web): claude-api 與 openai-api 圖示改用右側實心長方形 API 徽章
+- `bfe8b4883` refactor(web): share inert file methods in share page tests
+- `7b4bb6560` feat(web): 統一 codex 與 openai-api 模型命名並依家族便宜到貴排序
+- `f68c5f16a` feat(web): agy 模型清單依價格由便宜到貴排序（3.8 Flash < Hydrogen < Argon < Neon）
+- `79f071933` fix(identities): 收尾文案與手機排版
+- `c9c2b8c7f` fix(web): agy 目前模型不在清單時補全顯示並統一按鈕標籤
+- `4f9886d89` fix(web): 模型清單備用提示涵蓋 other-host 與 static，支援沿用其他主機清單
+- `d27177e3d` feat(web): agy Argon 改為血條列與 Ar 標籤
+- `9c7596ed7` refactor(web): 刪除死碼 dateTimeLabel 與 dropBefore（連同只測它的測試）（去重 A3）
+- `2b8c0646e` refactor(web): 測試 harness 共用化：未讀規則、mock bot 啟動、登入協助 DOM（去重 A3）
+- `e8eb454bf` feat(web): 手機額度列改緊湊卡片（方案 1，390px 一屏全收）
+- `00b09397b` feat(web): 手機 agy Argon（Ar）比照 Fable：low／critical 時取代 7d 顯示，tooltip 與面板列出 Argon
+- `0cc630f95` chore(web): 額度彈窗移除 agy 登出鈕（使用者：彈窗不需要登出）
+- `fc76cd8fc` fix(web): agy popover 只有 Argon 有讀數時不寫「背景查詢中」，並補測試確認 Ar 列
+- `3f794e477` chore(web): 移除 agy 登出鈕後的孤兒 i18n 字串
+- `7fddc5940` test(web): blobUrlCache／outboxPreviewCache 測試不再改全域 URL.revokeObjectURL
+- `c450a0103` fix(web): 額度列餘額晶片數字一律 toFixed(1)
+- `885aefdd2` fix(web): 手機底部輸入列在 safe-area 之外不再多墊 12px（max 取代相加）
+- `bf8b42cbd` fix(web): 單筆未分流的帳本進度列改顯示「加入追蹤任務」
+- `814476e0e` fix(web): 手機換版橫幅與通知改到螢幕垂直中間
+- `6a6af606f` fix(web): 手機輸入列左右內距避開 iPhone 螢幕圓角（safe-area − 6px）
+- `3bb0a67b0` Revert "fix(web): 手機輸入列左右內距避開 iPhone 螢幕圓角（safe-area − 6px）"
+- `f7b11ebc3` fix(web): 手機追蹤任務面板改掛到 body，不再被主力列把手蓋住
+- `df663a090` fix(web): center Claude expiry notice on mobile and localize text
+- `771b5a03b` fix(web): 自動翻譯只有選取文字時保留原文，向上捲動不再擋住譯文
+- `a923fa66c` fix(web): 加入追蹤選單改用不透明面板底色與陰影，蓋過相鄰訊息列
+- `e4297bd1c` feat(web): 事項代碼改為左側固定寬度膠囊並支援雙欄對齊與深色主題
+- `1c8f97379` fix(web): 側欄專案卡改為顯示被停用的身份名稱
+- `77cc819fd` fix(web): 英文回覆的表格列不再壓低「主要是英文」比例，自動翻譯恢復
+- `d8c99894d` feat(web): 手機版通知改為輸入列上方輕量膠囊＋精簡部署提示文案
+- `afee7d3be` feat(web): 側欄 Worker 區執行者群集改卡片＋kind 色條提升辨識度
+- `d132e8202` feat(web): 專家模式把分享 bot 獨立成「分享用」分段
+- `e493ad282` fix(web): 排程編輯器窄螢幕不再橫向溢出，最近執行狀態字樣走 i18n
+- `925d803c4` fix(web): 排程編輯器深色主題改用主題 token，不再有白底
+
+### 仍未覆蓋
+
+- 上面 33 個未讀的 commit，以及 8 個只抽樣的 commit 沒讀的部分。
+- 窄螢幕版面（聊天、設定面板、身份頁）：沒有實機或瀏覽器驗證。
+- 草稿：`0f95cb08b` 補打 composer-draft 的路徑沒有在瀏覽器實際操作。
+- 發現 3、4、13、14 沒有實測；發現 3 需要一次冷啟動的實際帳單對照預留值。
+- 原生 alert／confirm／prompt：對 85 個 commit 新增的 ts／tsx 行做過搜尋，沒有新增。深色主題色碼：14 個 commit 的 CSS 有寫死的 hex 或 rgb；只確認了帳本的 `messageLedgerBar.css`（有對應的深色覆寫）與 `trackingBar.css`（都有 token），其餘（`773c0f3cf` 已由 `7e559a4a4` 修、`d8c99894d`、`814476e0e`、`2fdc129ea` 等）沒有逐一確認。
