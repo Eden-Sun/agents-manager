@@ -6,7 +6,7 @@ import { humanBytes } from './memFormat'
 import { useT } from '../lib/i18n'
 import './memBadge.css'
 
-export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
+export function MemBadge({ host = LOCAL_HOST, hosts }: { host?: string; hosts?: string[] }) {
   const t = useT()
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
   const remote = host !== LOCAL_HOST
@@ -58,7 +58,7 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
     t('每 15 秒更新一次。'),
   ]
   return (
-    <MemPopover host={host}>
+    <MemPopover host={host} hosts={hosts}>
       <span
         className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}${low ? ' mem-low' : ''}${cpuHot ? ' cpu-hot' : ''}`}
         title={`${tip.join('\n')}\n\n${t('點一下看有哪些程序。')}`}

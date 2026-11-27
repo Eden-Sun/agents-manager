@@ -117,18 +117,19 @@ it('讀不到 /api/build-slots：不畫晶片', async () => {
   }
 })
 
-it('左上主機數據區：只有本機與有遠端主機時，晶片都跟 RAM 徽章放在同一區', async () => {
+it('左上主機數據區：只有本機與有遠端主機時，晶片都跟本機 RAM 徽章並排在同一列', async () => {
   resetStoreForTest()
   const row = (host: string) => ({ host, total_bytes: 1 << 30, herdr_bytes: 1 << 20, agents_bytes: 1 << 29, processes: 3, browsers: [], machine: null, error: null })
   await serving(busy, async () => {
     useStore.setState({ mem: { hosts: [row('local')] } } as never)
     await mount(<HeadMemBadges />)
     await until(() => chip() !== null, '單機時畫出來')
-    assert.ok(chip()!.parentElement!.classList.contains('head-ram'))
+    assert.ok(chip()!.parentElement!.classList.contains('head-host-row'))
+    assert.ok(chip()!.parentElement!.classList.contains('local'))
     await act(() => useStore.setState({ mem: { hosts: [row('local'), row('m4p')] } } as never))
     await until(() => document.querySelector('.head-ram.multi') !== null, '換成多主機')
     assert.equal(document.querySelectorAll('[data-k="build-slots-chip"]').length, 1)
-    assert.ok(chip()!.parentElement!.classList.contains('multi'))
-    assert.ok(document.querySelector('[data-k="head-hosts"]'), '多主機收成一顆摘要膠囊，與建置晶片同一列')
+    assert.equal(document.querySelectorAll('.head-host-row').length, 2, '每台主機一列，建置晶片不另佔一列')
+    assert.ok(chip()!.parentElement!.classList.contains('local'))
   })
 })

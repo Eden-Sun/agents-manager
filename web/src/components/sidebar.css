@@ -47,6 +47,13 @@
 
 .head-ram {
   display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.head-host-row {
+  display: flex;
   flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
@@ -54,29 +61,25 @@
   height: 20px;
 }
 
-.head-ram > .pane-badge,
-.head-ram > .build-slots-chip {
-  flex: none;
-}
-
-.head-ram > .mem-wrap {
-  flex: 1 1 auto;
+.head-host-row > .mem-wrap {
+  flex: 0 1 auto;
   min-width: 0;
 }
 
-.head-ram > .mem-wrap > .mem-open {
+.head-host-row > .mem-wrap > .mem-open {
   display: flex;
   align-items: center;
-  width: 100%;
+  max-width: 100%;
   min-width: 0;
 }
 
-.head-ram > .mem-wrap > .mem-open > .mem-badge {
-  flex: 1 1 auto;
+.head-host-row > .build-slots-chip {
+  flex: none;
+  margin-left: auto;
 }
 
 @media (width <= 640px) {
-  .head-ram > .mem-wrap > .mem-open {
+  .head-host-row > .mem-wrap > .mem-open {
     margin-block: -10px;
   }
 }
@@ -87,41 +90,6 @@
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-}
-
-.head-hosts > * {
-  flex: none;
-}
-
-.head-hosts > .mem-k,
-.head-hosts > .head-hosts-alert {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.head-hosts .head-hosts-alert {
-  color: var(--danger);
-  font-family: var(--font-mono);
-  font-weight: 650;
-}
-
-.head-hosts .head-hosts-sep,
-.head-hosts .head-hosts-more {
-  color: var(--text-faint);
-}
-
-.head-hosts .head-hosts-caret {
-  flex: none;
-  margin-left: auto;
-  padding-left: 4px;
-  color: var(--text-faint);
-}
-
-.sidebar-head .head-ram .mem-badge.head-hosts.alert {
-  border-color: var(--danger);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent);
 }
 
 .sidebar-head .conn-label {
