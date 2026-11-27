@@ -627,3 +627,75 @@
 
 1. **第 2 項**拆三份，各自只看「寫入端的兩段寫」對「清理端的刪除條件」：(a) api_bot 的保留與刪除意圖（`retention.rs`、`db/api_bot.rs`、`delete_intents`、`intents.rs`）；(b) bot 目錄與 child（`bot_trash.rs`、`remote_trash.rs`、`remote_purge.rs` 的 sweep 本體、`child_retire.rs`、`spawn_hints.rs`）；(c) 回合與 pane（`dead_panes.rs`、`stuck_turns.rs`、`late_proof.rs`、`hook_inbox.rs`、`gone_burst.rs`）。
 2. **第 3 項**先做一張表：列出 hook `TurnComplete`／`TurnFailed` 收尾時的每個副作用，逐一找 poller 備援（`try_fallback`、`capture_hookless_turn_locked`）的對應呼叫，再依 kind（claude、codex、agy、grok）各看一次。建議一個回合只做 claude＋codex，另一個回合做 agy＋grok 與遠端 spool 重播。
+
+## §11 hook 收尾與 poller 備援的副作用對照（claude＋codex，2026-11-27，唯讀）
+
+行號以 main `5ccf63c2e` 為準。接 §10 第 3 項。**沒有開新的 issue**：找到的缺漏都不到「中以上且信心中以上」。
+`StopFailure` 不續行那一項已由 `ec5757901` 修好，不重報。
+
+### 覆蓋
+
+| 範圍 | 覆蓋 | 說明 |
+|---|---|---|
+| hook 收尾 | ✅逐段 | `hookrecv.rs:541-590`（`process_for`、`after_turn_end`）、`:1340-1591`（共用前段＋`TurnFailed`）、`:1848-2110`（`TurnComplete` 全部分支）、`:1125-1158`（`consume_resume_session`）。 |
+| poller 備援 | ✅逐段 | `poller.rs:1552-1607`（備援計時器與其後的補抓）、`:1678-2018`（`try_fallback` 全檔）、`:2100-2283`（`capture_hookless_turn_locked`、`sync_idle_transcript_locked`）；`runners/events.rs:610-660`（誰啟動計時器）。 |
+| 各副作用的實作與其他呼叫點 | ⚠讀了入口與呼叫點 | `login_prompt.rs:28-90`、`runners/quota.rs:165-195`、`quota.rs:530-548`、`:990-1004`（撞限怎麼自己清）、`background_hook.rs:1-55`、`compacting.rs:1-110`、`resume_gate.rs:1-135`、`resume_nudge.rs:1-40`、`:170-262`、`codex_session_refresh.rs:1-88`、`interruption.rs` 與 `owed_delivery.rs` 的檔頭、`turn_error.rs:423-520`。各函式的內部沒有全讀。 |
+| 沒做 | ✗ | agy、grok、遠端 spool 重播（`replay_spool`）；`grok_transcript::sync_locked` 內部（hookless claude 走它）；沒有任何實機驗證。 |
+
+### 前提：備援什麼時候會接手
+
+- `working → idle` 的狀態邊一定會啟動 5 秒計時器（`events.rs:645-654`、`poller.rs:1545`），**不管回合是不是已經被 hook 收掉**。計時器到了依序做：`try_fallback`（回合還在途才收）、`capture_hookless_turn_locked`、`capture_codex_usage_notices`、`turn_error::capture`（成立就 `api_error_nudge::arm`）。所以「補抓 API 錯誤、撞限、codex 用量提示」這三件事兩條路都會做。
+- 真正只走備援收尾的情況：claude 的 Stop hook 沒到（遠端 spool 延遲、payload 被截斷）；**codex 的 Stop hook 還沒被信任**時每一回合都是（log 會有 `codex reply recovered from rollout`、`hook_missing = true`）。下表的缺漏對 codex 是常態，對 claude 是偶發。
+
+### 對照表
+
+「備援」欄：✅＝有對應；◐＝另一條路會補，但較慢或條件不同；✗＝沒有。
+
+| # | hook 收尾做的事（位置） | kind | 備援的對應 | 判定 |
+|---|---|---|---|---|
+| 1 | 回合收成 `completed`／`failed`、寫回覆、推 `message_added`／`turn`（`:1991-2043`、`:1571-1584`） | 兩者 | `try_fallback` 收成 `completed_fallback`（codex 有 rollout 回覆時是 `completed`）、寫回覆、推同樣的事件（`poller.rs:1886-2017`） | ✅ |
+| 2 | 記 native session／turn id、`transcript_path`（`:1875-1883`、`native_evidence`） | 兩者 | codex：`codex_session_refresh` 補 `native_session_id`、rollout 給 turn id（`:1901-1912`）。claude：沒有來源，等遲到的 hook 由 `fill_or_drop_late_hook` 補 | ◐（claude 的 hook 永遠不到就沒有 session id，之後無法 `--resume`） |
+| 3 | `compacting::end`（`:1399-1403`） | claude | 沒有。畫面來的標記由 `observe_screen` 收；**hook 的 `PreCompact` 開的標記只有 hook 能收**，否則等 10 分鐘過期（`compacting.rs:16`、`:59-82`） | ✗ 低（見發現 1） |
+| 4 | `background_stop`：依 Stop payload 的 `background_tasks` 更新背景工作數（`:1460-1464`） | claude | 畫面判讀 `background_jobs::observe`（`runners/update_watch.rs:100`） | ✅（來源不同） |
+| 5 | `login_on_auth_failure`：回覆是「沒登入／401」就標該身份要登入、推播、立刻重驗（`:1466-1469`、`:1516-1518`） | 兩者 | 沒有。`turn_error::capture` 不看授權失敗；只剩例行的身份登入探測 | ✗ 低–中（見發現 2） |
+| 6 | `login_on_turn_ok`：正常答完就清掉「要登入」標記（`:1470-1472`） | 兩者 | 沒有。標記要等身份重驗成功才清（`login_prompt::clear_and_push`） | ✗ 低（同發現 2） |
+| 7 | `schedule_codex_notice_capture`（`:1476-1479`） | codex | 計時器直接呼叫 `capture_codex_usage_notices`（`poller.rs:1592`） | ✅ |
+| 8 | `clear_limit_hit_for_bot`：有回覆就清這顆 bot 的撞限（`:1480-1482`） | codex | 沒有。撞限只會在到期時（`quota.rs:544`、`:1001`）或新的額度讀數校正時清掉 | ✗ 低（見發現 3） |
+| 9 | 撞限標記：`StopFailure` 的原因是額度用完就 `mark_claude_limit_hit`（`:1520-1527`） | claude | `turn_error::capture` 讀畫面後同樣標記（`turn_error.rs:455-463`）；codex 走 `fallback_hit`＋`mark_codex_limit_hit`（`poller.rs:1928-1959`） | ✅ |
+| 10 | `settle_interruption(Nothing)`、`settle_owed_deliveries`（`:1493-1496`） | 兩者 | 備援不呼叫，但兩者都有定時重試、下一則 prompt 與 reconcile（`reconcile.rs:148`）會結清，檔頭明寫 hook 只是其中一條路 | ◐（不算缺漏） |
+| 11 | `consume_resume_session`：比對回報的 session 與要接回的，不符就 `context_lost`，相符就 `verified`，然後 flush 佇列（claude 在 `SessionStart` `:1812`；codex 在第一個 `Stop` `:1855-1858`） | 兩者 | claude：`resume_gate` 等 120 秒後記 `unverified` 並留說明（`resume_gate.rs:25-38`）。codex：`codex_session_refresh` 只在 `native_session_id` 是空的時候寫入，**不比對 `resume_session_id`**（`codex_session_refresh.rs:6-9`、`:62-76`） | claude ◐；codex ✗ 低–中（見發現 4） |
+| 12 | 外部回合補使用者訊息並標 `relay_from`（別的 bot 打進來的字，`:2013-2029`、`:2094-2098`） | 兩者 | `begin_external_turn` 用畫面回音開回合，`poller.rs` 沒有任何 relay 來源判斷 | ✗ 低（見發現 5） |
+| 13 | `after_turn_end`：補記回合內已回答的 `AskUserQuestion`（`:587`、`ask_answers.rs:16-19`） | claude | 沒有 | ✗ 低（§10 發現 9，不重列） |
+| 14 | codex 空回覆的 Stop：不收回合，改 `arm_progress` 讓輪詢接手（`:1908-1917`、`:1969-1979`） | codex | 本來就是輪詢的事 | 不適用 |
+| 15 | `StopFailure` 後續行（`after_api_stop_failure`，`:1586-1589`） | claude | `turn_error::capture`＋`api_error_nudge::arm`（`poller.rs:1595-1596`） | ✅（`ec5757901`） |
+
+反方向（備援做、hook 不做）：
+
+| # | 備援做的事 | hook 路徑 | 判定 |
+|---|---|---|---|
+| 16 | `remember_pane_cursor`：記下讀到畫面的位置（`poller.rs:1919`、`:1940`、`:1971`、`:2010`） | hook 收尾不前移游標 | ◐ 下一回合的備援優先用 prompt 回音定位，另有「跟上一則回覆幾乎相同就不存」的防護（`:1842-1859`）；沒有發現實際問題 |
+| 17 | `runs.turn_error`、系統訊息、`shadow_limit_hit`（`:1913-1918`、`:1943-1951`） | hook 的 `TurnFailed` 只寫系統訊息；`turn_error` 由 5 秒後的計時器補 | ✅（有先後差，最多 5 秒） |
+| 18 | codex `/compact` 回合的壓縮說明（`:1876-1882`、`:1964-1968`） | hook 走第 14 列，交給輪詢 | ✅ |
+
+### 發現
+
+| # | 檔:行 | 觸發情境 | 嚴重度／信心 | 建議修法 |
+|---|---|---|---|---|
+| 1 | `crates/am-lifecycle/src/lifecycle/poller.rs:1886-1899`；`crates/am-base/src/compacting.rs:54-82` | claude 的 `PreCompact` hook 到了、之後的 `Stop`／`SessionStart(compact)` 沒到，回合由備援收掉。hook 開的「壓縮中」標記沒有人收，網頁最多多顯示 10 分鐘「壓縮中…」。只影響顯示。 | 低／高 | `try_fallback` 收掉回合（`Outcome::Applied`）之後呼叫 `compacting::end` 並推 `bot_status`。 |
+| 2 | `crates/am-lifecycle/src/hookrecv.rs:1466-1474`；`crates/am-lifecycle/src/turn_error.rs:424-463` | 回合由備援收尾、回覆是授權失敗（claude 的沒登入那一行、codex 的 401 或 refresh token 失效）：不會標「這個身份要登入」、不推播、不立刻重驗，要等例行的登入探測。反過來，hook 標過之後若之後的回合都走備援，正常答完也不會清掉標記。codex 的 Stop hook 未信任時每次都是這樣。 | 低–中／中（沒查例行探測的週期，也沒實機） | 備援寫入回覆後用同一支 `is_auth_failure_line` 判斷，呼叫 `login_on_auth_failure`／`login_on_turn_ok`（需要 host fence，可沿用 `client.fence`）。 |
+| 3 | `crates/am-lifecycle/src/hookrecv.rs:1480-1482`；`crates/am-lifecycle/src/lifecycle/poller.rs:1988-2017` | codex 撞限之後又正常答完一回合，但回合是 rollout 備援收的：撞限標記不清，排隊的派工與自動挑選繼續避開這顆 bot，直到重置時間到或下一次額度讀數把它校正掉。 | 低／中 | `try_fallback` 存下 codex 的非空回覆後呼叫 `clear_limit_hit_for_bot`（rollout 回覆才清，畫面刮來的不清）。 |
+| 4 | `crates/am-lifecycle/src/lifecycle/codex_session_refresh.rs:6-9`、`:62-76`；`crates/am-lifecycle/src/hookrecv.rs:1125-1158` | codex 以 resume 啟動、Stop hook 不會到（未信任）：`runs.resume_session_id` 一直留著、`resume_outcome` 一直是空的；`codex_session_refresh` 補上的 `native_session_id` 即使跟要接回的不同，也不會留 `context_lost` 說明。使用者不會知道接回的不是原本那段對話。 | 低–中／中（沒有確認 codex 接不回時是報錯還是默默開新對話；若一律報錯，這項影響就只剩 `resume_outcome` 不會有結論） | `refresh_inner` 寫入 `native_session_id` 成功後，若 `run.resume_session_id` 有值就呼叫 `consume_resume_session`。 |
+| 5 | `crates/am-lifecycle/src/lifecycle/poller.rs:297-398`（`begin_external_turn`）對 `crates/am-lifecycle/src/hookrecv.rs:2020-2026` | 別的 bot 打進這個 pane 的字開了外部回合，而這一回合由備援收尾：使用者訊息沒有 `relay_from`，在網頁上顯示成人打的字（未讀、帳本收件等以「人打的字」判斷的地方也會算進去）。遲到的 hook 到了也只補回覆，不補來源。 | 低／中（沒有查 `fill_or_drop_late_hook` 是否會補 `relay_from`） | `begin_external_turn` 寫使用者訊息時也查 `relay_source`。 |
+
+### 讀過、判定不是缺漏的
+
+- **API 錯誤補抓、撞限、codex 用量提示**：由 `working → idle` 的計時器統一做，不依賴回合是誰收的（表 7、9、15、17）。
+- **中斷與送達結果的補記**：hook 是幾條結清路徑之一，另有定時重試與下一則 prompt（表 10）。
+- **claude 的 resume 驗證**：hook 不到時 120 秒後記 `unverified` 並在對話留說明，是文件寫明的退路（表 11）。
+- **背景工作數**：hook 與畫面各有來源（表 4）。
+
+### 仍未覆蓋
+
+- agy、grok、遠端 spool 重播與即時 hook 的差異。
+- hookless 的 claude（`adopted` 且沒注入 hook）走 `grok_transcript::sync_locked`，這支沒有讀。
+- 發現 2、3、4、5 都沒有實機重現；發現 4 需要先確認 codex 在 session 接不回時的實際行為。
