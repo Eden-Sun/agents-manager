@@ -1331,6 +1331,7 @@ impl<T> crate::lifecycle::LcHost for std::sync::Arc<T> where
         + crate::login_prompt::LoginNeeded
         + crate::models::ModelsCache
         + crate::lifecycle::api_bot_port::ApiBotPort
+        + crate::turn_close::TurnCloseServices
 {}
 
 mod arc_port_api_bot {

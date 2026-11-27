@@ -31,4 +31,5 @@ pub trait LcHost:
     + crate::login_prompt::LoginNeeded
     + crate::models::ModelsCache
     + crate::lifecycle::api_bot_port::ApiBotPort
+    + crate::turn_close::TurnCloseServices
 {}

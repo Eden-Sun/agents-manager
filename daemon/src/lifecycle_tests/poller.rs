@@ -14,6 +14,8 @@ mod codex_limit_fallback_tests;
 mod codex_limit_quote_tests;
 #[path = "poller/codex_session_refresh.rs"]
 mod codex_session_refresh;
+#[path = "poller/fallback_close_effects_tests.rs"]
+mod fallback_close_effects_tests;
 #[path = "poller/fallback_binding_tests.rs"]
 mod fallback_binding_tests;
 #[path = "poller/grok_limit_screen_tests.rs"]

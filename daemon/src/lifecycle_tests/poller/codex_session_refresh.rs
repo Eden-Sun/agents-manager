@@ -98,6 +98,24 @@ use crate::lifecycle::poller::codex_session_refresh::test_seams::*;
         assert_eq!(source, ("terminal_fallback".into(), 1));
     }
 
+    /// codex 以 resume 啟動、Stop hook 不到：補上的 session id 與要接回的比對，相符記 verified、不符記 mismatch＋context_lost。
+    #[tokio::test]
+    async fn a_refreshed_session_settles_the_resume_check() {
+        for (expected, outcome) in [(SESSION, "verified"), ("01a18888-0000-7000-8000-00000000ffff", "mismatch")] {
+            let (env, run_id, turn, _remote) = fixture(false).await;
+            sqlx::query("UPDATE runs SET resume_session_id=? WHERE id=?").bind(expected).bind(&run_id).execute(&env.app.db).await.unwrap();
+            let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+            let bot = db::bot(&env.app.db, &run.bot_id).await.unwrap().unwrap();
+            assert!(refresh(&env.app, &run, &bot, &turn).await.is_some());
+            let (left, got): (Option<String>, Option<String>) =
+                sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id=?").bind(&run_id).fetch_one(&env.app.db).await.unwrap();
+            assert_eq!((left, got.as_deref()), (None, Some(outcome)), "{expected}");
+            let lost: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='system'")
+                .bind(&bot.id).fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(lost > 0, outcome == "mismatch", "接不回才留 context_lost 說明");
+        }
+    }
+
     #[tokio::test]
     async fn rejects_unproven_instance_and_existing_binding() {
         for case in ["terminal_missing", "terminal_mismatch", "pane_mismatch", "kind_mismatch", "session_missing", "native_empty", "existing_native", "wrong_generation", "wrong_host", "exited", "ended_at", "read_error"] {

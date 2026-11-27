@@ -79,7 +79,28 @@ async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: Option<&str>) -> 
         if changed != 1 { return Ok(None) }
         db::run(app.db(), &run.id).await
     })).await;
-    Ok(result.transpose()?.flatten())
+    let bound = result.transpose()?.flatten();
+    if let Some(fresh) = bound.as_ref().filter(|r| r.resume_session_id.is_some()) {
+        consume_resume(app, fresh, &native).await;
+    }
+    Ok(bound)
+}
+
+/// codex 以 resume 啟動、Stop hook 一直不到（未信任）時，補上的 session id 就是唯一的接回證據：
+/// 與 hook 收尾同一支 [`consume_resume_session`](super::s6_ports::GrokTranscriptServices::consume_resume_session)
+/// 比對要接回的那段，不符留 `context_lost`，相符記 `verified` 並放行排隊的訊息。
+async fn consume_resume(app: &impl LcHost, run: &db::Run, native: &str) {
+    let bot = match db::bot(app.db(), &run.bot_id).await {
+        Ok(Some(bot)) => bot,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = ?e, "codex resume check skipped: bot unreadable");
+            return;
+        }
+    };
+    if let Err(e) = super::s6_ports::GrokTranscriptServices::consume_resume_session(app, &bot, run, Some(native)).await {
+        tracing::warn!(run = %run.id, error = ?e, "codex resume check after the session refresh failed");
+    }
 }
 
 

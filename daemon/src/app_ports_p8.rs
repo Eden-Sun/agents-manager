@@ -316,6 +316,21 @@ impl ProviderPort for App {
     }
 }
 
+impl am_lifecycle::turn_close::TurnCloseServices for App {
+    async fn turn_close_fence(&self, bot: &db::Bot) -> Option<crate::hosts::HostFence> {
+        ProviderPort::admitted_host_fence(self, bot).await
+    }
+    async fn turn_close_auth_failure(&self, bot: &db::Bot, fence: Option<&crate::hosts::HostFence>) {
+        crate::runners::login_prompt::on_auth_failure(&self.shared(), bot, fence).await
+    }
+    async fn turn_close_ok(&self, bot: &db::Bot, fence: Option<&crate::hosts::HostFence>) {
+        crate::runners::login_prompt::on_turn_ok(&self.shared(), bot, fence).await
+    }
+    async fn turn_close_clear_limit(&self, bot: &db::Bot) {
+        crate::runners::quota::clear_limit_hit_for_bot(&self.shared(), bot).await
+    }
+}
+
 impl ApiPort for App {
     async fn state_json(&self) -> std::result::Result<Value, LcError> {
         crate::api::state_json(&self.shared()).await

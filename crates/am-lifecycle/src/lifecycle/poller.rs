@@ -389,12 +389,21 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
         None => None,
     };
     if let Some(text) = echo {
-        if let Err(e) = insert_message(app, &conv, Some(&tid), "user", &text, "hook", false, None).await {
+        if let Err(e) = insert_user_echo(app, &run, &conv, &tid, &text, "hook").await {
             tracing::warn!(turn = %tid, error = ?e, "external prompt echo not stored");
         }
     }
     emit_turn(app, &tid).await;
     arm_progress(app, &run.id, &run.bot_id, &tid).await;
+}
+
+/// 外部回合的畫面回音存成使用者訊息：別的 bot 打進來的字一樣標 `relay_from`（[`crate::turn_close::insert_user_echo_tx`]）。
+async fn insert_user_echo(app: &impl LcHost, run: &db::Run, conv: &str, turn_id: &str, text: &str, source: &str) -> anyhow::Result<()> {
+    let mut tx = db::begin_write(app.db()).await?;
+    let msg = crate::turn_close::insert_user_echo_tx(&mut tx, Some(run), conv, turn_id, text, source).await?;
+    tx.commit().await?;
+    emit_message_added(app, &run.bot_id, msg).await;
+    Ok(())
 }
 
 async fn pane_prompt_echo(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> Option<String> {
@@ -1811,6 +1820,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
 
     let codex_rollout_reply = codex_rollout_reply.or(agy_reply);
+    let mut shredded = false;
     let reply = if codex_hit.is_some() || codex_rollout_error.is_some() || compact_turn {
         None
     } else if let Some(r) = codex_rollout_reply.clone() {
@@ -1823,6 +1833,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         match screen_reply(&bot.kind, screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
+                shredded = true;
                 let how_wide = match pane_columns(app, &run).await {
                     Some(w) => format!("目前 {w} 欄，"),
                     None => String::new(),
@@ -1925,7 +1936,11 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         if let Some(message) = partial { emit_message_added(app, &bot.id, message).await; }
         emit_message_added(app, &bot.id, message).await;
         emit_turn(app, &turn.id).await;
+        am_base::compacting::end(run_id);
         app.emit_bot_status(&bot.id).await;
+        if crate::login_prompt::is_auth_failure_line(&bot.kind, &error) {
+            crate::turn_close::login_after_reply(app, &bot.kind, &bot, &error, crate::turn_close::TurnCloseServices::turn_close_fence(app, &bot).await.as_ref()).await;
+        }
         return Ok(true);
     }
 
@@ -1962,6 +1977,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             tracing::warn!(turn = %turn.id, error = %e, "codex limit hit owed; it holds this bot until it is recorded");
         }
         emit_turn(app, &turn.id).await;
+        crate::turn_close::end_compacting(app, run_id, &bot.id).await;
         return Ok(true);
     }
 
@@ -1978,6 +1994,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             emit_message_added(app, &bot.id, m).await;
         }
         emit_turn(app, &turn.id).await;
+        crate::turn_close::end_compacting(app, run_id, &bot.id).await;
         return Ok(true);
     };
 
@@ -2018,7 +2035,21 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     }
     emit_message_added(app, &bot.id, message).await;
     emit_turn(app, &turn.id).await;
+    crate::turn_close::end_compacting(app, run_id, &bot.id).await;
+    if !shredded {
+        after_fallback_reply(app, &bot, &reply, is_codex_rollout_reply).await;
+    }
     Ok(true)
+}
+
+/// 備援存下回覆之後，補做 hook 收尾在回覆上做的事（[`crate::turn_close`]）：登入標記依回覆判斷；
+/// codex 撞限只在 rollout 的原生回覆才清（畫面刮來的可能是舊畫面，不當成帳號又能跑的證據）。
+async fn after_fallback_reply(app: &impl LcHost, bot: &db::Bot, reply: &str, native: bool) {
+    let fence = crate::turn_close::TurnCloseServices::turn_close_fence(app, bot).await;
+    crate::turn_close::login_after_reply(app, &bot.kind, bot, reply, fence.as_ref()).await;
+    if native {
+        crate::turn_close::clear_codex_limit_after_reply(app, &bot.kind, bot, reply).await;
+    }
 }
 
 /// Spinner glyphs before an in-progress verb (`✢ Baking…`, `⠦ Thinking… 52s`); braille is codex/grok.
@@ -2218,12 +2249,13 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
     .execute(app.db())
     .await?;
     if let Some(text) = echo.as_deref() {
-        insert_message(app, &conv, Some(&tid), "user", text, "terminal_fallback", false, None).await?;
+        insert_user_echo(app, &run, &conv, &tid, text, "terminal_fallback").await?;
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     insert_message(app, &conv, Some(&tid), "assistant", &reply, message_source, message_incomplete, Some(&read.text)).await?;
     remember_pane_cursor(app, run_id, &read).await?;
     emit_turn(app, &tid).await;
+    after_fallback_reply(app, &bot, &reply, is_codex_rollout).await;
     tracing::info!(run = %run_id, turn = %tid, bot = %bot.name, seed, "hookless turn captured from the pane");
     Ok(true)
 }

@@ -75,14 +75,6 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
     Ok(())
 }
 
-async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
-    let run = run?;
-    let host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
-        .bind(&run.bot_id).fetch_optional(conn).await.ok()?;
-    let host = host.unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
-    crate::agent_relay::claim_relayed(&host, &run.id, echo)
-}
-
 pub enum HookKind {
     /// Never creates a Turn.
     Identity {
@@ -714,10 +706,7 @@ async fn store_resent_prompt_tx(
         return Ok(None);
     }
     tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
-    let from = relay_source(&mut **tx, run, text).await;
-    let msg = tx.insert_message_relayed_tx(conv, Some(&turn.id), "user", text, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
-    crate::lifecycle::messages::mark_relay_turn(tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
-    Ok(Some(msg))
+    Ok(Some(crate::turn_close::insert_user_echo_tx(tx, run, conv, &turn.id, text, "hook").await?))
 }
 
 /// [`store_resent_prompt_tx`] 給「回合已被備援收掉、遲到的 Stop 才到」的路徑：自己開交易、補完就發事件。
@@ -1397,9 +1386,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         _ => false,
     };
     if let (true, Some(r)) = (compact_ends, &run) {
-        if am_base::compacting::end(&r.id) {
-            app.emit_bot_status(&bot.id).await;
-        }
+        crate::turn_close::end_compacting(app, &r.id, &bot.id).await;
     }
 
     let mut admitted = None;
@@ -1463,13 +1450,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    if (provider == "claude" || provider == "codex") && admitted.is_some() {
+    if admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
-            if crate::login_prompt::is_auth_failure_line(&provider, a) {
-                app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
-            } else if !a.trim().is_empty() {
-                app.login_on_turn_ok(&bot, admitted_fence.as_ref()).await;
-            }
+            crate::turn_close::login_after_reply(app, &provider, &bot, a, admitted_fence.as_ref()).await;
         }
     }
 
@@ -1477,8 +1460,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         if let Some(r) = run.as_ref() {
             app.schedule_codex_notice_capture(&bot.id, &r.id);
         }
-        if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
-            app.clear_limit_hit_for_bot(&bot).await;
+        if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
+            crate::turn_close::clear_codex_limit_after_reply(app, &provider, &bot, a).await;
         }
     }
 
@@ -2018,12 +2001,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                                     .fetch_all(&mut *tx)
                                     .await?;
                             if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
-                                let from = relay_source(&mut *tx, run.as_ref(), u).await;
-                                let msg = tx
-                                    .insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str()))
-                                    .await?;
-                                crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
-                                added.push(msg);
+                                added.push(crate::turn_close::insert_user_echo_tx(&mut tx, run.as_ref(), &conv, &t.id, u, "hook").await?);
                             } else {
                                 added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
                             }
@@ -2092,10 +2070,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             .await?;
             let mut added = Vec::new();
             if let Some(u) = user.filter(|s| !s.is_empty()) {
-                let from = relay_source(&mut *tx, run.as_ref(), &u).await;
-                let msg = tx.insert_message_relayed_tx(&conv, Some(&tid), "user", &u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
-                crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
-                added.push(msg);
+                added.push(crate::turn_close::insert_user_echo_tx(&mut tx, run.as_ref(), &conv, &tid, &u, "hook").await?);
             }
             if !body_text.is_empty() {
                 added.push(tx.insert_message_tx(&conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
@@ -2660,6 +2635,7 @@ pub trait HookHost:
     + ProviderPort
     + ApiPort
     + crate::events::ports::ReconcileCommands
+    + crate::turn_close::TurnCloseServices
     + Send
     + Sync
 {
@@ -2713,7 +2689,7 @@ pub mod test_seams {
     pub const MAX_SPOOL_LINE: usize = super::MAX_SPOOL_LINE;
 
     pub async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
-        super::relay_source(conn, run, echo).await
+        crate::turn_close::relay_source(conn, run, echo).await
     }
 
     pub fn failure_detail(p: &Value) -> Option<String> {
