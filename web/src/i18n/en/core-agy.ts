@@ -191,6 +191,7 @@ const dict: Dict = {
   '這個排程綁的不是排程專屬 bot（{name}）：照常執行不受影響。可「轉成專屬」（把它標成排程專屬，之後不再當執行者），或「＋ 建立專屬 bot」改綁到新的。': 'This schedule is not bound to a dedicated schedule bot ({name}); it keeps running as before. You can “Make dedicated” (it stops being an executor) or “+ Create dedicated bot” and rebind.',
 
   '按住預覽 {name}': 'Hold to preview {name}',
+  '點放大 · 按住滑': 'Tap to zoom · Hold to scrub',
 
   '角色設定失敗，Bot 已保留，請於設定選單中補設：{err}': 'Failed to configure role; Bot preserved. Please configure in settings: {err}',
   '專案整體規劃、任務指派與進度管理（全專案僅一位）': 'Project-wide planning, task assignment, and progress management (only one per project)',

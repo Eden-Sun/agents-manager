@@ -4,10 +4,13 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
 import { fileSize, isPreviewableImage, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { blobFor } from '../lib/outboxPreviewCache'
+import { ImageViewer, type Picture } from './ImageViewer'
 import { useOutboxFiles } from './useOutboxFiles'
 import './phoneOutboxTray.css'
 
 const OPEN_KEY = 'am.phoneOutboxTray.open'
+const HOLD_PEEK_MS = 200
+const SCRUB_THRESHOLD_PX = 10
 
 function readOpen(): boolean {
   try {
@@ -34,12 +37,41 @@ function PhoneOutboxTrayInner() {
   const { botId, files, fetchedAt, now, loadedFor, busy, openPreview } = useOutboxFiles()
   const [open, setOpen] = useState(readOpen)
   const [peek, setPeek] = useState<OutboxFile | null>(null)
+  const [viewer, setViewer] = useState<{ pictures: Picture[]; index: number; bot: string } | null>(null)
+  const viewerLease = useRef<(() => void) | null>(null)
+  const thumbsRef = useRef<HTMLUListElement>(null)
+  const press = useRef<{
+    file: OutboxFile
+    x: number
+    y: number
+    peeking: boolean
+    scrubbed: boolean
+    timer: ReturnType<typeof setTimeout> | null
+  } | null>(null)
   const [seen, setSeen] = useState<{ bot: string | null; count: number | null }>({ bot: botId, count: null })
   if (seen.bot !== botId) {
     setSeen({ bot: botId, count: null })
   } else if (loadedFor === botId) {
     if (seen.count === null || (open && seen.count !== files.length) || seen.count > files.length) setSeen({ bot: botId, count: files.length })
   }
+
+  const clearPress = () => {
+    if (press.current?.timer) clearTimeout(press.current.timer)
+    press.current = null
+  }
+  const closeViewer = () => {
+    setViewer(null)
+    viewerLease.current?.()
+    viewerLease.current = null
+  }
+  useEffect(
+    () => () => {
+      if (press.current?.timer) clearTimeout(press.current.timer)
+      viewerLease.current?.()
+      viewerLease.current = null
+    },
+    [],
+  )
 
   if (!botId || files.length === 0) return null
 
@@ -50,6 +82,34 @@ function PhoneOutboxTrayInner() {
     const next = !open
     setOpen(next)
     writeOpen(next)
+  }
+
+  const openViewerFor = (target: OutboxFile) => {
+    const loaded: Picture[] = []
+    for (const img of thumbsRef.current?.querySelectorAll<HTMLImageElement>('img.phone-outbox-thumb-img') ?? []) {
+      if (img.src) loaded.push({ src: img.src, name: img.alt })
+    }
+    const hit = loaded.findIndex((p) => p.name === target.name)
+    if (hit >= 0) {
+      viewerLease.current?.()
+      viewerLease.current = null
+      setViewer({ pictures: loaded, index: hit, bot: botId })
+      return
+    }
+    const lease = blobFor(target.owner ?? botId, target.name, target.modified)
+    lease.url.then(
+      (url) => {
+        viewerLease.current?.()
+        viewerLease.current = lease.release
+        setViewer({ pictures: [{ src: url, name: target.name }], index: 0, bot: botId })
+      },
+      () => lease.release(),
+    )
+  }
+
+  const endPeek = () => {
+    clearPress()
+    setPeek(null)
   }
 
   return (
@@ -63,6 +123,7 @@ function PhoneOutboxTrayInner() {
           </span>
         ) : null}
         <span className="spacer" />
+        {open && images.length > 0 ? <span className="phone-outbox-hint">{t('點放大 · 按住滑')}</span> : null}
         <span className="phone-outbox-caret" aria-hidden="true">
           {open ? '▾' : '▸'}
         </span>
@@ -70,7 +131,7 @@ function PhoneOutboxTrayInner() {
       {open ? (
         <div className="phone-outbox-body">
           {images.length > 0 ? (
-            <ul className={`phone-outbox-thumbs${peek ? ' peeking' : ''}`} role="list">
+            <ul ref={thumbsRef} className={`phone-outbox-thumbs${peek ? ' peeking' : ''}`} role="list">
               {images.map((f) => (
                 <li key={`${f.owner ?? ''}/${f.name}`}>
                   <button
@@ -79,25 +140,73 @@ function PhoneOutboxTrayInner() {
                     data-outbox-name={f.name}
                     aria-label={t('按住預覽 {name}', { name: f.name })}
                     onPointerDown={(e) => {
-                      e.currentTarget.setPointerCapture?.(e.pointerId)
-                      setPeek(f)
-                    }}
-                    onPointerMove={(e) => {
-                      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-outbox-name]')
-                      const name = hit?.dataset.outboxName
-                      if (name && name !== peek?.name) {
-                        const next = images.find((x) => x.name === name)
-                        if (next) setPeek(next)
+                      clearPress()
+                      const state: NonNullable<typeof press.current> = {
+                        file: f,
+                        x: e.clientX,
+                        y: e.clientY,
+                        peeking: false,
+                        scrubbed: false,
+                        timer: setTimeout(() => {
+                          if (press.current === state) {
+                            state.timer = null
+                            state.peeking = true
+                            setPeek(state.file)
+                          }
+                        }, HOLD_PEEK_MS),
+                      }
+                      press.current = state
+                      try {
+                        e.currentTarget.setPointerCapture?.(e.pointerId)
+                      } catch {
                       }
                     }}
-                    onPointerUp={() => setPeek(null)}
-                    onPointerCancel={() => setPeek(null)}
-                    onLostPointerCapture={() => setPeek(null)}
-                    onKeyDown={(e) => {
-                      if (e.key === ' ' || e.key === 'Enter') setPeek(f)
+                    onPointerMove={(e) => {
+                      const state = press.current
+                      if (!state) return
+                      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-outbox-name]')
+                      const name = hit?.dataset.outboxName
+                      const moved = Math.abs(e.clientX - state.x) > SCRUB_THRESHOLD_PX || Math.abs(e.clientY - state.y) > SCRUB_THRESHOLD_PX
+                      if (name && name !== state.file.name) {
+                        const next = images.find((x) => x.name === name)
+                        if (next) {
+                          if (state.timer) {
+                            clearTimeout(state.timer)
+                            state.timer = null
+                          }
+                          state.peeking = true
+                          state.scrubbed = true
+                          state.file = next
+                          setPeek(next)
+                        }
+                      } else if (moved && !state.peeking) {
+                        if (state.timer) {
+                          clearTimeout(state.timer)
+                          state.timer = null
+                        }
+                        state.peeking = true
+                        state.scrubbed = true
+                        setPeek(state.file)
+                      }
                     }}
-                    onKeyUp={() => setPeek(null)}
-                    onBlur={() => setPeek(null)}
+                    onPointerUp={() => {
+                      const state = press.current
+                      clearPress()
+                      if (state && !state.peeking && !state.scrubbed) {
+                        setPeek(null)
+                        openViewerFor(state.file)
+                      } else {
+                        setPeek(null)
+                      }
+                    }}
+                    onPointerCancel={endPeek}
+                    onLostPointerCapture={endPeek}
+                    onKeyDown={(e) => {
+                      if (e.key === ' ' || e.key === 'Enter') {
+                        e.preventDefault()
+                        openViewerFor(f)
+                      }
+                    }}
                     onContextMenu={(e) => e.preventDefault()}
                   >
                     <OutboxThumb botId={f.owner ?? botId} file={f} />
@@ -144,6 +253,9 @@ function PhoneOutboxTrayInner() {
         <div className="phone-outbox-peek" aria-live="polite">
           <OutboxThumb botId={peek.owner ?? botId} file={peek} full />
         </div>
+      ) : null}
+      {viewer && viewer.bot === botId ? (
+        <ImageViewer pictures={viewer.pictures} index={viewer.index} onClose={closeViewer} />
       ) : null}
     </section>
   )

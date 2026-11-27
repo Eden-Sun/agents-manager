@@ -36,6 +36,12 @@
   color: var(--text-faint);
 }
 
+.phone-outbox-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
 .phone-outbox-body {
   display: flex;
   flex-direction: column;

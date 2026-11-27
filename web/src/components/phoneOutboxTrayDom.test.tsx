@@ -93,14 +93,21 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
 
   const thumb = document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!
   await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })))
-  await until(() => document.querySelector('.phone-outbox-peek img') !== null, '按住時出現大圖')
-  assert.equal(document.querySelector('.image-viewer'), null, '不開 modal')
+  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, pointerId: 1 })))
+  await until(() => document.querySelector('.image-viewer img') !== null, '輕點縮圖開全螢幕放大檢視器')
+  assert.equal(document.querySelector('.phone-outbox-peek'), null, '輕點不留 peek')
+  await click(document.querySelector<HTMLButtonElement>('.image-viewer button[aria-label="關閉"]')!)
+  assert.equal(document.querySelector('.image-viewer'), null, '關閉放大檢視器')
+
+  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, pointerId: 2 })))
+  await until(() => document.querySelector('.phone-outbox-peek img') !== null, '按住時出現大圖', 1000)
+  assert.equal(document.querySelector('.image-viewer'), null, '按住不開 modal')
   const second = document.querySelectorAll<HTMLButtonElement>('.phone-outbox-thumb')[1]!
   const firstAlt = document.querySelector('.phone-outbox-peek img')?.getAttribute('alt')
   const origFromPoint = document.elementFromPoint
   document.elementFromPoint = (() => second) as typeof document.elementFromPoint
   try {
-    await act(() => thumb.dispatchEvent(new window.PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 10, clientY: 10 })))
+    await act(() => thumb.dispatchEvent(new window.PointerEvent('pointermove', { bubbles: true, pointerId: 2, clientX: 10, clientY: 10 })))
   } finally {
     document.elementFromPoint = origFromPoint
   }
@@ -109,8 +116,9 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
     return !!alt && alt !== firstAlt
   }, '滑到第二張時大圖換掉')
   assert.ok(second.classList.contains('peeking'), '第二張標成目前這張')
-  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, pointerId: 1 })))
+  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, pointerId: 2 })))
   assert.equal(document.querySelector('.phone-outbox-peek'), null, '放開就收掉')
+  assert.equal(document.querySelector('.image-viewer'), null, '滑動放開不開 modal')
 })
 
 test('沒有檔案：整條不畫', async () => {
