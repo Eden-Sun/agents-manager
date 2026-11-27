@@ -124,14 +124,19 @@ async fn lock_latest(app: &Arc<App>, bot: &db::Bot, by: &str) -> Result<Snapshot
     let Some((mut session_id, mut transcript)) = latest_session(&app.db, &bot.id).await? else {
         return Err(LcError::conflict("base_snapshot_no_session", json!({"reason": "base_snapshot_no_session", "bot_id": bot.id})));
     };
+    let mut copied_on = None;
     if bot.kind == "agy" {
         let host = db::bot_host(&app.db, &bot.id).await.map_err(up)?;
         session_id = lifecycle::agy_session::clone_conversation(app.as_ref(), &host, bot.identity.as_deref(), &session_id).await.map_err(|e| {
             let reason = if lifecycle::agy_session::is_sqlite3_missing(&e) { lifecycle::agy_session::SQLITE3_MISSING } else { "base_snapshot_copy_failed" };
             LcError::conflict(reason, json!({"bot_id": bot.id, "host": host, "cause": e.to_string()}))
         })?;
-        lifecycle::agy_session::record_copy(&app.db, &session_id, &bot.id, &host, bot.identity.as_deref(), "base", None).await.map_err(up)?;
+        copied_on = Some(host);
         transcript = None;
+    }
+    let mut tx = app.db.begin().await.map_err(up)?;
+    if let Some(host) = &copied_on {
+        lifecycle::agy_session::record_copy(&mut *tx, &session_id, &bot.id, host, bot.identity.as_deref(), "base", None).await.map_err(up)?;
     }
     sqlx::query(
         "INSERT INTO bot_base_snapshots (bot_id, session_id, transcript_path, locked_at, locked_by) VALUES (?,?,?,?,?)
@@ -142,9 +147,10 @@ async fn lock_latest(app: &Arc<App>, bot: &db::Bot, by: &str) -> Result<Snapshot
     .bind(transcript.filter(|t| !t.trim().is_empty()))
     .bind(db::now())
     .bind(by)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await
     .map_err(up)?;
+    tx.commit().await.map_err(up)?;
     if bot.kind == "agy" {
         spawn_sweep(app, Some(&bot.id));
     }

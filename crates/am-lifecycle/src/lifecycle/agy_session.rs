@@ -327,8 +327,9 @@ pub fn remove_script(agy_dir: &str, ids: &[String]) -> String {
     )
 }
 
-/// 記下 AG Man 複出來的對話（清除只刪這裡記的）。
-pub async fn record_copy(pool: &sqlx::SqlitePool, id: &str, bot_id: &str, host: &str, identity: Option<&str>, purpose: &str, run_id: Option<&str>) -> anyhow::Result<()> {
+/// 記下 AG Man 複出來的對話（清除只刪這裡記的）。base 複本要跟 `bot_base_snapshots` 的更新放在同一個交易裡寫，
+/// 否則背景的 [`sweep_copies`] 會在兩筆之間把它當成「不是目前基準」的舊複本刪掉（#2232）。
+pub async fn record_copy(pool: impl sqlx::SqliteExecutor<'_>, id: &str, bot_id: &str, host: &str, identity: Option<&str>, purpose: &str, run_id: Option<&str>) -> anyhow::Result<()> {
     sqlx::query("INSERT OR REPLACE INTO agy_conversation_copies (id, bot_id, host, identity, purpose, run_id, created_at) VALUES (?,?,?,?,?,?,?)")
         .bind(id)
         .bind(bot_id)
