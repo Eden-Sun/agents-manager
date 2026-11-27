@@ -2342,6 +2342,12 @@ def cmd_hire(client: Client, cfg: dict, args) -> object:
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
 
+def cmd_project_set_path(client: Client, cfg: dict, args) -> object:
+    """專案目錄搬好之後改 AG Man 記錄的路徑（使用者或 fleet operator；專案內 bot 要先全停）。"""
+    if not args.project_id.strip() or not args.path.strip():
+        raise AgmError("bad_args", "project set-path 需要專案 id 與新路徑", 2)
+    return client.patch("/api/projects/" + urllib.parse.quote(args.project_id.strip(), safe=""), {"path": args.path.strip()})
+
 def _project_id() -> str:
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
@@ -3355,6 +3361,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--track", help="專家負責的軌道（--role specialist 必填）")
     s.add_argument("--fork-from", dest="fork_from", metavar="BOT", help="從同專案同主機的 codex bot 分岔（新成員也必須是 codex；第一次啟動用 codex fork，之後走自己的 session）")
     s.set_defaults(func=cmd_hire)
+    s = sub.add_parser("project", help="專案設定（set-path：檔案搬好後改專案路徑）")
+    psub = s.add_subparsers(dest="op", required=True)
+    ps = psub.add_parser("set-path", help="改專案路徑：先自己搬好檔案、停掉專案內所有 bot，再呼叫；不搬檔、不重啟")
+    ps.add_argument("project_id")
+    ps.add_argument("path", help="新的絕對路徑（必須是該主機上已存在的目錄）")
+    ps.set_defaults(func=cmd_project_set_path)
     s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
     s.add_argument("bot_id")
     s.add_argument("--role", choices=["executor", "advisor"])
@@ -3447,7 +3459,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult", "ops-alert") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult", "ops-alert", "project") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

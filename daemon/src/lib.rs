@@ -143,6 +143,7 @@ pub use am_base::{
 #[cfg(test)]
 pub use am_base::race_point;
 mod projection;
+mod project_relocate;
 mod identity_kind;
 mod child_retire;
 pub mod due_actions;

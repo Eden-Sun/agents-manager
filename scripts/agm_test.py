@@ -2012,6 +2012,15 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
         self.assertEqual(FakeDaemon.seen[1]["path"], "/api/bots/b1/member")
         self.assertEqual(FakeDaemon.seen[1]["body"], {"role": "advisor", "effort": "high", "session_id": "s1"})
 
+    def test_project_set_path_patches_the_project_path(self):
+        FakeDaemon.routes["PATCH /api/projects/p9"] = (200, {"project_id": "p9", "path": "/Users/m4p/project/wt", "needs_restart": False})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            out = self.ok("project", "set-path", "p9", " /Users/m4p/project/wt ")
+        self.assertEqual(out["path"], "/Users/m4p/project/wt")
+        self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/projects/p9")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"path": "/Users/m4p/project/wt"})
+
     def test_hire_requires_kind_and_rejects_retired_pool_flag(self):
         missing_kind = self.bad("hire", "w2")
         self.assertEqual(missing_kind["error"], "bad_args")

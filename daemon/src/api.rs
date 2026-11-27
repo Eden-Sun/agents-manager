@@ -1102,12 +1102,18 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
             && !confirm_query
             && matches!(&principal, RequestPrincipal::Bot(_))
             && Box::pin(fleet_operator_route(&app, bot_id, method, path)).await;
+        let fleet_project_path = policy == Some(BotRoutePolicy::UserOrAgm)
+            && !is_agm_role
+            && method == "PATCH"
+            && matches!(&principal, RequestPrincipal::Bot(_))
+            && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 3 && p[0] == "api" && p[1] == "projects")
+            && is_fleet_operator(&app, bot_id).await.unwrap_or(false);
         let fleet_codex_hook = policy == Some(BotRoutePolicy::UserOnly)
             && !sender_withdraw
             && !manager_base
             && matches!(&principal, RequestPrincipal::Bot(_))
             && Box::pin(fleet_codex_stop_hook_route(&app, bot_id, method, path)).await;
-        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base && !fleet_codex_hook) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle) {
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base && !fleet_codex_hook) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle && !fleet_project_path) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1276,6 +1282,7 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
         (Some("projects"), Some(id)) => {
             if db::project(&app.db, id).await.map_err(any_err)?.is_some() {
                 if project_in_bot_tree(app, caller, id).await? { return Ok(()); }
+                if method == "PATCH" && parts.len() == 3 && is_fleet_operator(app, caller).await? { return Ok(()); }
                 Some("project")
             } else {
                 None
@@ -2041,9 +2048,13 @@ pub(crate) struct PatchProject {
     /// 專家派工總開關（`true`＝專家可直接派工給本專案執行者）；不帶＝不動。僅 User。關掉時當場收回排隊中失去依據的專家派工。
     #[serde(default)]
     specialist_dispatch: Option<bool>,
+    /// 專案目錄搬家後改路徑（操作者先搬好檔案才呼叫）：使用者或 fleet operator；專案內有 bot 在跑 → 409 `bots_running`。
+    #[serde(default)]
+    path: Option<String>,
 }
 
-/// Never blocked by a live run: herdr identity derives from the bot id, so `needs_restart: false`.
+/// Other fields are never blocked by a live run: herdr identity derives from the bot id, so `needs_restart: false`.
+/// `path` 見 [`crate::project_relocate`]：要求專案內 bot 全停，改 config 與 DB 裡以舊路徑為前綴的欄位。
 pub(crate) async fn patch_project(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2051,6 +2062,18 @@ pub(crate) async fn patch_project(
     Json(b): Json<PatchProject>,
 ) -> Result<Response, LcError> {
     if (b.mode.is_some() || b.manager_bot_id.is_some() || b.role_policy.is_some() || b.deputy.is_some() || b.specialist_dispatch.is_some()) && principal != RequestPrincipal::User { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"}))); }
+    if let RequestPrincipal::Bot(caller) = &principal {
+        if (b.label.is_some() || b.handed_off_to.is_some()) && crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none() {
+            return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"})));
+        }
+    }
+    let relocate = match &b.path {
+        None => None,
+        Some(raw) => {
+            crate::project_relocate::authorize(&app, &principal).await?;
+            crate::project_relocate::prepare(&app, &id, raw).await?
+        }
+    };
     let project_for_gate = if b.mode.is_some() {
         Some(db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?)
     } else { None };
@@ -2101,6 +2124,9 @@ pub(crate) async fn patch_project(
         }
     };
     let projection =     crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        if let Some(r) = &relocate {
+            crate::project_relocate::rewrite_agent_md(&mut cfg.agents, &[id.as_str(), r.label.as_str()], &r.old, &r.new, &r.home);
+        }
         let p = cfg
             .projects
             .iter_mut()
@@ -2129,10 +2155,27 @@ pub(crate) async fn patch_project(
         if let Some(on) = b.specialist_dispatch {
             p.specialist_dispatch = on;
         }
+        if let Some(r) = &relocate {
+            p.path = r.new.clone();
+        }
         Ok(())
     })
     .await;
     projection.map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) })?;
+    if let Some(r) = &relocate {
+        if let Err(e) = crate::project_relocate::rewrite_db(&app.db, &id, r).await {
+            tracing::error!(project_id = %id, error = ?e, "project path DB rewrite failed; restoring the old path in config");
+            let back = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+                crate::project_relocate::rewrite_agent_md(&mut cfg.agents, &[id.as_str(), r.label.as_str()], &r.new, &r.old, &r.home);
+                if let Some(p) = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(id.as_str())) { p.path = r.old.clone(); }
+                Ok(())
+            })
+            .await;
+            if let Err(restore) = back { tracing::error!(project_id = %id, error = ?restore, "restoring the old project path failed"); }
+            return Err(any_err(format!("{e:#}")));
+        }
+        tracing::warn!(project_id = %id, old = %r.old, new = %r.new, http = %crate::config_audit::http_caller(), "project path changed");
+    }
     if b.specialist_dispatch == Some(false) || b.mode.is_some() {
         crate::specialist_dispatch::withdraw_disabled(&app, &id).await;
     }
@@ -2156,7 +2199,12 @@ pub(crate) async fn patch_project(
             if db::active_run(&app.db, &bot.id).await.map_err(any_err)?.is_some() { needs_restart = true; break; }
         }
     }
-    Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": needs_restart}))).into_response())
+    let mut out = json!({"project_id": id, "needs_restart": needs_restart});
+    if b.path.is_some() {
+        let path = db::project(&app.db, &id).await.map_err(any_err)?.map(|p| p.path);
+        out["path"] = json!(path);
+    }
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
@@ -7550,3 +7598,6 @@ mod claude_api_advisor_relay_tests;
 mod openai_api_kind_tests;
 #[cfg(test)]
 mod openai_api_balance_tests;
+
+#[cfg(test)]
+mod project_relocate_tests;

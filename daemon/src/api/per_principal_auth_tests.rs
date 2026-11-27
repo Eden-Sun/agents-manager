@@ -3170,3 +3170,20 @@ async fn ops_alerts_from_a_role_bot_are_keyed_by_caller_marked_as_data_and_rate_
     let r = raw(e.app.clone(), ops_alert_req(None, &e.app.ui_token, r#"{"source":"daemon-update-kick","reason":"stuck"}"#)).await;
     assert!(r.starts_with("HTTP/1.1 200") && r.contains("ops_alert:daemon-update-kick:stuck:"), "使用者的排程腳本另算額度，沿用 source：{r}");
 }
+
+/// fleet operator 經 HTTP 能打到 `PATCH /api/projects/:id {"path"}`（別的專案也行），只限 path；沒列名的 bot 403。
+#[tokio::test]
+async fn project_relocate_route_admits_a_fleet_operator_for_path_only() {
+    let f = fleet_env().await;
+    let new = f.e.dir.join("fleet-moved");
+    std::fs::create_dir_all(&new).unwrap();
+    let body = json!({"path": new.to_string_lossy()}).to_string();
+    let route = format!("/api/projects/{}", f.other_project);
+    let r = as_bot(&f.e, &f.operator, "PATCH", &route, &body).await;
+    assert!(forbidden(&r), "not listed yet: {r}");
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let r = as_bot(&f.e, &f.operator, "PATCH", &route, &body).await;
+    assert!(r.starts_with("HTTP/1.1 409") && r.contains("bots_running") && r.contains(&f.target.id), "gate passed, the running target refuses: {r}");
+    let r = as_bot(&f.e, &f.operator, "PATCH", &route, r#"{"label":"x"}"#).await;
+    assert!(forbidden(&r) && r.contains("user_only"), "path only: {r}");
+}

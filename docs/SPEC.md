@@ -4366,6 +4366,8 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 
 「開同類分身」的佔位列以建立請求的 `client_request_id` 對上 `bots[].create_request_id`，不以名稱比對（#1796）；建立時的請求指紋亦記錄於 `bots[].create_fingerprint`（預設 None），用於回應遺失時原樣重送拿回同一顆 bot 的冪等判定（#352）。
 
+專案改路徑（relocate，2026-11-27）：專案目錄在主機上搬家後，以 `PATCH /api/projects/{id} {"path"}`（`agm project set-path`）改記錄的路徑；config.toml 是權威且 daemon 執行中會覆寫，不手改。前提是操作者已搬好檔案、專案內 bot 全停（有 active run → 409 `bots_running`）；daemon 不搬檔、不動 transcript、不重啟。User 或 fleet operator 可呼叫。改的是 config 的 `projects.path` 與 `[agents.projects]` 指示檔路徑（保留 `~` 寫法），以及 DB 中以舊路徑為精確前綴的 `bots.cwd`、`attachments.agent_path`、`shared_bots.workspace`、`pane_aliases.key`；歷史文字不改。細節見 API.md。
+
 ## 14. 每台主機各自的額度
 
 **額度屬於它被讀到的那台主機**。標題列一次只顯示一台：預設本機，點進 ssh 主機上的 bot 或專案時換成那台（使用者決定：切換，不並列）。
