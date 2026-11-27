@@ -235,3 +235,39 @@ async fn an_auth_failure_under_the_current_generation_still_marks_logged_out() {
 
     assert_eq!(logged_in(&env.app).await, Some(false));
 }
+
+/// #2237：綁 ag1（自己的 `HOME`）的 bot 授權失敗：只標 ag1 未登入、清 ag1 那一格額度；主機預設帳號與裸 `agy` 額度不動。
+/// 綁 ag0（不換 `HOME`＝同一個帳號）照舊標預設帳號。
+#[tokio::test]
+async fn an_auth_failure_marks_the_bots_own_agy_identity_not_the_default_account() {
+    let _globals = agy_globals().await;
+    let env = tt::env().await;
+    seed_agy(&env.app).await;
+    let ag1 = crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: Some(HOST.into()), env: [("HOME".into(), "/tmp/agy-ag1".into())].into(), args: vec![] };
+    env.app.cfg.update(move |cfg| { cfg.identities.push(ag1); Ok(()) }).await.unwrap();
+    let mut info = crate::tools::IdentityInfo::unknown("ag1", "agy", crate::tools::SOURCE_CONFIG, None);
+    info.logged_in = Some(true);
+    env.app.tools.lock().await.get_mut(HOST).unwrap().identities.insert("ag1".into(), info);
+    let ag1_key = crate::quota::quota_key(HOST, &crate::quota::quota_base_default_aware("agy", Some("ag1"), false));
+    assert_ne!(ag1_key, crate::quota::quota_key(HOST, "agy"));
+    env.app.quotas.lock().await.insert("agy".into(), quota());
+    env.app.quotas.lock().await.insert(ag1_key.clone(), quota());
+
+    let bot = agy_bot(&env, "agy-auth-ag1").await;
+    sqlx::query("UPDATE bots SET identity='ag1' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+    sqlx::query("UPDATE runs SET runtime_identity='ag1' WHERE bot_id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+    process(&env.app, &stop(&bot, "401 UNAUTHENTICATED: invalid credentials")).await.unwrap();
+
+    assert_eq!(logged_in(&env.app).await, Some(true), "預設帳號沒事");
+    assert!(env.app.quotas.lock().await.contains_key("agy"), "預設帳號的額度留著");
+    assert!(!crate::runners::quota_agy::auth_denied().lock().unwrap().contains_key(&crate::quota::quota_key(HOST, "agy")), "預設帳號不進探測冷卻");
+    let ag1_in = env.app.tools.lock().await.get(HOST).and_then(|h| h.identities.get("ag1")).and_then(|i| i.logged_in);
+    assert_eq!(ag1_in, Some(false), "真正失效的 ag1 標成未登入");
+    assert!(!env.app.quotas.lock().await.contains_key(&ag1_key), "ag1 那一格清掉");
+
+    let bot0 = agy_bot(&env, "agy-auth-ag0").await;
+    sqlx::query("UPDATE bots SET identity='ag0' WHERE id=?").bind(&bot0.id).execute(&env.app.db).await.unwrap();
+    sqlx::query("UPDATE runs SET runtime_identity='ag0' WHERE bot_id=?").bind(&bot0.id).execute(&env.app.db).await.unwrap();
+    process(&env.app, &stop(&bot0, "401 UNAUTHENTICATED: invalid credentials")).await.unwrap();
+    assert_eq!(logged_in(&env.app).await, Some(false), "ag0 就是預設帳號");
+}

@@ -276,6 +276,7 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
     } else {
         let grok_home = grok_home_for(app, &bot, &host).await?;
         let Some(sid) = session_for(app, &bot, &run, &host, &grok_home).await? else { return Ok(Synced::Unavailable) };
+        app.consume_resume_session(&bot, &run, Some(&sid)).await?;
         let Some(text) = read_history(app, &host, &grok_home, &sid).await? else { return Ok(Synced::Unavailable) };
         (sid, parse_chat_history(&text))
     };

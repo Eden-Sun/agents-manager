@@ -557,3 +557,18 @@ async fn the_run_user_prompts_lookup_seeks_turns_by_run_and_never_scans_messages
     assert!(details.iter().any(|d| d.starts_with("SEARCH m USING INDEX messages_turn (turn_id=?)")), "{details:#?}");
     assert!(!details.iter().any(|d| d.starts_with("SCAN")), "must not scan messages or turns: {details:#?}");
 }
+
+/// §12：hookless grok 以 resume 啟動，讀對話檔綁上 session 時比對要接回的那一段：相符記 `verified`，
+/// 不符記 `mismatch` 並留 context_lost（同 agy 分支）。
+#[tokio::test]
+async fn a_resumed_hookless_grok_checks_the_session_it_bound() {
+    for (expected, outcome) in [(SID, "verified"), ("01OTHERSESSIONXXXXXXXXXXXX", "mismatch")] {
+        let c = grok_child(Some(FRESH)).await;
+        let app = c.env.app.clone();
+        sqlx::query("UPDATE runs SET resume_session_id=? WHERE id=?").bind(expected).bind(&c.run_id).execute(&app.db).await.unwrap();
+        crate::lifecycle::poller::test_seams::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap();
+        let (pending, got): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id=?").bind(&c.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((pending.as_deref(), got.as_deref()), (None, Some(outcome)), "{expected}");
+    }
+}
