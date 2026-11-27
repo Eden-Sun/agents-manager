@@ -225,7 +225,7 @@ const dict: Dict = {
   '圖片': 'Image',
   '上一張': 'Previous',
   '下一張': 'Next',
-  '點圖放大 · 點背景或下滑關閉': 'Click to enlarge · Click background or swipe down to close',
+  '點圖或雙指放大 · 點背景或下滑關閉': 'Tap or pinch to zoom · Tap background or swipe down to close',
   '原圖': 'Original',
   '下載': 'Download',
 
