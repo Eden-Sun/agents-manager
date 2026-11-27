@@ -3018,7 +3018,7 @@ async fn a_fleet_operator_cannot_delete_reconfigure_or_reach_beyond_the_lifecycl
 }
 
 #[tokio::test]
-async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role() {
+async fn a_fleet_operator_only_restarts_a_share_bot_never_a_child_or_stops_an_agm_role() {
     let f = fleet_env().await;
     set_fleet_operators(&f.e, &[&f.operator.id]).await;
     let shared = fleet_other_project_bot(&f.e, &f.other_project, "fleet-shared").await;
@@ -3030,11 +3030,25 @@ async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role()
     crate::testing::fake_run(&f.e.app, &child.id).await;
     for victim in [&shared, &child] {
         for (method, path, body) in fleet_ops(&victim.id) {
+            let share_restart = victim.id == shared.id && method == "POST" && (path.ends_with("/restart") || path.ends_with("/start"));
+            if share_restart {
+                continue;
+            }
             let r = as_bot(&f.e, &f.operator, method, &path, body).await;
             assert!(forbidden(&r), "{method} {path} ({}) stays forbidden: {r}", victim.name);
         }
         assert!(db::active_run(&f.e.app.db, &victim.id).await.unwrap().is_some());
     }
+    let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", shared.id), "").await;
+    assert!(forbidden(&r), "a fleet operator still cannot delete a share bot: {r}");
+    for op in ["restart", "start"] {
+        let r = as_bot(&f.e, &f.target, "POST", &format!("/api/bots/{}/{op}", shared.id), "{}").await;
+        assert!(forbidden(&r), "a plain bot cannot {op} a share bot: {r}");
+    }
+    let r = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/restart", shared.id), "{}").await;
+    assert!(!forbidden(&r) && !r.starts_with("HTTP/1.1 401"), "a fleet operator restarts a share bot (user 2026-11-27): {r}");
+    let r = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/restart", child.id), "{}").await;
+    assert!(forbidden(&r), "a child is still off limits: {r}");
     let patrol = fleet_other_project_bot(&f.e, &f.other_project, "fleet-patrol").await;
     crate::testing::fake_run(&f.e.app, &patrol.id).await;
     crate::supervisor::store::get_or_init(&f.e.app.db).await.unwrap();

@@ -98,7 +98,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 | 放行 | 限制 |
 |---|---|
-| `POST /api/bots/{id}/start`、`/restart`、`/stop`、`/interrupt` | AGM 角色（巡檢／協調者）不能被 `/stop` |
+| `POST /api/bots/{id}/start`、`/restart`、`/stop`、`/interrupt` | AGM 角色（巡檢／協調者）不能被 `/stop`；分享用 bot 只放行 `/start`、`/restart`（使用者 2026-11-27 授權；restart 照使用者重啟 resume 保留對話，log 帶 `share=true`） |
 | `PATCH /api/bots/{id}` | 只收 `model`／`effort`／`fast`／`name`／`env`／`env_merge`（env 使用者 2026-11-27 授權；保留鍵檢查照舊）；帶其他欄位 403 `user_only`。env 只能刪鍵（`env_merge` 的 `null`、`env` 省略）與設定白名單 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`／`CLAUDE_CODE_MAX_OUTPUT_TOKENS`／`CLAUDE_CODE_DISABLE_TERMINAL_TITLE`／`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`；新增或改值的其他鍵（`CLAUDE_CONFIG_DIR`／`CODEX_HOME`／`HOME`、`*_BASE_URL`、`HTTPS_PROXY`、`PATH`、`LD_PRELOAD`、`DYLD_*`、`NODE_OPTIONS`…）403 `env_key_forbidden`＋`keys`（#2234） |
 | `GET /api/bots/{id}/terminal` | 唯讀 |
 | `DELETE /api/bots/{id}` | 使用者 2026-11-27 授權；與使用者刪除相同（軟刪、子 agent 一起收）；不能刪自己、AGM 角色；帶 `?confirm=supervisor` → 403；expert 專案唯一的 manager → 409 `last_manager`（任何 Bot principal 都擋） |
@@ -106,7 +106,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 另外可代使用者查看與確認 Codex Stop hook 信任：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust`（body `{"host":"<主機名>","identity":null}`；這兩支沒有目標 bot，只看 caller 是不是 fleet operator）；信任時記一行 log `fleet operator trusts the Codex Stop hook on behalf of the user`（`op="codex_stop_hook_trust"`、`host`、`identity`、`codex_home`）。
 
-不放行：`DELETE` 專案、`PUT …/role`、`credential/rotate`、`identity`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot（任何操作）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`；刪身份記 `target_identity`、`target_host`、`op="delete_identity"`）。
+不放行：`DELETE` 專案、`PUT …/role`、`credential/rotate`、`identity`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot 的 start／restart 以外操作（stop、interrupt、DELETE、PATCH、terminal、分享設定）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`、`share`；刪身份記 `target_identity`、`target_host`、`op="delete_identity"`）。
 
 跨資源測試逐一打上述動態路徑家族的每個方法，並覆蓋 Bot A 對 Bot B、編碼 ID、同 bot、child、AGM 專用任務／交辦例外與 User principal。
 

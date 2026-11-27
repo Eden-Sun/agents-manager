@@ -1277,7 +1277,8 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                     return Ok(());
                 }
                 if Box::pin(fleet_operator_over(app, caller, method, &parts, &target_bot)).await? {
-                    log_fleet_operation(caller, method, &parts, &target_bot);
+                    let share = matches!(db::is_share_bot(&app.db, &target_bot.id).await, Ok(true));
+                    log_fleet_operation(caller, method, &parts, &target_bot, share);
                     return Ok(());
                 }
                 Some("bot")
@@ -3063,7 +3064,9 @@ fn fleet_operator_op(method: &str, parts: &[impl AsRef<str>]) -> bool {
 }
 
 /// `caller` 列在 `[agents] fleet_operators`（熱重載，只認 bot id）、本身是存活的頂層 bot，而 `target` 是任何專案、任何主機上
-/// 別的存活頂層 bot，且這次是 [`fleet_operator_op`] 的操作。child 不繼承；分享用 bot 一律不碰；AGM 角色（巡檢／協調者）不能被 stop 或刪除。
+/// 別的存活頂層 bot，且這次是 [`fleet_operator_op`] 的操作。child 不繼承；AGM 角色（巡檢／協調者）不能被 stop 或刪除。
+/// 分享用 bot 只放行 `POST start|restart`（[`fleet_share_op`]，使用者 2026-11-27 授權：套用新規則要能重啟，restart 保留對話）；
+/// stop、interrupt、刪除、PATCH、讀 terminal 一律不碰（外部使用者在用、內容可能敏感）。
 async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> Result<bool, LcError> {
     if !fleet_operator_op(method, parts) || target.id == caller || target.parent_bot_id.is_some() || target.managed_by == "child" || target.deleted_at.is_some() {
         return Ok(false);
@@ -3071,13 +3074,20 @@ async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: 
     if !is_fleet_operator(app, caller).await? {
         return Ok(false);
     }
-    if !matches!(db::is_share_bot(&app.db, &target.id).await, Ok(false)) {
-        return Ok(false);
+    match db::is_share_bot(&app.db, &target.id).await {
+        Ok(false) => {}
+        Ok(true) if fleet_share_op(method, parts) => {}
+        _ => return Ok(false),
     }
     if (parts.get(3).map(|p| p.as_ref()) == Some("stop") || method == "DELETE") && crate::supervisor::roles::role_of_bot(&app.db, &target.id).await.map_err(any_err)?.is_some() {
         return Ok(false);
     }
     Ok(true)
+}
+
+/// fleet operator 對分享用 bot 唯一能做的：`POST /api/bots/{id}/start|restart`。
+fn fleet_share_op(method: &str, parts: &[impl AsRef<str>]) -> bool {
+    method == "POST" && parts.len() == 4 && matches!(parts[3].as_ref(), "start" | "restart")
 }
 
 /// `caller` 列在 `[agents] fleet_operators`（熱重載，只認 bot id），而且本身是存活的頂層 bot。child 不算，列了也不算。
@@ -3106,9 +3116,9 @@ async fn fleet_operator_route(app: &Arc<App>, caller: &str, method: &str, path: 
     fleet_operator_over(app, caller, method, &parts, &target).await.unwrap_or(false)
 }
 
-/// 稽核：fleet operator 的跨專案操作每次都記一行（caller、target、專案、操作）。
+/// 稽核：fleet operator 的跨專案操作每次都記一行（caller、target、專案、操作、是否分享用 bot）。
 #[inline(never)]
-fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) {
+fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot, share: bool) {
     let op = parts.get(3).map(|p| p.as_ref()).unwrap_or(if method == "DELETE" { "delete" } else { "patch" });
     tracing::info!(
         http = %crate::config_audit::http_caller(),
@@ -3118,6 +3128,7 @@ fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], ta
         target_project = %target.project_id,
         method,
         op,
+        share,
         "fleet operator cross-project bot operation"
     );
 }

@@ -2863,9 +2863,10 @@ Fleet operator（使用者 2026-11-18）：`[agents] fleet_operators = ["<bot_id
 
 - **誰算**：只認 bot id（名稱不算）；該 bot 必須存在、未刪除、是頂層 bot。child 不繼承，就算把 child 的 id 寫進去也不算。清單只能由使用者改 `config.toml`，沒有任何 API 會寫它；`[agents]` 熱重載（`ConfigStore::agents_fresh`），加入／移除在下一個請求生效。
 - **能做**（對象：任何專案、任何主機上別的存活頂層 bot）：`POST /bots/{id}/start|restart|stop|interrupt`、`PATCH /bots/{id}`（只收 model／effort／fast／name，跟專家管理者同一份白名單；另收 `env`／`env_merge`）、`GET /bots/{id}/terminal`；使用者 2026-11-27 授權代為清理：`DELETE /bots/{id}`（與使用者刪除相同：軟刪、子 agent 一起收；`?confirm=supervisor` 照舊只限使用者與 AGM 角色）、改 `env`（保留鍵檢查照舊；只能刪鍵與設定明列的 claude 調校鍵，其他 403 `env_key_forbidden`，#2234：身份目錄、端點、代理、`PATH`／`LD_PRELOAD`／`NODE_OPTIONS` 這類鍵會換身份、導走流量或繞過 args 限制，而 bot env 蓋過身份 env）、`DELETE /api/identities/{name}`（還有 bot 在用照舊 409）。
+- **分享用 bot 只能 start／restart**（使用者 2026-11-27 授權：遠端守門等新規則要重啟才套用）：`POST /bots/{id}/start|restart` 放行，restart 與使用者重啟同樣 resume 保留對話；log 帶 `share=true`。一般 bot 與 AGM 角色對分享用 bot 照舊 403。
 - **代使用者確認 Codex Stop hook 信任**（使用者 2026-11-18）：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust` 對 fleet operator 放行（路由仍是 UserOnly，其他 bot、operator 的 child、AGM 角色照舊 403 `user_only`）；信任時記一行 log（`op="codex_stop_hook_trust"`、`host`）。
-- **不能做**：刪專案、改角色、credential rotate、改 identity／args／persona、新增身份與身份 login／logout、fork／promote／rewind／login、讀訊息與附件、碰分享用 bot（任何操作）、碰別人的 child、刪自己、stop 或刪 AGM 角色（巡檢／協調者）、host／shell／ui-token 類的 User-only 路由。
-- **實作**：`api.rs` 的 `fleet_operator_over`（路徑範圍，`authorize_bot_path`）與 `fleet_operator_route`（UserOrAgm 閘）；`patch_bot` 對「目標不在 caller 自己 bot 樹」的 Bot principal 一律套四欄白名單，`env` 另由 `patch_env_allowed` 驗 `fleet_operator_over`；刪身份由 UserOrAgm 閘的 `fleet_identity_delete` 放行、`delete_identity` 再驗一次。放行時記一行 info log `fleet operator cross-project bot operation`（caller、target bot、專案、操作）。
+- **不能做**：刪專案、改角色、credential rotate、改 identity／args／persona、新增身份與身份 login／logout、fork／promote／rewind／login、讀訊息與附件、對分享用 bot 做 start／restart 以外的事（stop、interrupt、刪除、PATCH、讀 terminal、分享設定；外部使用者在用、內容可能敏感）、碰別人的 child、刪自己、stop 或刪 AGM 角色（巡檢／協調者）、host／shell／ui-token 類的 User-only 路由。
+- **實作**：`api.rs` 的 `fleet_operator_over`（路徑範圍，`authorize_bot_path`）與 `fleet_operator_route`（UserOrAgm 閘）；`patch_bot` 對「目標不在 caller 自己 bot 樹」的 Bot principal 一律套四欄白名單，`env` 另由 `patch_env_allowed` 驗 `fleet_operator_over`；刪身份由 UserOrAgm 閘的 `fleet_identity_delete` 放行、`delete_identity` 再驗一次。放行時記一行 info log `fleet operator cross-project bot operation`（caller、target bot、專案、操作、`share`）。
 - **CLI**：`agm bot start|stop|restart|set|delete <bot_id>` 沒有本地的專案檢查，直接交給 daemon 判斷，跨專案 bot 可直接用；`agm bot set <id> --env KEY=VALUE --env-unset KEY`（送 `env_merge`，由 daemon 合併，跨專案讀不到現有 env 也能用）、`agm identity delete <name> [--host]`。
 
 使用者時區（#2047，2026-11-17）：`[agents] user_time_zone`（IANA 名稱，沒寫＝`Asia/Taipei`）可在設定改，`PUT /api/settings/time-zone` 寫入。agent md 最前面會注入「使用者時區」一段（對話時間換算成該時區並標 UTC 偏移，如 `(+8)`）；CLI 的 `timeZone` 也跟著同一值。新啟動的 bot 套用，已在跑的 bot 不重讀。
@@ -5914,7 +5915,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 - **閒置收起**（§6.11）：`decide` 的 `share_bot`，排在 `supervisor` 之後、`primary` 之前；認的是 `shared_bots` 有一列，讀不到就這輪不收。
 - **隱式退役**（`child_retire`，對帳 agent 不見／run 早就結束、維護窗口收尾）：分享用 bot 不會是 child，入口仍多一道保險，回 `ShareBot`、不軟刪。
-- **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`），巡檢角色例外可重啟／啟動任何頂層 bot（使用者 2026-10-31）；fleet operator（§6.5i `fleet_operators`）對分享用 bot 一條都不放行；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
+- **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`），巡檢角色例外可重啟／啟動任何頂層 bot（使用者 2026-10-31）；fleet operator（§6.5i `fleet_operators`）對分享用 bot 只放行 `POST /api/bots/{id}/start|restart`（使用者 2026-11-27 授權），其餘一律不放行；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
   `DELETE /api/projects/{id}`（專案裡有活著的分享用 bot）一律 403 `share_bot_protected`。重啟照准（會自己起回來）；使用者（UI token）照常能停能刪。
 - **outbox**：不走 1 小時清理，改走分享保留政策（14 天、500 MiB／1000 檔，#850，§6.5f 分享用 bot 例外）。
 - **停了自動接回**：pane 被關、daemon 重啟、主機重開之後它就是停著（對帳只把 run 收成 exited，不刪 bot）。end user 送來一則時照「先落地、再啟動」
