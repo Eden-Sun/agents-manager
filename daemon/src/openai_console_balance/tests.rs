@@ -77,10 +77,16 @@ struct Mock {
     grants_headers: StdMutex<Option<(String, String)>>,
     login_auth: StdMutex<Option<String>>,
     token_body: StdMutex<Option<Value>>,
+    user_agents: StdMutex<Vec<String>>,
+}
+
+fn record_ua(m: &Mock, h: &HeaderMap) {
+    m.user_agents.lock().unwrap().push(h.get("user-agent").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default());
 }
 
 async fn login(State(m): State<Arc<Mock>>, h: HeaderMap) -> (StatusCode, Json<Value>) {
     m.login_calls.fetch_add(1, Ordering::SeqCst);
+    record_ua(&m, &h);
     *m.login_auth.lock().unwrap() = h.get("authorization").map(|v| v.to_str().unwrap().to_string());
     let code = *m.login_status.lock().unwrap();
     let body = json!({"user": {"session": {"sensitive_id": "sess-SECRET"}, "orgs": {"data": [
@@ -91,6 +97,7 @@ async fn login(State(m): State<Arc<Mock>>, h: HeaderMap) -> (StatusCode, Json<Va
 }
 
 async fn grants(State(m): State<Arc<Mock>>, h: HeaderMap) -> (StatusCode, Json<Value>) {
+    record_ua(&m, &h);
     let auth = h.get("authorization").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
     let org = h.get("openai-organization").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
     *m.grants_headers.lock().unwrap() = Some((auth.clone(), org));
@@ -100,7 +107,8 @@ async fn grants(State(m): State<Arc<Mock>>, h: HeaderMap) -> (StatusCode, Json<V
     (StatusCode::OK, Json(grants_body()))
 }
 
-async fn token(State(m): State<Arc<Mock>>, Json(b): Json<Value>) -> (StatusCode, Json<Value>) {
+async fn token(State(m): State<Arc<Mock>>, h: HeaderMap, Json(b): Json<Value>) -> (StatusCode, Json<Value>) {
+    record_ua(&m, &h);
     m.token_calls.fetch_add(1, Ordering::SeqCst);
     *m.token_body.lock().unwrap() = Some(b);
     let code = *m.token_status.lock().unwrap();
@@ -189,6 +197,9 @@ async fn near_expiry_refreshes_and_writes_back_0600_via_rename() {
     assert_eq!(names, vec!["openai-console-state.json".to_string()], "暫存檔不留下");
     let login_auth = m.login_auth.lock().unwrap().clone().unwrap();
     assert_eq!(login_auth, format!("Bearer {}", saved["access_token"].as_str().unwrap()), "login 用新的 access token");
+    let uas = m.user_agents.lock().unwrap().clone();
+    assert_eq!(uas.len(), 3, "token、login、grants 各一次：{uas:?}");
+    assert!(uas.iter().all(|ua| ua.starts_with("agents-manager/") && ua.len() > "agents-manager/".len()), "api.openai.com 對沒有 User-Agent 的請求回 403：{uas:?}");
 }
 
 #[tokio::test]

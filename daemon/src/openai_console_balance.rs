@@ -289,7 +289,7 @@ pub async fn fetch_outcome(st: &OpenAiConsoleState, ep: &Endpoints, state_path: 
     let Some(mut access) = state.get("access_token").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string) else {
         return Outcome::Error("state_parse".into());
     };
-    let client = match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(TOTAL_BUDGET).build() {
+    let client = match reqwest::Client::builder().user_agent(concat!("agents-manager/", env!("CARGO_PKG_VERSION"))).redirect(reqwest::redirect::Policy::none()).timeout(TOTAL_BUDGET).build() {
         Ok(c) => c,
         Err(_) => return Outcome::Error("client".into()),
     };
