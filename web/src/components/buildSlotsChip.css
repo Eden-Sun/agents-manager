@@ -14,7 +14,3 @@
 .build-slots-chip .build-slots-wait {
   color: var(--warn, #c98a00);
 }
-
-.head-ram.multi > .build-slots-chip {
-  align-self: flex-start;
-}

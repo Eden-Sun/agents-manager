@@ -129,5 +129,6 @@ it('左上主機數據區：只有本機與有遠端主機時，晶片都跟 RAM
     await until(() => document.querySelector('.head-ram.multi') !== null, '換成多主機')
     assert.equal(document.querySelectorAll('[data-k="build-slots-chip"]').length, 1)
     assert.ok(chip()!.parentElement!.classList.contains('multi'))
+    assert.ok(document.querySelector('[data-k="head-hosts"]'), '多主機收成一顆摘要膠囊，與建置晶片同一列')
   })
 })
