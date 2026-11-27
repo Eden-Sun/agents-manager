@@ -577,3 +577,53 @@
 - 發現 2、5、6、7、8、12 沒有實測；發現 6 需要實機開一顆分享 bot。
 - 窄螢幕版面、深色主題仍沒有在瀏覽器實際操作（色碼只做靜態掃描）。
 - §8「只看標題，判定低風險」的 38 個 commit 這次沒有讀 diff（其中 `e4297bd1c`、`814476e0e`、`d8c99894d`、`a923fa66c`、`e8eb454bf` 只看了 CSS 的色碼行）。
+
+## §10 針對性掃描（2026-11-27，唯讀）
+
+行號以 main `b9ee13e20` 為準。開出的 issue：**#2234**（發現 1）。
+**第 2、3 項只做了一部分**，範圍與沒看的清單寫在各段與最後的「建議拆法」，不要當成已掃完。
+
+### 覆蓋
+
+| 項目 | 覆蓋 | 說明 |
+|---|---|---|
+| 1. `290f8af44`、`144ca7fcd` | ✅逐段 | 兩個 diff 全讀（含測試），加上現行 `api.rs:1018-1347`（`auth`、`authorize_bot_path`）、`:2240-2289`、`:3040-3100`、`:3298-3420`、`:3720-3836`、`:5477-5566`，`project_relocate.rs` 全檔，`bot_input.rs:1-75`、`setup.rs:1140-1190`、`projection.rs:128-179`、`hosts.rs:148-150`（`sh_quote`）。沒有實機打 API。 |
+| 2. 同型競態 | ⚠部分 | 讀了 `schedules/base.rs`（`lock_latest`、`dispatch`、`clear`）、`agy_session.rs:325-400`（`record_copy`、`stale_copies`、`sweep_copies`）、`start.rs:1630-1670`、`attach.rs:255-432`、`reconcile.rs:905-975`（孤兒 pane）、`remote_purge.rs:22-52`。其餘清理程式沒看，清單見下。 |
+| 3. hook 與 poller 不對稱 | ⚠部分 | 讀了 `hookrecv.rs:1505-1584`（`TurnFailed`）、函式清單與副作用呼叫點的對照、`poller.rs:1570-1602`、`:1880-1969`、`turn_error.rs:423-464`、`ask_answers.rs:10-40`。`hookrecv.rs` 的 `TurnComplete` 主體（`:1590-2110`）與 `capture_hookless_turn_locked` 沒逐段讀。 |
+| 4. §8 只看標題的 38 個 | ✅分流＋5 個讀 diff | 列出 38 個各自動到的非測試、非 CSS 檔：**沒有任何一個動到 daemon 狀態機、刪除、權限或 delivery**；只有 `77cc819fd` 碰 daemon（`message_translate.rs` 加 8 行測試）。讀了 `77cc819fd`、`4f9886d89`、`d132e8202`、`1c8f97379`、`df663a090` 的邏輯變更行，沒有發現問題。其餘 33 個是 CSS、圖示、排序、測試或刪字串，仍只看檔案清單。 |
+
+### 發現
+
+| # | sha 或檔:行 | 觸發情境 | 嚴重度／信心 | 建議修法 | issue |
+|---|---|---|---|---|---|
+| 1 | `144ca7fcd` `daemon/src/api.rs:3298-3331`；`crates/am-base/src/bot_input.rs:37-55`；`crates/am-lifecycle/src/lifecycle/setup.rs:1166-1182` | fleet operator 改別的專案、別台主機 bot 的 env 時，保留鍵只擋 `AM_*`，而 bot env 在啟動時蓋過身份的 env 與 daemon 算好的 `PATH`。可設 `CLAUDE_CONFIG_DIR`／`CODEX_HOME`／`GROK_HOME`／`HOME`（等於換身份，繞過 `identity` 的 403，daemon 仍以原身份記額度）、`*_BASE_URL`／`HTTPS_PROXY`（導走 API 流量）、`PATH`／`LD_PRELOAD`／`NODE_OPTIONS`（等於繞過 `args` 的 403）。fleet operator 另有 restart 權限，可立即生效。一般 bot 對 expert 專案的跨專案 prompt 會被擋（`relay_policy.rs:49`），env 是唯一不需目標配合的跨專案路徑。 | 中／高（未實機） | 非 User 的呼叫者另加拒絕清單（身份家目錄鍵、`PATH`、`LD_*`／`DYLD_*`、`NODE_OPTIONS`、`BASH_ENV`、`*_BASE_URL`、`*_PROXY`、`*_API_KEY`／`*_TOKEN`），`env_merge` 的刪鍵也擋；或改白名單。 | #2234 |
+| 2 | `290f8af44` `daemon/src/project_relocate.rs:167-171` | 改路徑只改 `deleted_at IS NULL` 的 bot 的 `cwd`。專案搬家後再還原（`agm bot restore`）一顆之前軟刪的 bot，它的 `cwd` 還指向舊路徑。 | 低／中（未實測還原後的啟動行為） | 軟刪的 bot 也一起改，或還原時以專案現行路徑重算。 | — |
+| 3 | `290f8af44` `daemon/src/api.rs:1105-1110`、`:1291` | fleet operator 可以把任何專案的路徑改成那台主機上任何已存在的目錄（只擋 `/`、`.`／`..`、同主機其他專案的同一路徑），不檢查是否落在另一個專案的目錄裡、或 AG Man 的資料目錄裡。之後該專案的 bot 就在那個目錄啟動。 | 低／高（屬授權範圍，列出供裁示） | 至少拒絕 AG Man 資料目錄與其子目錄；是否限制巢狀專案由使用者決定。 | — |
+| 4 | `144ca7fcd`（既有行為，現在 bot 也走得到）`daemon/src/projection.rs:148-178`、`:376` | 刪 bot 走 `delete_in_config`，這條路不呼叫 `clear_invalid_deputy`（只有 `update_and_project` 會）。被刪的是代班副管理者時，`projects.deputy_bot_id` 與 `/api/state` 的 `deputy` 繼續指向已刪的 bot，直到下一次任何設定寫入。刪的是 expert 專案唯一的 manager 時也沒有檢查，專案變成沒有管理者。 | 低／中 | `delete_in_config` 的閉包裡也清 deputy；刪 manager 回 409 或要求先改模式。 | — |
+| 5 | `144ca7fcd`（既有行為）`daemon/src/api.rs:5499-5512` 對 `daemon/src/shell_identity_delete.rs:49-57`、`:103` | 刪設定檔身份只檢查 live bot 的 `bots.identity`；刪 shell alias 那條路另外檢查執行中的 run、巡檢與 `supervisor_roles.identity`。fleet operator（或使用者）刪掉仍被巡檢／responder 角色引用的身份時不會被擋，角色下次啟動找不到身份就不套 env（`setup.rs:1166-1176` 找不到就略過），改用預設帳號。 | 低–中／低（沒有確認角色的 bot 列是否也帶同一個 `identity`） | 兩條刪除路徑共用同一個參照檢查。 | — |
+| 6 | 既有 `crates/am-lifecycle/src/lifecycle/agy_session.rs:354-366`；`daemon/src/schedules/base.rs:364-368`、`:401-441` | `sweep_copies` 刪「不是目前基準的 base 複本」。`dispatch` 讀到基準後、`clone_conversation` 複製期間，若使用者重新鎖定或清除基準（`lock_latest`／`clear` 都會丟背景 sweep），舊基準的檔案可能在複製到一半時被刪，這次排程以 `base_fork_failed` 失敗（可重試）。#2232 修的是登記順序，這個窗口還在。 | 低／中（未重現） | `dispatch` 的複製與 sweep 用同一把 per-bot 鎖，或 sweep 略過正在 dispatch 的 bot。 | — |
+| 7 | 既有 `agy_session.rs:360-363`；`start.rs:1650` | run 複本的保留條件是「該 bot 最新的 run 複本」或「有執行中的 run 綁著」。分岔啟動在 `record_copy` 之後失敗時，新複本成為最新（沒人用），上一份（bot 實際的最後一段對話）變成可刪，下一次 sweep 會刪掉它；之後一般啟動要接回那段對話就會 `context_lost`。 | 低／低（只影響排程 bot 的手動續聊） | 啟動失敗時把剛登記的 run 複本一併撤掉。 | — |
+| 8 | 既有 `crates/am-lifecycle/src/lifecycle/poller.rs:1887`、`:1910-1926`、`:1928-1962` | codex 回合同時有 rollout 錯誤與畫面上的撞限橫幅時，rollout 錯誤那一支先 return，不會執行下面的 `mark_codex_limit_hit` 與 `shadow_limit_hit`。撞限標記要等另一條路（`capture_codex_usage_notices`）補上。 | 低／低（沒有確認另一條路是否一定會補） | rollout 錯誤那一支若同時有 `codex_hit`，也做撞限標記。 | — |
+| 9 | 既有 `daemon/src/runners/ask_answers.rs:16-19`；`crates/am-lifecycle/src/hookrecv.rs:587` | 回合內已回答的 `AskUserQuestion` 只在 hook 的 `Stop`／`StopFailure` 處理完之後補記。回合由 poller 的終端備援收尾、而 Stop hook 一直沒到時，這些答案不會被記下。 | 低／中 | 備援收尾後也補讀一次（本機 bot 可讀 transcript）。 | — |
+
+**讀過、沒有發現問題的**（第 1 項）：
+- child 與受限分享 bot 走不到這些路由（child 只准讀與對 parent 的 prompt，`api.rs:1037-1039`；受限分享 bot 在 `:1067` 就被拒）；`fleet_project_path`、`fleet_identity_delete` 都要求 `RequestPrincipal::Bot` 且 `is_fleet_operator`（存活的頂層 bot）。
+- fleet operator 經 `PATCH /api/projects/{id}` 只能改 `path`（`label`／`handed_off_to` 需 AGM 角色，其餘欄位只限 User）；AGM 角色 bot 不是 fleet operator 就不能改 `path`。
+- 刪 bot：不能刪自己、child、分享用 bot、AGM 角色；`?confirm=` 一律不走 fleet 放行；總管專案的 bot 仍由 `guard_bot_delete` 擋。
+- 遠端探測的 quoting：路徑先過 `normalize_path`（擋控制字元），再用 `sh_quote`（單引號包起來並跳脫單引號）。
+- 前綴改寫：`swap_prefix` 與 SQL 的 `substr` 條件都是「等於舊路徑或以 `舊路徑/` 開頭」，`/a/wt` 不會動到 `/a/wt2`；同主機同路徑有 `projects_host_path_live` 唯一索引擋住併發。
+- 刪 bot 後的排程：不刪排程，回應裡列出 `affected_schedules` 並推 `schedules_changed`；分享能力由 `revoke_bot_share` 收回，失敗會背景重試。
+
+**讀過、沒有發現問題的**（第 2 項）：附件清理（`sweep_unreferenced` 用帶同樣條件的 UPDATE 與 `bind` 搶同一列，另有 24 小時門檻）；孤兒 pane（以 `first_seen > ended_at` 與「沒有進行中的 run 用同一個 pane」排除，重啟不重用 pane）；遠端目錄清理的義務用 trigger 寫入，不是兩段寫。
+
+### 沒看的範圍（第 2、3 項）
+
+- 第 2 項沒看的清理程式：`api_bot/retention.rs` 與 `db/api_bot.rs` 的保留清理、`delete_intents`／`intents::sweep_finished` 對 `finish_bot_delete`、`child_retire.rs`（含 trigger）、`bot_trash.rs`／`remote_trash.rs`（還原對清除）、`spawn_hints.rs`、`dead_panes.rs`、`stuck_turns.rs`、`late_proof.rs`、`hook_inbox.rs`、`gone_burst.rs`、`share/remote_fs.rs`、`preview.rs`、`agy_images.rs`、`herdr_maintenance.rs:76`、`ledger::reclaim_orphaned_items` 對副手切換、`transcript_stage.rs`。
+- 第 3 項沒看的：hook `TurnComplete` 主體的副作用逐項對照（`background_stop`、`login_prompt` 的授權失敗判斷、`consume_resume_session`、`relay_backfill`、`cache_clock`）在 poller 備援與 `capture_hookless_turn_locked` 是否各有對應；遠端 spool 重播（`replay_spool`）與即時 hook 的差異；codex／grok／agy 各自的 hook 與 poller 分工。
+
+### 建議拆法
+
+兩項都需要逐檔讀完整的函式，一個回合裝不下，建議各拆成獨立派工：
+
+1. **第 2 項**拆三份，各自只看「寫入端的兩段寫」對「清理端的刪除條件」：(a) api_bot 的保留與刪除意圖（`retention.rs`、`db/api_bot.rs`、`delete_intents`、`intents.rs`）；(b) bot 目錄與 child（`bot_trash.rs`、`remote_trash.rs`、`remote_purge.rs` 的 sweep 本體、`child_retire.rs`、`spawn_hints.rs`）；(c) 回合與 pane（`dead_panes.rs`、`stuck_turns.rs`、`late_proof.rs`、`hook_inbox.rs`、`gone_burst.rs`）。
+2. **第 3 項**先做一張表：列出 hook `TurnComplete`／`TurnFailed` 收尾時的每個副作用，逐一找 poller 備援（`try_fallback`、`capture_hookless_turn_locked`）的對應呼叫，再依 kind（claude、codex、agy、grok）各看一次。建議一個回合只做 claude＋codex，另一個回合做 agy＋grok 與遠端 spool 重播。
