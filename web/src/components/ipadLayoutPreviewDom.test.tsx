@@ -5,6 +5,7 @@ import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domH
 import { ImageShelf } from './ImageShelf'
 import { MobilePreview } from './MobilePreview'
 import {
+  previewHeightCapFor,
   previewScaleFor,
   resetMobilePreviewForTest,
   setMobilePreviewDevice,
@@ -106,6 +107,20 @@ test('右側預覽可切換 iPad 直向／橫向並記住於 localStorage，縮�
   assert.ok(previewScaleFor('ipad-portrait', 380, 520) < 0.5)
   assert.ok(previewScaleFor('ipad-landscape', 380, 520) <= 380 / 1194 + 0.002)
   assert.equal(typeof useMobilePreviewDevice, 'function')
+})
+
+test('iPad 預覽放大：寬度上限 0.75、高度上限 72% 並替 shelf 保留空間，手機不變', () => {
+  assert.equal(previewScaleFor('ipad-portrait', 5000), 0.75)
+  assert.equal(previewScaleFor('ipad-landscape', 5000), 0.75)
+  assert.equal(previewScaleFor('ipad-landscape', 624, 777), Math.round((624 / 1194) * 1000) / 1000)
+  assert.equal(previewScaleFor('ipad-portrait', 624, 777), Math.round((777 / 1194) * 1000) / 1000)
+  assert.equal(previewHeightCapFor('ipad-portrait', 1080), 1080 * 0.72)
+  assert.equal(previewHeightCapFor('ipad-landscape', 800), 510)
+  assert.equal(previewHeightCapFor('phone', 1000), 560)
+  const css = readFileSync(new URL('./mobilePreview.css', import.meta.url), 'utf8')
+  assert.match(css, /data-device\^='ipad'\]\) \.app \{\s*grid-template-rows: minmax\(200px, 1fr\) auto;\s*grid-template-columns: [^;]*clamp\(360px, 38vw, 640px\);/)
+  const colCss = readFileSync(new URL('./previewColumn.css', import.meta.url), 'utf8')
+  assert.match(colCss, /:has\(\.mobile-preview\[data-device\^='ipad'\]\) \.app \{\s*grid-template-columns: [^;]*clamp\(360px, 38vw, 640px\) auto;/)
 })
 
 test('平板與手機斷點將 toast 移到上方，不遮住底部輸入框與送出鈕', () => {

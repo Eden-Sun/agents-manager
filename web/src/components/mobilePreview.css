@@ -5,7 +5,8 @@ body:has(.mobile-preview) .app {
 }
 
 body:has(.mobile-preview[data-device^='ipad']) .app {
-  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) clamp(320px, 32vw, 460px);
+  grid-template-rows: minmax(200px, 1fr) auto;
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) clamp(360px, 38vw, 640px);
 }
 
 body:has(.mobile-preview) .app > .sidebar,
@@ -106,6 +107,10 @@ body:has(.mobile-preview) .app > .shelf.open {
   padding: 8px;
   background: var(--bg-sunken);
   max-height: 58vh;
+}
+
+.mobile-preview[data-device^='ipad'] .mp-frame-wrap {
+  max-height: min(74vh, calc(100vh - 274px));
 }
 
 .mp-frame-box {

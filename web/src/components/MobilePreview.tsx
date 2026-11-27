@@ -5,6 +5,7 @@ import {
   IN_MOBILE_PREVIEW,
   PREVIEW_DEVICES,
   previewScaleFor,
+  previewHeightCapFor,
   setMobilePreviewDevice,
   setMobilePreviewOpen,
   useMobilePreviewDevice,
@@ -56,7 +57,8 @@ export function MobilePreview() {
     const measure = () => {
       const r = el.getBoundingClientRect()
       const w = Math.max(0, r.width - 16)
-      const h = Math.max(0, Math.min(window.innerHeight * 0.56, r.height > 16 ? r.height - 16 : window.innerHeight * 0.56))
+      const cap = previewHeightCapFor(device, window.innerHeight)
+      const h = device === 'phone' ? Math.max(0, Math.min(cap, r.height > 16 ? r.height - 16 : cap)) : cap
       setWrapSize((prev) => (Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1 ? prev : { w, h }))
     }
     measure()

@@ -14,6 +14,14 @@ body:has(.preview-col:not(.rail)):has(.mobile-preview) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(360px, 1fr) 213px auto;
 }
 
+body:has(.preview-col):has(.mobile-preview[data-device^='ipad']) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) clamp(360px, 38vw, 640px) auto;
+}
+
+body:has(.preview-col:not(.rail)):has(.mobile-preview[data-device^='ipad']) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(360px, 1fr) clamp(360px, 38vw, 640px) auto;
+}
+
 .preview-col {
   grid-column: 4;
   grid-row: 1 / -1;

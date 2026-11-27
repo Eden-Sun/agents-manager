@@ -36,11 +36,16 @@ export const MOBILE_PREVIEW_H = 852
 
 export const MOBILE_PREVIEW_SCALE = 0.5
 
+export function previewHeightCapFor(device: PreviewDevice, innerHeight: number): number {
+  if (device === 'phone') return innerHeight * 0.56
+  return Math.max(0, Math.min(innerHeight * 0.72, innerHeight - 290))
+}
+
 export function previewScaleFor(device: PreviewDevice, availWidth: number, availHeight?: number): number {
   const { w, h } = PREVIEW_DEVICES[device]
   if (device === 'phone' && (!Number.isFinite(availWidth) || availWidth <= 0)) return MOBILE_PREVIEW_SCALE
   const usableW = Math.max(120, Number.isFinite(availWidth) && availWidth > 0 ? availWidth : device === 'phone' ? 197 : 340)
-  let scale = Math.min(usableW / w, device === 'phone' ? MOBILE_PREVIEW_SCALE : 0.6)
+  let scale = Math.min(usableW / w, device === 'phone' ? MOBILE_PREVIEW_SCALE : 0.75)
   if (availHeight && Number.isFinite(availHeight) && availHeight > 0) {
     scale = Math.min(scale, availHeight / h)
   }
