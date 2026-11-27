@@ -932,5 +932,37 @@ bash "$SCRIPT"
 equals "恢復寫入後補上略過紀錄" "$(cat "$AGM_DIR/release-issue-skipped")" "1301"
 teardown
 
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.9" "$ROOT/claude-versions/2.1.300" "$ROOT/claude-versions/2.1.40" "$ROOT/claude-versions/2.1.400" "$ROOT/claude-versions/2.1.332"
+touch -t 202001010000 "$ROOT/claude-versions/2.1.300" "$ROOT/claude-versions/2.1.400"
+touch -t 202101010000 "$ROOT/claude-versions/2.1.40"
+touch -t 202201010000 "$ROOT/claude-versions/2.1.9"
+touch -t 202301010000 "$ROOT/claude-versions/2.1.332"
+echo 2.1.319 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+bash "$SCRIPT"
+equals "舊版被清掉時改用比新版舊的最近版本派 binary diff" "$(assigns)" "1"
+check "舊版被清掉時 OLD 用版本號最近的 2.1.300（不看 mtime、不取比新版新的）" "OLD=$ROOT/claude-versions/2.1.300" "$AGM_DIR/assign-body.txt"
+check "舊版被清掉時 NEW 仍是新版" "NEW=$ROOT/claude-versions/2.1.332" "$AGM_DIR/assign-body.txt"
+check "舊版被清掉時留 log 說明改用哪一版" "改用仍在的最近舊版 2.1.300" "$AGM_DIR/release-triage.log"
+check_no "舊版被清掉不算失敗" "不存在" "$AGM_DIR/release-triage.log"
+equals "派成功後推進到新版" "$(cat "$AGM_DIR/claude-release.last")" "2.1.332"
+teardown
+
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.332"
+echo 2.1.319 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export AGM_FAIL_ALERT_AFTER=1
+bash "$SCRIPT"
+equals "完全沒有舊版時不派 binary diff" "$(assigns)" "0"
+equals "完全沒有舊版時狀態直接推進到新版" "$(cat "$AGM_DIR/claude-release.last")" "2.1.332"
+check "完全沒有舊版時留 log 說明跳過" "跳過這次 binary diff" "$AGM_DIR/release-triage.log"
+equals "完全沒有舊版這一輪不算失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
+check_no "完全沒有舊版不推 ops alert" "ops-alert" "$AGM_DIR/calls.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

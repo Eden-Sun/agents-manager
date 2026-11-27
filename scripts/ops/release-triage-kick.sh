@@ -41,6 +41,16 @@ write_claude_state() {
   rm -f "$_t" 2>/dev/null
   return 1
 }
+older_claude_version() {
+  ls "$CLAUDE_VERSIONS" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+)*$' | awk -v n="$1" '
+    function lt(a, b,   x, y, i, k, m) {
+      k = split(a, x, "."); m = split(b, y, ".")
+      for (i = 1; i <= (k > m ? k : m); i++) { if (x[i] + 0 < y[i] + 0) return 1; if (x[i] + 0 > y[i] + 0) return 0 }
+      return 0
+    }
+    lt($0, n) && (best == "" || lt(best, $0)) { best = $0 }
+    END { if (best != "") print best }'
+}
 prepare_claude_diff() {
   [ -d "$CLAUDE_VERSIONS" ] || return 0
   _new=$(ls -t "$CLAUDE_VERSIONS" 2>/dev/null | head -1)
@@ -52,9 +62,19 @@ prepare_claude_diff() {
     return 0
   fi
   [ "$_new" != "$_done" ] || return 0
-  if [ ! -e "$CLAUDE_VERSIONS/$_done" ] || [ ! -e "$CLAUDE_VERSIONS/$_new" ]; then
-    note_fail "Claude binary diff 的舊版或新版不存在（${_done} → ${_new}），保留狀態等下一輪"
+  if [ ! -e "$CLAUDE_VERSIONS/$_new" ]; then
+    note_fail "Claude binary diff 的新版不存在（${_done} → ${_new}），保留狀態等下一輪"
     return 0
+  fi
+  if [ ! -e "$CLAUDE_VERSIONS/$_done" ]; then
+    _prev=$(older_claude_version "$_new")
+    if [ -z "$_prev" ]; then
+      log "Claude binary diff 的舊版 ${_done} 已被清掉、也沒有比 ${_new} 舊的版本，跳過這次 binary diff，基準直接推進到 ${_new}"
+      write_claude_state "$_new" || note_fail "寫不了狀態檔 ${CLAUDE_STATE}，Claude binary diff 基準仍停在 ${_done}"
+      return 0
+    fi
+    log "Claude binary diff 的舊版 ${_done} 已被清掉，改用仍在的最近舊版 ${_prev}"
+    _done="$_prev"
   fi
   if [ ! -f "$CLAUDE_DIFF_TASK" ]; then
     note_fail "找不到 ${CLAUDE_DIFF_TASK}，Claude binary diff 保留到下一輪"
