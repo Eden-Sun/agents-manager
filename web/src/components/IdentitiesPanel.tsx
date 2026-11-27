@@ -52,6 +52,7 @@ export function IdentitiesPanel() {
   const [adding, setAdding] = useState<{ kind?: BotKind } | null>(null)
   const [copying, setCopying] = useState(false)
   const [fresh, setFresh] = useState<{ host: string; name: string } | null>(null)
+  const [dialogTarget, setDialogTarget] = useState<{ host: string; name: string } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -93,6 +94,13 @@ export function IdentitiesPanel() {
       : (hosts.find((h) => h.name === fresh.host)?.identity_status[fresh.name]?.logged_in ?? null)
     : null
   useUnsavedGuard(adding !== null)
+  const startAdding = (next: { kind?: BotKind }) => {
+    useStore.setState({ identityLoginPane: null })
+    setDialogTarget(null)
+    setAdding(next)
+  }
+  const dialogPaneReady =
+    dialogTarget !== null && identityLoginPane?.host === dialogTarget.host && identityLoginPane.identity === dialogTarget.name
 
   const dialogHosts = [
     { name: 'local', label: t('本機'), connected: localConnected },
@@ -102,7 +110,7 @@ export function IdentitiesPanel() {
   return (
     <div className="hosts-panel identities-panel">
       <div className="identity-page-actions">
-        <button type="button" className="btn primary" onClick={() => setAdding({})}>
+        <button type="button" className="btn primary" onClick={() => startAdding({})}>
           {t('新增帳號')}
         </button>
         {active !== 'local' ? (
@@ -138,7 +146,7 @@ export function IdentitiesPanel() {
           </div>
         ) : null}
         {kinds.map((kind) => (
-          <IdentityKindCard key={kind} host={active} kind={kind} onAdd={() => setAdding({ kind })}>
+          <IdentityKindCard key={kind} host={active} kind={kind} onAdd={() => startAdding({ kind })}>
             <DefaultAccountRow host={active} kind={kind} />
             {activeIdentities
               .filter((i) => i.kind === kind)
@@ -162,7 +170,7 @@ export function IdentitiesPanel() {
         existing={identities}
         onCreate={(input) => addIdentity(input)}
         onLogin={(host, name) => loginIdentity(host, name, { background: true })}
-        onOpenTerminal={openIdentityLoginPane}
+        onOpenTerminal={dialogPaneReady ? openIdentityLoginPane : undefined}
         loggedIn={(host, name) =>
           host === 'local'
             ? (localStatuses[name]?.logged_in ?? null)
@@ -173,8 +181,12 @@ export function IdentitiesPanel() {
         onCreated={(host, name) => {
           choose(host)
           setFresh({ host, name })
+          setDialogTarget({ host, name })
         }}
-        onClose={() => setAdding(null)}
+        onClose={() => {
+          setAdding(null)
+          setDialogTarget(null)
+        }}
       />
       {active !== 'local' ? (
         <CopyLocalIdentitiesDialog open={copying} host={active} onClose={() => setCopying(false)} />

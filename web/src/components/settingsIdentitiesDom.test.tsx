@@ -459,3 +459,18 @@ it('新增後：標亮新列、顯示尚未登入＋立即登入；立即登入�
   assert.ok(useStore.getState().identityLoginPane, '登入終端記在 identityLoginPane')
   assert.ok(document.querySelector('.identities-panel'), '設定頁的身份面板還在')
 })
+
+it('新增對話框：開啟時清掉別的身份留下的登入終端，「打開登入終端」只切到這次建立的身份', async () => {
+  await open(new MockTransport())
+  useStore.setState({ identityLoginPane: { host: 'local', identity: 'cc1', paneId: 'stale-pane', cwd: '' } })
+  await openAddFromHeader()
+  assert.equal(useStore.getState().identityLoginPane, null, '開對話框就清掉別的身份的登入終端')
+  await typeInto(dialogName(), 'cc14')
+  await click(dialogButton('新增並登入'))
+  await until(() => useStore.getState().identityLoginPane?.identity === 'cc14', '登入終端記成這次的身份')
+  await until(() => Boolean(dialogButton('打開登入終端')), '出現打開登入終端')
+  await click(dialogButton('打開登入終端'))
+  const pane = useStore.getState().identityLoginPane!
+  assert.equal(useStore.getState().shellView?.paneId, pane.paneId)
+  assert.notEqual(pane.paneId, 'stale-pane')
+})
