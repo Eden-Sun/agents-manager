@@ -1,6 +1,7 @@
 //! 承諾帳本去重提醒（ledger-phase1 T4，規格 §1.6）：每 60 秒掃一次。
 //! 先回收孤兒承辦（承辦 bot 已刪、或已不是管理入口）；再找需要提醒的事項（未分流、已到期、待接手），
-//! 依 `(item, stage, version)` 去重；同一位目標管理 bot 的待辦合併成一則，主動排一次管理回合。
+//! 依 `(item, stage, version)` 計次：同一組依退避（30 分、2 小時、之後每 6 小時）再提醒，滿上限改推一則升級通知給 AGM；
+//! 版本或階段一變就重新計次。同一位目標管理 bot 的待辦合併成一則，主動排一次管理回合。
 use std::{collections::BTreeMap, hash::{Hash, Hasher}, sync::Arc};
 
 use am_base::ledger::{self, Reminder, ESCALATE_AFTER_SECS};
@@ -25,6 +26,10 @@ pub async fn sweep(app: &Arc<App>) {
     };
     let mut by_target: BTreeMap<String, Vec<Reminder>> = BTreeMap::new();
     for r in due {
+        if r.escalate {
+            escalate(app, &r).await;
+            continue;
+        }
         if let Some(target) = target_for(app, &r).await {
             by_target.entry(target).or_default().push(r);
         }
@@ -52,6 +57,38 @@ pub async fn sweep(app: &Arc<App>) {
                 unmark_all(app, &marked).await;
             }
         }
+    }
+}
+
+/// 提醒滿 [`ledger::MAX_REMINDS`] 次仍沒前進：不再催管理者，推一則 `ops_alert` 給 AGM（同一版同一階段只推一次）。
+async fn escalate(app: &Arc<App>, r: &Reminder) {
+    if !matches!(ledger::mark_reminded(&app.db, r).await, Ok(true)) {
+        return;
+    }
+    let key = format!("ops_alert:daemon:ledger_stuck:{}:{}:{}", r.item_id, r.version, r.stage);
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        "ledger_stuck",
+        &format!("L{}", r.code_no),
+        serde_json::json!({"project_id": r.project_id, "item_id": r.item_id, "version": r.version, "stage": r.stage, "owner_bot_id": r.owner_bot_id, "reminders": ledger::MAX_REMINDS}),
+        format!("承諾帳本 L{}「{}」已提醒管理者 {} 次仍沒前進（{}）", r.code_no, r.title, ledger::MAX_REMINDS, stage_label(r.stage)),
+        "查管理者為什麼沒處理（是否卡在回合、離線或不知道怎麼做），必要時告訴使用者；項目版本或階段一變就會重新計次",
+    );
+    match crate::supervisor_inbox::push_ops_alert(&app.db, &key, r.owner_bot_id.as_deref(), &payload).await {
+        Ok(_) => tracing::warn!(item = %r.item_id, code = r.code_no, "ledger item still stuck after reminders; escalated to AGM"),
+        Err(e) => {
+            tracing::warn!(item = %r.item_id, error = ?e, "ledger escalation could not be queued");
+            if let Err(e) = ledger::unmark_reminded(&app.db, r).await {
+                tracing::warn!(item = %r.item_id, error = ?e, "ledger reminder unmark failed");
+            }
+        }
+    }
+}
+
+fn stage_label(stage: &str) -> &'static str {
+    match stage {
+        "untriaged" => "待分流",
+        "due" => "已到期",
+        _ => "沒有承辦人",
     }
 }
 
@@ -206,6 +243,28 @@ mod tests {
         sweep(app).await;
         assert_eq!(notices(app, &mgr).await.len(), 2, "處理完、版本變了才再提醒");
     }
+    /// 已提醒滿上限、項目仍沒前進：不再催管理者，改推一則 ops_alert 給 AGM，再掃也不重推。
+    #[tokio::test]
+    async fn a_stuck_item_escalates_to_agm_once_instead_of_nagging_the_manager() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mgr = manager(&env).await;
+        let item = am_base::ledger::commit_item(&app.db, &env.project_id, "user", None, &am_base::ledger::LedgerSplitInput { title: "卡住的".into(), status: Some("following".into()), ..Default::default() }).await.unwrap();
+        sqlx::query("UPDATE ledger_items SET last_reminded_version=version, last_reminded_stage='orphaned', last_reminded_count=?, last_reminded_at='2020-01-01T00:00:00.000Z' WHERE id=?")
+            .bind(ledger::MAX_REMINDS).bind(&item.id).execute(&app.db).await.unwrap();
+        let alerts = || async {
+            sqlx::query_scalar::<_, String>("SELECT payload_json FROM supervisor_inbox WHERE kind='ops_alert' AND event_key LIKE 'ops_alert:daemon:ledger_stuck:%'").fetch_all(&app.db).await.unwrap()
+        };
+        sweep(app).await;
+        assert!(notices(app, &mgr).await.is_empty(), "滿上限不再催管理者");
+        let got = alerts().await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains(&format!("L{}", item.code_no)) && got[0].contains("ledger_stuck"), "{}", got[0]);
+        sweep(app).await;
+        assert_eq!(alerts().await.len(), 1, "升級只推一次");
+        assert!(notices(app, &mgr).await.is_empty());
+    }
+
     /// 副手名下的到期事項：剛到期只提醒副手；逾期超過 30 分鐘升級給頂層管理者（絕不退回副手本人）。
     #[tokio::test]
     async fn deputy_due_item_reminds_the_deputy_then_escalates_to_the_manager_after_thirty_minutes() {

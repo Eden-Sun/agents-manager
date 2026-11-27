@@ -749,6 +749,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // 最近回合查詢的保溫與系統訊息 partial index（2026-11-26）：`turns_keep_warm`、`messages_system_conv`。
     (112, "56f8895dd103439d"),
     (113, "1a45813b3a9010a2"),
+    (114, "f6bb57281254371e"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -988,6 +989,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("messages", "relay_auth", "ALTER TABLE messages ADD COLUMN relay_auth TEXT"),
         ("projects", "specialist_dispatch", "ALTER TABLE projects ADD COLUMN specialist_dispatch INTEGER NOT NULL DEFAULT 1"),
         ("ledger_items", "deploy_sha", "ALTER TABLE ledger_items ADD COLUMN deploy_sha TEXT"),
+        ("ledger_items", "last_reminded_count", "ALTER TABLE ledger_items ADD COLUMN last_reminded_count INTEGER NOT NULL DEFAULT 0"),
         // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：lineage_sessions.input_tokens / cached_input_tokens / output_tokens
         ("lineage_sessions", "input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"),
         ("lineage_sessions", "cached_input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"),

@@ -125,6 +125,7 @@ mod tests {
             last_reminded_version: None,
             last_reminded_stage: None,
             last_reminded_at: None,
+            last_reminded_count: 0,
             created_at: String::new(),
             updated_at: String::new(),
         }

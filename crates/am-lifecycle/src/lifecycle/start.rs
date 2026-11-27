@@ -1488,6 +1488,13 @@ async fn start_inner_body(
         if let Some(extra) = deputy_role_section(&bot.id, bot.role.as_deref(), project.deputy_bot_id.as_deref()) {
             agent_md.text.push_str(&extra);
         }
+        if bot.role.as_deref() == Some("manager") || project.deputy_bot_id.as_deref() == Some(bot.id.as_str()) {
+            match crate::ledger::startup_digest_for(app.db(), &project.id, &bot.id).await {
+                Ok(Some(section)) => agent_md.text.push_str(&section),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "ledger startup digest skipped"),
+            }
+        }
     }
     if restricted.is_none() {
         if let Some(section) = specialist_role_section(bot.role.as_deref(), bot.track.as_deref()) {

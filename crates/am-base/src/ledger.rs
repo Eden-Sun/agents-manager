@@ -44,6 +44,8 @@ pub struct LedgerItem {
     pub last_reminded_version: Option<i64>,
     pub last_reminded_stage: Option<String>,
     pub last_reminded_at: Option<String>,
+    /// 同一個 `(version, stage)` 已提醒幾次（退避用；升級後為 [`MAX_REMINDS`]＋1）。
+    pub last_reminded_count: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -714,6 +716,39 @@ pub async fn query_actionable_for_actor(pool: &SqlitePool, project_id: &str, bot
     Ok((rows, counts))
 }
 
+/// 管理者／代班副管理者啟動時注入的「目前待你處理的帳本項目」最多列幾筆。
+pub const STARTUP_DIGEST_LIMIT: usize = 8;
+
+/// 啟動注入段：[`query_actionable_for_actor`] 的結果只列編號、標題、階段、版本；沒有待辦回 `None`。
+/// 不放時間戳或相對時間，同樣的帳本內容產生同樣的字，不讓 prompt 快取無謂失效。
+pub fn startup_digest_section(items: &[LedgerItem], counts: &LedgerCounts) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let total = (counts.untriaged + counts.following + counts.clarifying).max(items.len() as i64);
+    let mut out = String::from("\n\n## 目前待你處理的帳本項目\n");
+    for it in items {
+        let stage = match it.status.as_str() {
+            "untriaged" => "待分流",
+            "following" => "待跟進",
+            _ => "待釐清",
+        };
+        let owner = if it.owner_bot_id.is_none() { "，待認領" } else { "" };
+        out.push_str(&format!("- L{}｜{}｜{}{}｜v{}\n", it.code_no, it.title.replace('\n', " "), stage, owner, it.version));
+    }
+    if total > items.len() as i64 {
+        out.push_str(&format!("…另 {} 件，用 `agm ledger list` 看全部\n", total - items.len() as i64));
+    }
+    out.push_str("用 `agm ledger claim|update … --expect-version <v>` 處理；版本可能已變，動手前先 `agm ledger list`。");
+    Some(out)
+}
+
+/// [`startup_digest_section`] 的查詢版：這顆 bot 自己的與待接手的未結事項。
+pub async fn startup_digest_for(pool: &SqlitePool, project_id: &str, bot_id: &str) -> Result<Option<String>, LedgerError> {
+    let (items, counts) = query_actionable_for_actor(pool, project_id, bot_id, None, STARTUP_DIGEST_LIMIT).await?;
+    Ok(startup_digest_section(&items, &counts))
+}
+
 /// 副管理者代班改派（`relay_deputy::redirect`）：綁在這則 relay 請求上的未結事項改給副管理者（`version + 1`）。
 /// 還沒有任何綁定事項時，以 `relay_request_id` 冪等建一筆（標題取 `prompt_text`，直接由副手承辦）。
 /// 只動主管理者名下或沒有承辦人的未結事項；副手已經接的、已結案的不動。
@@ -864,13 +899,30 @@ pub struct Reminder {
     pub prev_version: Option<i64>,
     pub prev_stage: Option<String>,
     pub prev_at: Option<String>,
+    pub prev_count: i64,
+    /// 標記後的提醒次數（1＝這個版本與階段的第一次）。
+    pub count: i64,
+    /// 已提醒 [`MAX_REMINDS`] 次仍沒前進：這次不再催管理者，改推升級通知給 AGM。
+    pub escalate: bool,
 }
 
 /// 未分流需等這麼久（收件回合已結束）才提醒；到期後逾時超過這個時間才升級給頂層管理者。
 pub const UNTRIAGED_AFTER_SECS: i64 = 600;
 pub const ESCALATE_AFTER_SECS: i64 = 1800;
+/// 同一個 `(version, stage)` 最多提醒管理者幾次；之後改推一則升級通知，然後停到項目前進為止。
+pub const MAX_REMINDS: i64 = 5;
 
-/// 找出現在該提醒的事項，依 `(item, stage, version)` 去重：同一組已提醒過（`last_reminded_*` 相同）就跳過。
+/// 已提醒 `count` 次後，要再等多久才重提：30 分鐘、2 小時，之後每 6 小時。
+pub fn remind_backoff_secs(count: i64) -> i64 {
+    match count {
+        ..=1 => 30 * 60,
+        2 => 2 * 3600,
+        _ => 6 * 3600,
+    }
+}
+
+/// 找出現在該提醒的事項。`(item, stage, version)` 變了就重新計次；同一組依 [`remind_backoff_secs`] 退避再提醒，
+/// 滿 [`MAX_REMINDS`] 次改標 `escalate`，升級過就不再出現。計次與時間存在 `last_reminded_*`，daemon 重啟後照算。
 pub async fn due_reminders(pool: &SqlitePool, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Reminder>, LedgerError> {
     let rows: Vec<LedgerItem> = sqlx::query_as(&format!("SELECT * FROM ledger_items WHERE status IN {OPEN_SQL} ORDER BY created_at, id"))
         .fetch_all(pool)
@@ -896,8 +948,16 @@ pub async fn due_reminders(pool: &SqlitePool, now: chrono::DateTime<chrono::Utc>
             None
         };
         let Some(stage) = stage else { continue };
-        if it.last_reminded_version == Some(it.version) && it.last_reminded_stage.as_deref() == Some(stage) {
+        let same = it.last_reminded_version == Some(it.version) && it.last_reminded_stage.as_deref() == Some(stage);
+        let sent = if same { it.last_reminded_count.max(1) } else { 0 };
+        if sent > MAX_REMINDS {
             continue;
+        }
+        if same {
+            let last = it.last_reminded_at.as_deref().and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok()).map(|d| d.with_timezone(&chrono::Utc));
+            if last.is_some_and(|l| (now - l).num_seconds() < remind_backoff_secs(sent)) {
+                continue;
+            }
         }
         out.push(Reminder {
             item_id: it.id.clone(),
@@ -913,19 +973,24 @@ pub async fn due_reminders(pool: &SqlitePool, now: chrono::DateTime<chrono::Utc>
             prev_version: it.last_reminded_version,
             prev_stage: it.last_reminded_stage.clone(),
             prev_at: it.last_reminded_at.clone(),
+            prev_count: it.last_reminded_count,
+            count: sent + 1,
+            escalate: sent >= MAX_REMINDS,
         });
     }
     Ok(out)
 }
 
-/// 標記已提醒（CAS：版本還是 `r.version` 才寫）。回傳是否真的寫入；沒寫入代表它已經在別處變了。
+/// 標記已提醒（CAS：版本還是 `r.version`、計次還是掃描時的值才寫）。回傳是否真的寫入；沒寫入代表它已經在別處變了。
 pub async fn mark_reminded(pool: &SqlitePool, r: &Reminder) -> Result<bool, LedgerError> {
-    let res = sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ? WHERE id = ? AND version = ?")
+    let res = sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ?, last_reminded_count = ? WHERE id = ? AND version = ? AND last_reminded_count = ?")
         .bind(r.version)
         .bind(r.stage)
         .bind(db::now())
+        .bind(r.count)
         .bind(&r.item_id)
         .bind(r.version)
+        .bind(r.prev_count)
         .execute(pool)
         .await?;
     Ok(res.rows_affected() == 1)
@@ -933,13 +998,15 @@ pub async fn mark_reminded(pool: &SqlitePool, r: &Reminder) -> Result<bool, Ledg
 
 /// 送不出去（管理者忙、佇列滿）：還原標記，下一輪再提醒。
 pub async fn unmark_reminded(pool: &SqlitePool, r: &Reminder) -> Result<(), LedgerError> {
-    sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ? WHERE id = ? AND version = ? AND last_reminded_stage = ?")
+    sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ?, last_reminded_count = ? WHERE id = ? AND version = ? AND last_reminded_stage = ? AND last_reminded_count = ?")
         .bind(r.prev_version)
         .bind(&r.prev_stage)
         .bind(&r.prev_at)
+        .bind(r.prev_count)
         .bind(&r.item_id)
         .bind(r.version)
         .bind(r.stage)
+        .bind(r.count)
         .execute(pool)
         .await?;
     Ok(())
@@ -1186,6 +1253,74 @@ mod tests {
         unmark_reminded(&pool, &r).await.unwrap();
         assert_eq!(due_reminders(&pool, chrono::Utc::now()).await.unwrap().len(), 1, "送不出去還原後下一輪還會提醒");
         let _ = item;
+    }
+
+    /// 同一版同一階段：30 分、2 小時、之後每 6 小時再提醒；滿 MAX_REMINDS 次改升級一次就停；版本一變重新計次。
+    /// 計次與時間都在 DB，重新掃描（等同 daemon 重啟）照樣接著算。
+    #[tokio::test]
+    async fn reminders_back_off_then_escalate_once_and_restart_counting_on_progress() {
+        let pool = pool().await;
+        let item = commit_item(&pool, "p1", "user", None, &input("孤兒")).await.unwrap();
+        let t0 = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00.000Z").unwrap().with_timezone(&chrono::Utc);
+        let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+        let pin = |pool: SqlitePool, id: String| async move {
+            sqlx::query("UPDATE ledger_items SET last_reminded_at='2030-01-01T00:00:00.000Z' WHERE id=?").bind(id).execute(&pool).await.unwrap();
+        };
+        let first = due_reminders(&pool, t0).await.unwrap().remove(0);
+        assert_eq!((first.count, first.escalate), (1, false));
+        assert!(mark_reminded(&pool, &first).await.unwrap());
+        pin(pool.clone(), item.id.clone()).await;
+        for (sent, wait) in [(1, 30 * 60), (2, 2 * 3600), (3, 6 * 3600), (4, 6 * 3600)] {
+            assert!(due_reminders(&pool, at(wait - 60)).await.unwrap().is_empty(), "第 {sent} 次後還沒到退避時間");
+            let r = due_reminders(&pool, at(wait + 60)).await.unwrap().remove(0);
+            assert_eq!((r.count, r.escalate), (sent + 1, false), "第 {} 次提醒", sent + 1);
+            assert!(mark_reminded(&pool, &r).await.unwrap());
+            pin(pool.clone(), item.id.clone()).await;
+        }
+        let up = due_reminders(&pool, at(6 * 3600 + 60)).await.unwrap().remove(0);
+        assert_eq!((up.count, up.escalate), (MAX_REMINDS + 1, true), "滿 {MAX_REMINDS} 次改升級");
+        assert!(mark_reminded(&pool, &up).await.unwrap());
+        assert!(due_reminders(&pool, at(1000 * 3600)).await.unwrap().is_empty(), "升級過就停，直到項目前進");
+        sqlx::query("UPDATE ledger_items SET version = version + 1 WHERE id=?").bind(&item.id).execute(&pool).await.unwrap();
+        let again = due_reminders(&pool, t0).await.unwrap().remove(0);
+        assert_eq!((again.count, again.escalate), (1, false), "版本變了重新計次");
+    }
+
+    /// 送不出去還原時，計次也一起還原；掃描後計次被別處改過，標記不會寫進去。
+    #[tokio::test]
+    async fn unmark_restores_the_reminder_count_and_mark_is_guarded_by_it() {
+        let pool = pool().await;
+        commit_item(&pool, "p1", "user", None, &input("孤兒")).await.unwrap();
+        let now = chrono::Utc::now();
+        let r = due_reminders(&pool, now).await.unwrap().remove(0);
+        assert!(mark_reminded(&pool, &r).await.unwrap());
+        assert!(!mark_reminded(&pool, &r).await.unwrap(), "同一筆掃描結果不能標兩次");
+        unmark_reminded(&pool, &r).await.unwrap();
+        let back = due_reminders(&pool, now).await.unwrap().remove(0);
+        assert_eq!(back.count, 1, "還原後下一輪還是第一次提醒");
+    }
+
+    /// 啟動注入段：沒有待辦不注入；有就只列編號、標題、階段、版本，同內容同字，超過上限寫另幾件。
+    #[tokio::test]
+    async fn startup_digest_lists_actionable_items_stably_and_is_absent_when_empty() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        assert_eq!(startup_digest_for(&pool, "p1", "b1").await.unwrap(), None);
+        let orphan = commit_item(&pool, "p1", "user", None, &input("孤兒\n第二行")).await.unwrap();
+        let mine = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "自己的".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+        commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "副手的".into(), owner_bot_id: Some("b3".into()), ..Default::default() }).await.unwrap();
+        let text = startup_digest_for(&pool, "p1", "b1").await.unwrap().expect("有待辦就注入");
+        assert!(text.contains(&format!("- L{}｜孤兒 第二行｜待跟進，待認領｜v{}", orphan.code_no, orphan.version)), "{text}");
+        assert!(text.contains(&format!("- L{}｜自己的｜待跟進｜v{}", mine.code_no, mine.version)), "{text}");
+        assert!(!text.contains("副手的"), "別人承辦的不列：{text}");
+        assert!(!text.contains("2026") && !text.contains("另"), "不帶時間、沒超過上限：{text}");
+        assert_eq!(startup_digest_for(&pool, "p1", "b1").await.unwrap().as_deref(), Some(text.as_str()), "同內容同字");
+        for i in 0..STARTUP_DIGEST_LIMIT {
+            commit_item(&pool, "p1", "user", None, &input(&format!("多的{i}"))).await.unwrap();
+        }
+        let many = startup_digest_for(&pool, "p1", "b1").await.unwrap().unwrap();
+        assert_eq!(many.lines().filter(|l| l.starts_with("- L")).count(), STARTUP_DIGEST_LIMIT);
+        assert!(many.contains("…另 2 件"), "{many}");
     }
 
     #[tokio::test]
