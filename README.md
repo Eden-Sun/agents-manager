@@ -2,264 +2,149 @@
 
 English | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-AG Man is a web UI, running on your own machine, for managing several coding-agent CLIs and API models at once: **Claude Code (`claude`), Codex (`codex`), Grok (`grok`), Antigravity (`agy`), Claude API (`claude-api`), and OpenAI API (`openai-api`)**. Each CLI session running in a [herdr](https://herdr.dev) pane becomes a **bot** in the web UI. Direct API bots run inside the daemon using API keys without needing CLIs or terminal panes, serving as dedicated advisors. You can follow conversations, answer prompts, and monitor quota and API balances from a browser or phone, and let several bots work together.
+**One web page to run a whole team of coding agents — Claude Code, Codex, Grok, Antigravity, and API advisors — on your own machines, from your desk, iPad, or phone.**
 
-AG Man is not an IDE, and it does not start CLI agents directly. herdr manages the terminal panes; the daemon (`agents-managerd`) talks to herdr and receives replies through each CLI's hooks, or talks directly to model providers for API bots.
+Running several coding-agent CLIs usually means juggling terminal tabs, missing the one that has been waiting on a yes/no prompt for an hour, and guessing how much quota is left. AG Man puts every agent session into one self-hosted web UI, alerts you when one needs input, and lets bots coordinate with each other.
 
-> The screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and messages are demo data.
+<table>
+  <tr>
+    <td width="76%"><img src="docs/screenshots/readme/en/desktop-light.png" alt="Desktop: projects and bots in the sidebar, chat in the middle, quota strip on top, outbox on the right" /></td>
+    <td width="24%"><img src="docs/screenshots/readme/en/mobile-light.png" alt="Phone: the same chat with quota chips and a bot switcher" /></td>
+  </tr>
+</table>
 
-![Mobile light theme: chat with quota chips and bot switcher](docs/screenshots/readme/en/mobile-light.png)
+> Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots, and messages are demo data.
 
-## Key features
+## How it works
 
-**Chat with agents instead of watching terminals**
-- One bot per CLI session or API advisor, grouped by project directory. Send messages from the browser, queue them while a turn is running, interrupt or force-stop.
-- Replies come from the CLI's hooks, native transcripts, or direct API streams. If the daemon has to fall back to reading the terminal snapshot, the reply is marked "possibly incomplete".
-- Confirmations and multiple-choice questions become clickable cards. You can rewind a conversation, fork a bot to continue its context, and wake a bot that was put to sleep.
-- Terminal drafts are detected automatically on idle bots, showing a draft bar with "Edit then send".
-- Bots can be restarted anytime from the settings panel or the sidebar "..." menu.
+AG Man is a lightweight local daemon (`agents-managerd`) with an embedded web UI. CLI agents run inside [herdr](https://herdr.dev) (a tmux-like terminal workspace manager); the daemon launches them, delivers your prompts, and receives replies through each CLI's native hooks — so you get clean structured messages and clickable approval cards instead of scraped terminal text. API advisors run directly inside the daemon with your API keys and need no terminal at all. Everything stays on your machines.
 
-**Coordinate several bots**
-- **Expert mode** (per project): one top-level manager, and the other members are executors, advisors, schedulers, or specialists (track-scoped experts). In expert mode no child agents are started; the manager dispatches work to members of the same project. Individual members can be toggled on/off with `manager_use` to protect quota.
-- **Cluster dispatch**: executors in the same project with the same kind, model, effort, and identity are grouped into a cluster, which can receive work or be toggled as a unit.
-- **API bots as advisors**: `claude-api` and `openai-api` bots run in the daemon with API keys, without terminal panes. They act strictly as advisors for second opinions and background consultation, supporting per-turn cost ceilings (or unlimited) and real-time streaming progress.
-- **Child agents**: agents started through herdr appear under their parent bot. The parent is notified when a child finishes or gets stuck.
-- **Supervisor (AGM)**: an optional coordinator bot that patrols the fleet, dispatches work, puts idle bots to sleep and handles deploys. See [SPEC §18](docs/SPEC.md).
+AG Man is not an IDE: there is no code editor, diff viewer, or git worktree manager. Your agents handle those using each repository's own conventions.
 
-**Schedules and push notifications**
-- Project schedules: one-off, fixed interval, daily, weekly, and multi-slot runs. Scheduled prompts are sent to a dedicated scheduler bot (`role=scheduler`) with snapshot/clean restart support (including `agy`), and a run ledger is kept.
-- Web Push: notifications for finished turns, turns that need a response, schedule outcomes, new upstream model releases, and quota resets. Each can be switched on or off in settings. Notifications are suppressed when you are already reading on any device or using AG Man in the foreground on mobile.
-- Long turn completions push a concise "Long message, click to view full content" preview that opens the conversation directly.
-- Codex reset credit notices can be snoozed for 1 hour, 1 day, or 3 days ("Do not remind again").
+## Supported agents
 
-**Remote hosts and account quota**
-- Projects can live on SSH hosts and run through that host's herdr: remote bots, host shells, CLI login, quota, and handing a project over to another daemon.
-- **Identities page**: browse identities across hosts with host tabs and dedicated CLI cards (Claude, Codex, Grok, agy). An "Add Account" dialog guides creating isolated config directories, warns about sharing risks, syncs/copies identities across connected hosts, and assists with background login (including extracting Google OAuth URLs for `agy`). Default accounts can be hidden or logged out.
-- **Global API balances**: Anthropic API and OpenAI API balances are displayed live across all hosts in the top quota strip and dropdown menu (OpenAI reads live `credit_grants` balances), with desktop two-line capsules.
-- **Model naming and ordering**: unified model naming across Codex and OpenAI API, with models ordered by family price from cheap to expensive (Luna < Terra < Sol < Astra; Flash < Hydrogen < Argon < Neon). Legacy versions are labeled clearly.
-- Quota and reset times are shown per host and per identity, with warnings when quota is low.
-- Model, effort and fast mode can be switched live in the web UI where the CLI supports it.
-
-**Updates and maintenance**
-- The "Update check" page lists the herdr version, each agent CLI and each hook integration on every host, with one-click updates.
-- CLI updates appear as a single clickable chip; the daemon runs the install → restart → schedule update chain in the background even if you close the browser.
-- Idle bots are put to sleep after a configurable period, keeping only what is needed to resume them.
-
-**Workspace and guard rails**
-- Preview a bot's local dev server next to the chat, with phone and iPad viewport presets.
-- Outbox HTML preview and `agy` generated images: view `.html` files as full web pages in a new tab; images generated by `agy` are collected inline into chat and listed in the outbox (kept for 1 hour).
-- A file shelf for temporary files shared across bots, and an outbox for downloadable files produced by bots (with hover preview for mouse and Apple Pencil on iPad).
-- A memory and CPU view of the herdr process tree and host machines.
-- A built-in hook blocks broad `pkill`/`kill` commands that would take down other agents.
-
-**Chinese and English UI**: follows the browser language by default; switch under Settings → Display.
-
-More detail and limits are in [`docs/SPEC.md`](docs/SPEC.md).
-
-**Not provided**: a code editor, diff / PR review, and git worktree management (agents handle these according to each repo's conventions).
-
-## Supported platforms
-
-| Platform | Status |
+| Kind | What it is |
 |---|---|
-| macOS (arm64) | Daemon and web UI supported |
-| Linux (x86_64, arm64) | Daemon and web UI supported |
-| Windows | No native Windows daemon. Install and run inside **WSL2** (a Linux distribution); open the web UI from a Windows browser |
+| `claude` | Anthropic Claude Code CLI |
+| `codex` | OpenAI Codex CLI |
+| `grok` | xAI Grok CLI |
+| `agy` | Google Antigravity CLI |
+| `claude-api` | Anthropic API directly (no CLI; advisor role) |
+| `openai-api` | OpenAI API directly (no CLI; advisor role) |
 
-The web UI works in any modern browser, on desktop, iPad (portrait/landscape), and phones.
+CLI bots run commands and edit files. API bots answer questions and give second opinions with an optional per-turn cost ceiling. Available models and effort levels are read live from each CLI or provider and can be switched from the web UI where supported. Multiple accounts per CLI are supported.
 
-## Requirements and installation
+## Features
 
-**Required** (the Homebrew and prebuilt-archive methods install herdr automatically; the rest you provide yourself)
+**Talk to agents, not terminals**
+- Every CLI session becomes a chat grouped by project, with clear status (working, done, or waiting on you).
+- Queue follow-up messages while a turn is running; confirmations and multiple-choice questions turn into clickable cards.
+- Interrupt, rewind, fork a bot to continue its context, or switch to the raw terminal tab anytime.
 
-| Tool | Purpose |
-|---|---|
-| [herdr](https://herdr.dev) | Terminal workspace manager. The daemon uses its Unix socket to open panes, start agents, send text and read the screen. Check with `herdr --version`; the "Update check" page in settings compares versions. |
-| At least one agent CLI or API key | Agent CLIs: `claude`, `codex`, `grok` or `agy`. API bots: Anthropic API key or OpenAI API key. |
-| Rust toolchain (`cargo`) | Only needed when building from source. |
-| [Bun](https://bun.sh) | Only needed when building from source (to build the web front end). |
+**Stay in the loop from anywhere**
+- Responsive UI for desktop, iPad (portrait/landscape, with Apple Pencil hover preview), and phones over LAN or Tailscale.
+- Web Push notifications for finished turns, prompts waiting on you, schedule results, and quota resets — automatically silenced when you are already looking.
 
-**Recommended** (the host environment check lists these and prompts you if they are missing)
+**Let bots work as a team**
+- **Team roles (Expert mode)**: put a manager bot in charge of a project to dispatch tasks to workers and consult advisors.
+- **Clusters**: group identical workers so tasks automatically go to whichever one is free.
+- **Child agents & supervisor**: child agents spawned via herdr appear nested under their parent with completion alerts; an optional supervisor bot patrols the fleet and sleeps idle bots.
 
-| Tool | Purpose |
-|---|---|
-| `rtk` | Token-compression proxy; Claude's hook rewrites ordinary commands to use it. |
-| `zsh`, `jq` | Used by the host shell and hook scripts. |
-| `gh` | Shows the GitHub CLI login status. |
+**Accounts, quota, and remote hosts**
+- Live subscription quota, reset timers, and Anthropic / OpenAI API balances in one top strip across every account and host.
+- Add and log in to isolated accounts from the Identities page, and sync identities across connected hosts.
+- Run projects on remote SSH hosts with the same bots, shells, logins, and quota views.
 
-**Optional**: the Blaze build engine speeds up development builds; see [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md). A Claude API key, OpenAI API key, and the Jev judge layer are optional features and are off by default.
+**Automate and keep machines healthy**
+- Project schedules (one-off, interval, daily, weekly, multi-slot) with a run history.
+- One-click updates for herdr, each agent CLI, and their hooks on every host.
+- Idle bots sleep automatically and resume with context; host memory and CPU usage are always visible in the sidebar.
+- A built-in guard blocks broad `pkill`/`killall` commands that could take down other agents.
+
+**Workspace extras**
+- Side-by-side dev server preview next to the chat, with phone and iPad viewport presets.
+- Cross-bot **File shelf** and per-bot **Outbox** with one-click HTML page preview and inline generated images.
+- **Share links** to expose a restricted or trusted bot to teammates through a separate entry point.
+
+English and Chinese UI included (switches in Settings → Display). Full behavior and limits are in [`docs/SPEC.md`](docs/SPEC.md).
+
+## Platforms and requirements
+
+- **macOS (arm64)** and **Linux (x86_64, arm64)**. On Windows, run inside **WSL2** and open the UI from a Windows browser.
+- **[herdr](https://herdr.dev)** — installed automatically by Homebrew; for prebuilt binaries or source builds, install `herdr` from [herdr.dev](https://herdr.dev) first.
+- **At least one agent CLI or API key** from the table above.
+- Building from source also requires a Rust toolchain (`cargo`) and [Bun](https://bun.sh).
+
+The Settings page checks each host and suggests optional helpers (`rtk`, `zsh`, `jq`, `gh`) if missing.
 
 ## Quick start
 
-**Option 1: Homebrew (macOS and Linux; also installs herdr)**
+> **Try the UI first without installing the daemon or herdr:**
+> ```bash
+> git clone https://github.com/Eden-Sun/agents-manager.git
+> cd agents-manager/web && bun install && VITE_MOCK=1 bun run dev
+> ```
+
+**Option 1: Homebrew** (macOS and Linux — installs `herdr` automatically)
 
 ```bash
 brew install eden-sun/tap/agents-manager
 brew services start agents-manager    # stop: brew services stop agents-manager
 ```
 
-The service starts automatically at login and keeps running. To run in the foreground instead: `agents-managerd serve` (Ctrl-C to stop). The log is at `$(brew --prefix)/var/log/agents-manager.log`. The service only sees Homebrew's `bin` and `~/.local/bin`; if your agent CLIs are installed elsewhere, run the daemon in the foreground from your shell instead.
+The service starts at login. It only sees Homebrew's `bin` and `~/.local/bin`; if your agent CLIs live elsewhere, run `agents-managerd serve` from your shell instead.
 
-**Option 2: prebuilt binary** (the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
+**Option 2: Prebuilt binary** (web UI embedded; requires `herdr` in `PATH`). Download the latest archive from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest):
 
 ```bash
-VERSION=v0.2.0          # use the latest version shown on the Releases page
+VERSION=v0.2.0          # replace with the latest tag on Releases
 ASSET=linux-x86_64      # or linux-arm64 / macos-arm64
 curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
 tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
 install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
-agents-managerd serve
+agents-managerd serve   # make sure ~/.local/bin is in your PATH
 ```
 
-Each archive has a `.sha256` file beside it for verification. On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once. The archive does not include the scripts under `scripts/` (such as `agm`); clone the source if you need them.
+On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once.
 
-**Option 3: build from source** (development, or a platform not listed above). Clone first:
+**Option 3: Build from source** (requires `herdr`, Rust, and Bun)
 
 ```bash
 git clone https://github.com/Eden-Sun/agents-manager.git
 cd agents-manager
-
-# 1. Build the web front end (it is embedded in the daemon)
-(cd web && bun install && bun run build)
-
-# 2. Build the daemon
+(cd web && bun install && bun run build)        # embeds the web UI into the daemon
 cargo build --release -p agents-managerd
-
-# 3. Start (foreground; Ctrl-C to stop)
 ./target/release/agents-managerd serve
 ```
 
-With any of these options, open **http://127.0.0.1:7788** in a browser. Opening it from `127.0.0.1` signs you in automatically; from another device, paste the contents of `~/.config/agents-manager/ui-token`.
+Then open **http://127.0.0.1:7788** (auto-signed-in locally; on a phone or other device, open `http://<host-ip>:7788` and paste `~/.config/agents-manager/ui-token`). Click **Add Project**, then **Add Bot**, and start chatting.
 
-To look at the interface without herdr or the daemon, use the mock backend:
+## Data and security
 
-```bash
-cd web && bun install && VITE_MOCK=1 bun run dev
-```
+- Settings and history live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`). Remote projects keep their data on their own host.
+- `ui-token` in that directory grants full control of the UI — keep it private.
+- `agents-managerd serve` listens on all interfaces so phones on your LAN/Tailscale can connect; set `AM_DEV_LAN=0` to keep it local only. The packaged macOS app listens on `127.0.0.1` only.
+- Paid third-party features (Claude API, OpenAI API, message translation, sharing) are off until you turn them on.
+- Web Push goes through your browser vendor's push service (payloads are encrypted, but delivery metadata is visible to the push service).
 
-For long-running use, Homebrew's `brew services` manages the daemon for you. Otherwise use a systemd user unit, launchd, or a herdr pane. For scheduling details on Linux hosts, see [SPEC §18.2e](docs/SPEC.md).
-
-## First steps
-
-1. **Add a project**: click "Add Project" at the bottom of the sidebar, choose a directory on this machine or on an SSH host, and give it a label.
-2. **Add a bot**: open the project's "+" menu, choose "Add Bot", pick the kind (`claude`, `codex`, `grok`, `agy`, `claude-api`, or `openai-api`), and optionally an identity and model. The daemon opens a herdr pane for CLI bots, or creates a direct API advisor.
-3. **Chat**: type and send a message in the input box. Messages sent while a turn is running are queued; confirmations and multiple-choice questions appear as cards; the stop button interrupts the turn. Switch to the "Terminal" tab to see the raw pane.
-4. **Let bots delegate**: if a bot runs `herdr agent start …`, the child agent is listed under it and the bot is notified when the child finishes or gets stuck. In Expert mode, the manager dispatches work directly to project executors and advisors.
-5. **Automate**: the same "+" menu has "Add Schedule". Quota, model lists, update checks and hosts are under Settings.
-6. **Open it on your phone**: on the same network (LAN or Tailscale), open `http://<this machine's address>:7788` and paste the contents of `ui-token`.
-
-## Supported kinds and models
-
-AG Man supports two categories of bots:
-- **CLI bots** (`claude`, `codex`, `grok`, `agy`): run inside [herdr](https://herdr.dev) terminal panes with hooks attached. Can execute shell commands, edit files, and run full agent loops.
-- **API bots** (`claude-api`, `openai-api`): talk directly to provider APIs from the daemon using API keys without needing CLIs or terminal panes. They act strictly as **advisors** (consultation and second opinions), with configurable per-turn cost ceilings (or unlimited).
-
-> **Note**: The daemon fetches the active model list dynamically from each CLI and API provider. The table below is a snapshot at release / writing time (2026-11-27).
-
-| Kind | Type | Description | Current Models (by family/tier) | Effort Range |
-|---|---|---|---|---|
-| `claude` | CLI | Anthropic Claude Code in herdr pane | `opus`, `sonnet` (default), `haiku`, `fable` | `low`, `medium`, `high`, `xhigh`, `max` |
-| `codex` | CLI | OpenAI Codex CLI in herdr pane | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol` (default) < `gpt-6-astra` < `gpt-6.2-astra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (luna up to `max`) |
-| `grok` | CLI | xAI Grok CLI in herdr pane | `grok-4.7` (default) | `low`, `medium`, `high`, `xhigh` |
-| `agy` | CLI | Google Antigravity in herdr pane | Per account: default account ag0, other identities ag1...; available models vary by account (e.g. ag0: Gemini 3.8 Flash + Gemini 4 Neon / Argon / Hydrogen; ag1: only 3.8 Flash), model menu listed by host + account; context window 1,048,576; 1-hour cache countdown, no keep-warm | Preset in model name; live `/model` & `/effort` switch while idle |
-| `claude-api` | API | Anthropic API direct (Advisor only) | `claude-opus-5-5` (default), `claude-fable-5-2` | `low`, `medium`, `high`, `xhigh`, `max` |
-| `openai-api` | API | OpenAI API direct (Advisor only) | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra` (default) | `none` (luna), `low`, `medium`, `high`, `xhigh`, `max` |
-
-### How to add a bot
-- **Web UI**: In the project's "+" menu, choose **Add Bot** ("新增 Bot"), select the kind, model, and effort level (in Expert mode, select the role; API bots can only be advisors).
-- **CLI (Expert mode)**:
-  ```bash
-  agm hire <name> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>] [--identity <identity>]
-  ```
-  *(Note: `agm hire` can only hire `executor` [default] or `specialist` [requires `--track`]; advisors are created by the user in the Web UI. Executor names follow `<account>-<model_short>-<index>`. Examples: `agm hire cc0-hk-1 --kind claude --model haiku --effort medium`, `agm hire ag0-ne-1 --kind agy --model gemini-4-neon-medium`, or with identity: `agm hire cc1-hk-1 --kind claude --model haiku --effort medium --identity cc1`)*
-
-### Supported agent CLIs and hook mechanisms
-
-Each CLI gets a hook injected at launch, so replies arrive as structured events instead of being scraped from the screen.
-
-| Kind | Reply source | Notes |
-|---|---|---|
-| `claude` | `--settings` hooks (`SessionStart`／`Stop`／`StopFailure`) | Multi-identities; model and effort can be switched live |
-| `codex` | Stdin `Stop` hook and `notify` hook | Model, effort and Fast can be switched live |
-| `grok` | Hook file in `GROK_HOME` | Model can be switched live; effort needs a restart; see [SPEC §12](docs/SPEC.md) |
-| `agy` | Named hooks in Antigravity CLI settings | Update prompt shown in header; multi-identities (ag0, ag1...); live `/model` & `/effort` switch while idle; generated images collected into chat & outbox; context window 1,048,576; 1-hour cache countdown, no keep-warm; see [SPEC §12a](docs/SPEC.md) |
-| `claude-api` | Direct Anthropic API streaming (SSE) | Advisor only; per-turn cost ceiling, prompt cache countdown |
-| `openai-api` | Direct OpenAI Responses API streaming (SSE) | Advisor only; per-turn cost ceiling, reasoning tokens display |
-
-Hook details are in [`docs/HOOK.md`](docs/HOOK.md).
-
-## Configuration and data
-
-Default location: `~/.config/agents-manager/` (override with the `AM_DATA_DIR` environment variable).
-
-| File | Contents |
-|---|---|
-| `config.toml` | Desired state: projects, bots, hosts and settings. It is the source of truth. |
-| SQLite database | Runtime state: turns, messages, schedule records and so on. |
-| `ui-token` | Token for signing in to the web UI; mode 0600. |
-
-Example configuration (values and paths are illustrative):
-
-```toml
-[server]
-listen = "127.0.0.1:7788"
-herdr_session = "agents-manager"
-
-[[projects]]
-id = "01EXAMPLE000000000000000000"
-path = "/home/example/project/foo"
-label = "foo"
-
-  [[projects.bots]]
-  id = "01EXAMPLE000000000000000001"
-  name = "foo-claude"
-  kind = "claude"
-```
-
-- Data lives next to the config file: when you point `--config` at another path, the database and `ui-token` follow that directory (or `[server] data_dir`); the two must match.
-- Writing back to `config.toml` keeps your comments and layout.
-- Settings tabs: Setup, Hosts, Update check, Identities, Jev suggestions, Claude API, OpenAI API, and Display.
-
-Full field reference: [SPEC §5](docs/SPEC.md).
-
-## Security notes
-
-- **Network binding**: the packaged macOS app binds only to `127.0.0.1`. In other cases (including running `agents-managerd serve` directly), the daemon binds all interfaces by default so that phones on the same network can connect. To keep it local only, set `AM_DEV_LAN=0`.
-- **ui-token**: whoever holds it has full control of the web UI, including starting and stopping bots. Never commit it to git or paste it anywhere public. The LAN risk of the shared token is a deliberate design trade-off; see [API.md §0](docs/API.md).
-- **Data stays local**: conversations, settings and the database live on your machine. Projects on remote hosts are accessed over SSH and their data stays on that host.
-- **Third-party services are off by default**: the Claude API (one-off LLM jobs, changelog triage, message translation), OpenAI API (advisors, translation), the Jev judge layer (external API key), and the sharing entry point must each be turned on explicitly. The translate button only spends money when you click it. Simplified-to-Traditional Chinese conversion happens locally and does not call any API.
-- **Web Push**: notifications are delivered through the browser vendor's push service. The content is encrypted, but the push service can see when and to whom notifications are sent. You can turn them off in settings.
-- **Shared bots**: sharing links let restricted or trusted bots be used by other people through a separate entry point; see [SPEC §20](docs/SPEC.md).
-- **Broad-kill guard**: a PreToolUse hook (claude, local grok) and a PATH shim for `pkill`/`killall` block broad kills that could terminate other agents: target-less `pkill`/`killall`, patterns matching agent process names, option order that BSD `pkill` misreads, `kill -1`/`kill 0`. Explicit PIDs and `lsof -ti :PORT | xargs kill` pass. Do not work around it by writing the same command differently. See SPEC §4.4c for coverage per CLI.
-
-## Development and verification
+## Development
 
 ```bash
-scripts/check.sh changed    # verify only what changed relative to origin/main (run before committing)
-scripts/check.sh web        # TypeScript, lint, front-end tests and build
-scripts/check.sh daemon     # cargo tests for the daemon, xtask and crates
-scripts/check.sh ops        # shell-script lint and isolated tests
+scripts/check.sh changed    # verify what changed relative to origin/main
+cargo dev                   # daemon on :7788 + Vite dev server on :5173 (cargo down to stop)
 ```
 
-- Development mode: `cargo dev` starts the daemon (`0.0.0.0:7788`) and the Vite dev server (`0.0.0.0:5173`) together; `cargo down` stops both.
-- Front-end commands and conventions: [`docs/FRONTEND.md`](docs/FRONTEND.md) and [`web/README.md`](web/README.md).
-- Verification and CI workflow: [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md).
+See [`docs/FRONTEND.md`](docs/FRONTEND.md), [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md), and [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md).
 
-## Documentation index
+## Documentation
 
 | Document | Contents |
 |---|---|
-| [`docs/SPEC.md`](docs/SPEC.md) | Specification of current behavior: data model, hooks, reconciliation, remote hosts, quota, identities, supervisor, clusters, schedules |
-| [`docs/API.md`](docs/API.md) | HTTP / WebSocket contract, including bot and service authorization scopes |
+| [`docs/SPEC.md`](docs/SPEC.md) | Full behavior specification: bots, hooks, hosts, quota, identities, expert mode, schedules |
+| [`docs/API.md`](docs/API.md) | HTTP / WebSocket API |
+| [`docs/HOOK.md`](docs/HOOK.md) | How each CLI's hooks report replies |
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | Settled interface trade-offs |
-| [`docs/FRONTEND.md`](docs/FRONTEND.md) | Front-end structure, commands and conventions |
-| [`docs/HOOK.md`](docs/HOOK.md) | Hook subcommand contract and timing tests |
-| [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | Verification and CI workflow |
-| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze development builds and sccache dependency cache |
-| [`docs/PACKAGING.md`](docs/PACKAGING.md) | Packaging the macOS `.dmg` |
-| [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Evaluation of Claude-native transport versus herdr |
-| [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | Optional ChatGPT web consult worker |
-| [`web/README.md`](web/README.md) | Front-end quick commands |
+| [`docs/PACKAGING.md`](docs/PACKAGING.md) | Building the macOS `.dmg` |
 
 ## License
 

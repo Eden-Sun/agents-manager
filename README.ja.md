@@ -2,264 +2,149 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | 日本語
 
-AG Man は、自分のマシン上で動作し、複数の coding agent CLI および API モデルをまとめて管理するための Web UI です。対象は **Claude Code（`claude`）、Codex（`codex`）、Grok（`grok`）、Antigravity（`agy`）、Claude API（`claude-api`）、OpenAI API（`openai-api`）** です。[herdr](https://herdr.dev) の pane で動作する各 CLI セッションが、Web UI 上の **bot** になります。直接 API を利用する bot は API キーを用いて daemon 内で直接動作し、CLI や端末 pane を必要とせず、専用の顧問（advisor）として機能します。ブラウザやスマートフォンから会話を追い、質問への回答やクォータおよび API 残高の確認を行い、複数の bot を連携させられます。
+**1 つの Web ページで coding agent チーム全体（Claude Code、Codex、Grok、Antigravity、API アドバイザー）を自分のマシン上で指揮。デスクトップ、iPad、スマートフォンのどこからでも操作できます。**
 
-AG Man は IDE ではなく、CLI agent を直接起動することもありません。端末 pane は herdr が管理し、daemon（`agents-managerd`）が herdr と通信して各 CLI の hook を通じて応答を受け取るか、API bot のために各モデルプロバイダーと直接通信します。
+複数の coding agent CLI を同時に動かすと、端末タブの切り替えに追われ、1 時間も yes/no 確認で止まっているエージェントを見落とし、残クォータを推測する羽目になります。AG Man はすべての agent セッションを 1 つのセルフホスト Web UI にまとめ、対応が必要なときに通知し、bot 同士の連携もこなします。
 
-> スクリーンショットは内蔵のモックバックエンド（`VITE_MOCK=1`）を使用しており、アカウント、bot、メッセージはデモ用のデータです。
+<table>
+  <tr>
+    <td width="76%"><img src="docs/screenshots/readme/en/desktop-light.png" alt="デスクトップ画面：左にプロジェクトと bot 一覧、中央にチャット、上部にクォータバー、右に outbox" /></td>
+    <td width="24%"><img src="docs/screenshots/readme/en/mobile-light.png" alt="スマートフォン画面：同期されたチャット、クォータチップ、bot 切り替え" /></td>
+  </tr>
+</table>
 
-![スマートフォンのライトテーマ：会話、クォータチップ、bot 切り替え](docs/screenshots/readme/en/mobile-light.png)
+> スクリーンショットは内蔵モックバックエンド（`VITE_MOCK=1`）によるデモデータです。
+
+## 仕組み
+
+AG Man は軽量なローカル daemon（`agents-managerd`）と埋め込み Web UI で構成されます。CLI agent は [herdr](https://herdr.dev)（tmux のような端末ワークスペース管理ツール）の pane 内で動作し、daemon が起動・プロンプト送信・各 CLI のネイティブ hook 経由での応答受信を行います。画面スクレイピングではなく構造化イベントを受け取るため、きれいなメッセージやクリック可能な承認カードとして表示されます。API アドバイザーは API キーで daemon 内から直接動作し、端末は不要です。すべてのデータは自分のマシンに留まります。
+
+AG Man は IDE ではありません。コードエディタ、diff レビュー、git worktree 管理は提供せず、各リポジトリの慣習に従って agent が扱います。
+
+## 対応エージェント
+
+| kind | 概要 |
+|---|---|
+| `claude` | Anthropic Claude Code CLI |
+| `codex` | OpenAI Codex CLI |
+| `grok` | xAI Grok CLI |
+| `agy` | Google Antigravity CLI |
+| `claude-api` | Anthropic API 直結（CLI 不要・アドバイザー専用） |
+| `openai-api` | OpenAI API 直結（CLI 不要・アドバイザー専用） |
+
+CLI bot はコマンド実行やファイル編集を行い、API bot は質問応答やセカンドオピニオンに特化（ターンごとのコスト上限設定が可能）しています。利用可能なモデルや effort レベルは各 CLI／プロバイダーから動的に取得され、対応 CLI では Web UI から即座に切り替えられます。各 CLI で複数アカウントに対応します。
 
 ## 主な機能
 
-**端末を見つめる代わりに会話する**
-- CLI セッションまたは API 顧問ごとに bot があり、プロジェクトのディレクトリごとにグループ化されます。ブラウザからメッセージを送信でき、ターン実行中はキューに入り、中断や強制停止もできます。
-- 応答は CLI の hook、ネイティブの transcript、または直接の API ストリームから取得します。daemon が端末のスナップショットを読むしかない場合、その応答には「不完全の可能性あり」と表示されます。
-- 確認や選択式の質問はクリックできるカードになります。会話を巻き戻す（rewind）、bot を fork して文脈を引き継ぐ、スリープ中の bot を再開する、といった操作ができます。
-- アイドル状態の bot の端末下書きを自動検出し、「編集して送信」下書きバーを表示します。
-- 設定パネルまたはサイドバーの「...」メニューからいつでも bot を再起動できます。
+**端末を眺める代わりにチャットで操作**
+- 各 CLI セッションをプロジェクト別のチャットとして一覧表示（実行中／完了／入力待ちが一目で分かります）。
+- ターン実行中でも次のメッセージをキュー投入可能。確認や選択式の質問はクリックできるカードになります。
+- 中断、巻き戻し（rewind）、文脈を引き継ぐ fork、生の端末タブへの切り替えがいつでも行えます。
 
-**複数の bot を連携させる**
-- **エキスパートモード**（プロジェクト単位）：トップレベルの管理者を 1 人指定し、他のメンバーは executor、advisor、scheduler、specialist（トラック固有の専門家）になります。エキスパートモードでは子 agent は起動せず、管理者が同じプロジェクトのメンバーに作業を振ります。クォータを保護するために `manager_use` で個々のメンバーをオン／オフできます。
-- **クラスタ派遣**：同じプロジェクト内で kind、model、effort、identity が同一の executor は 1 つのクラスタにまとめられ、まとめて作業を依頼したり一括でオン／オフできます。
-- **API bot を顧問として活用**：`claude-api` および `openai-api` bot は API キーを使って daemon 内で動作し、端末 pane を必要としません。セカンドオピニオンや背景相談のための顧問（advisor）として厳密に機能し、ターンごとのコスト上限設定（または無制限）やリアルタイムのストリーミング進捗に対応します。
-- **子 agent**：herdr 経由で起動した agent は親 bot の下に表示されます。子が完了またはスタックすると、親に通知されます。
-- **スーパーバイザー（AGM）**：任意で使えるコーディネーター bot です。全体を巡回し、作業を振り分け、アイドル bot をスリープさせ、デプロイを担当します。詳しくは [SPEC §18](docs/SPEC.md) を参照してください。
+**どのデバイスからでも状況を把握**
+- デスクトップ、iPad（縦／横、Apple Pencil ホバープレビュー対応）、スマートフォンに対応。LAN や Tailscale 経由で接続できます。
+- ターン完了、応答待ち、スケジュール結果、クォータリセットを Web Push で通知。すでに閲覧中のときは自動で抑止します。
 
-**スケジュールとプッシュ通知**
-- プロジェクトのスケジュール：単発、固定間隔、毎日、毎週、複数時間帯での実行に対応します。スケジュールされたプロンプトは専用の scheduler bot（`role=scheduler`）に送られ、スナップショット／クリーン再起動（`agy` を含む）をサポートし、実行記録が残ります。
-- Web Push：ターンの完了、応答が必要なターン、スケジュールの結果、アップストリームの新モデルリリース、クォータのリセットを通知します。それぞれ設定で個別にオン／オフできます。いずれかのデバイスで既読になっている場合や、スマートフォンで AG Man をフォアグラウンド表示中の場合はプッシュを抑止します。
-- 長文ターンの完了時には「メッセージが長いため、クリックして全文を表示」という簡潔なプレビューが届き、会話を直接開くことができます。
-- Codex のリセットクレジット通知は 1 時間、1 日、または 3 日間スヌーズ（「次回から通知しない」）できます。
+**複数の bot をチームで動かす**
+- **チーム役割（エキスパートモード）**：プロジェクトに管理者 bot を置き、ワーカーへの作業割り当てやアドバイザーへの相談を任せられます。
+- **クラスタ**：同一構成のワーカーをまとめ、空いているメンバーに自動で振り分けます。
+- **子 agent とスーパーバイザー**：herdr 経由で起動された子 agent は親の下に表示され、完了やスタックを親へ通知。任意のスーパーバイザー bot が全体を巡回しアイドル bot をスリープさせます。
 
-**リモートホストとアカウントのクォータ**
-- プロジェクトは SSH ホスト上に置くことができ、そのホストの herdr を通じて動作します。リモート bot、ホストの shell、CLI へのログイン、クォータに対応し、プロジェクトを別の daemon に引き継ぐこともできます。
-- **Identities（アカウント）ページ**：ホストタブと各 CLI カード（Claude、Codex、Grok、agy）でホストを跨いだ identity を一覧表示します。「アカウント追加」ダイアログで設定ディレクトリの分離を案内し、共有リスクを警告し、接続済みホスト間での identity のコピー／同期やバックグラウンドログイン（`agy` の Google 認証 URL 自動抽出を含む）を支援します。既定のアカウントは非表示やログアウトが可能です。
-- **グローバルな API 残高表示**：上部のクォータバーとドロップダウンメニューに、全ホストの Anthropic API および OpenAI API 残高（OpenAI は platform の `credit_grants` 実残高を読み取り）がリアルタイム表示され、デスクトップでは 2 行カプセルで表示されます。
-- **モデル命名と順序の統一**：Codex と OpenAI API のモデル命名を統一し、ファミリーごとの価格順（安価から高価：Luna < Terra < Sol < Astra、Flash < Hydrogen < Argon < Neon）で並べ、レガシー版は明確に表記されます。
-- クォータとリセット時刻はホストと identity ごとに表示され、残量が少ないと警告されます。
-- CLI が対応している場合、モデル、effort、fast mode を Web UI からその場で切り替えられます。
+**アカウント、クォータ、リモートホスト**
+- 全アカウント・全ホストのサブスク残量、リセット時刻、Anthropic／OpenAI API 残高を上部の 1 本のバーに集約表示。
+- Identities ページから分離アカウントの追加・ログイン、接続済みホスト間での同期が可能。
+- SSH 先のリモートホスト上のプロジェクトでも、ローカルと同じく bot・shell・ログイン・クォータを扱えます。
 
-**更新と保守**
-- 「Update check」ページには、各ホストの herdr、各 agent CLI、各 hook 連携のバージョンが一覧表示され、ワンクリックで更新できます。
-- CLI アップグレードはクリック可能な単一チップに集約され、インストール→再起動→スケジュール連携はブラウザを閉じても daemon 側で継続実行されます。
-- アイドル状態の bot は設定した時間が経つとスリープし、再開に必要な情報だけを残します。
+**自動化とマシン管理**
+- プロジェクトスケジュール（単発、一定間隔、毎日、毎週、複数時間帯）と実行履歴。
+- 各ホストの herdr、agent CLI、hook をワンクリック更新。
+- アイドル bot の自動スリープ＆文脈保持復帰、サイドバーでのメモリ・CPU 使用率表示。
+- 他の agent を巻き込む広範囲な `pkill`/`killall` を内蔵ガードで遮断。
 
-**作業領域とガードレール**
-- bot のローカル開発サーバーをチャットの横でプレビューでき、スマートフォンおよび iPad のビューポート切り替えに対応します。
-- outbox HTML プレビューと `agy` 生成画像：bot が生成した `.html` ファイルを新しいタブで完全な Web ページとして直接プレビューでき、`agy` が生成した画像はチャット内に自動表示され outbox にも一覧表示されます（1 時間保持）。
-- bot 間で共有する一時ファイル置き場（file shelf）と、bot が生成したダウンロード可能なファイルのための outbox があります（マウスおよび iPad の Apple Pencil ホバーでの画像プレビューに対応）。
-- ホスト全体の CPU 使用率と herdr プロセスツリーを確認できるメモリ／CPU ビューがあります。
-- 組み込みの hook が、他の agent を巻き添えにする広範囲の `pkill`／`kill` コマンドを遮断します。
+**ワークスペース補助機能**
+- チャットの横にローカル開発サーバーのプレビューを表示（スマートフォン・iPad サイズ切り替え対応）。
+- bot 間で共有する **File shelf** と、HTML ページ即時プレビュー・生成画像インライン表示を備えた **Outbox**。
+- **共有リンク**：制限付きまたは信頼済み bot を専用 URL からチームメンバーへ共有可能。
 
-**中国語と英語の UI**：既定ではブラウザの言語に従います。Settings → Display で切り替えられます。
+英語・中国語 UI に対応（Settings → Display で切り替え）。詳細な仕様と制限は [`docs/SPEC.md`](docs/SPEC.md) をご覧ください。
 
-詳細と制限は [`docs/SPEC.md`](docs/SPEC.md) にあります。
+## 対応プラットフォームと要件
 
-**提供しないもの**：コードエディタ、diff／PR レビュー、git worktree の管理（agent が各 repo の慣習に従って自分で扱います）。
+- **macOS（arm64）**・**Linux（x86_64、arm64）**。Windows では **WSL2** 内で動かし、Windows のブラウザから開きます。
+- **[herdr](https://herdr.dev)** — Homebrew では自動インストールされます。事前ビルドバイナリやソースビルドの場合は、先に [herdr.dev](https://herdr.dev) から `herdr` を導入してください。
+- **上表のいずれか 1 つ以上の agent CLI または API キー**。
+- ソースビルド時は Rust ツールチェーン（`cargo`）と [Bun](https://bun.sh) も必要です。
 
-## 対応プラットフォーム
-
-| プラットフォーム | 状態 |
-|---|---|
-| macOS（arm64） | daemon と Web UI に対応 |
-| Linux（x86_64、arm64） | daemon と Web UI に対応 |
-| Windows | ネイティブ Windows の daemon は非対応です。**WSL2**（Linux ディストリビューション）の中にインストールして実行し、Web UI は Windows のブラウザから開いてください |
-
-Web UI は最新のブラウザならどれでも動作し、デスクトップ、iPad（縦／横）、スマートフォンのいずれでも使えます。
-
-## 必要なもの とインストール
-
-**必須**（Homebrew と事前ビルド済みバイナリの方法では herdr が自動的にインストールされます。それ以外は自分で用意してください）
-
-| ツール | 用途 |
-|---|---|
-| [herdr](https://herdr.dev) | 端末ワークスペース管理ツール。daemon は Unix socket を通じて pane を開き、agent を起動し、テキストを送り、画面を読みます。`herdr --version` で確認できます。設定ページの「Update check」でバージョンを比較します。 |
-| 少なくとも 1 つの agent CLI または API キー | Agent CLI：`claude`、`codex`、`grok`、`agy`。API bot：Anthropic API キーまたは OpenAI API キー。 |
-| Rust ツールチェーン（`cargo`） | ソースからビルドする場合のみ必要です。 |
-| [Bun](https://bun.sh) | ソースからビルドする場合のみ必要です（Web フロントエンドのビルド）。 |
-
-**推奨**（ホスト環境のチェックで一覧表示され、不足している場合は案内されます）
-
-| ツール | 用途 |
-|---|---|
-| `rtk` | token 圧縮プロキシです。Claude の hook は通常のコマンドをこれを使う形に書き換えます。 |
-| `zsh`、`jq` | ホストの shell と hook スクリプトで使われます。 |
-| `gh` | GitHub CLI のログイン状態を表示します。 |
-
-**任意**：Blaze ビルドエンジンを使うと開発ビルドが速くなります。[`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) を参照してください。Claude API キー、OpenAI API キー、Jev 判断層は任意の機能で、既定では無効です。
+設定ページが各ホストを診断し、任意の補助ツール（`rtk`、`zsh`、`jq`、`gh`）が不足していれば案内します。
 
 ## クイックスタート
 
-**方法 1：Homebrew（macOS と Linux。herdr も一緒にインストールされます）**
+> **daemon や herdr を入れずに UI を先に試す：**
+> ```bash
+> git clone https://github.com/Eden-Sun/agents-manager.git
+> cd agents-manager/web && bun install && VITE_MOCK=1 bun run dev
+> ```
+
+**方法 1：Homebrew**（macOS / Linux・`herdr` も同時インストール）
 
 ```bash
 brew install eden-sun/tap/agents-manager
 brew services start agents-manager    # 停止：brew services stop agents-manager
 ```
 
-サービスはログイン時に自動で起動し、動作を維持します。フォアグラウンドで実行する場合は `agents-managerd serve`（Ctrl-C で停止）です。ログは `$(brew --prefix)/var/log/agents-manager.log` にあります。サービスから見えるのは Homebrew の `bin` と `~/.local/bin` だけです。agent CLI が別の場所にある場合は、shell からフォアグラウンドで実行してください。
+ログイン時に自動起動します。サービスから見える PATH は Homebrew の `bin` と `~/.local/bin` のみのため、agent CLI が別パスにある場合はシェルから `agents-managerd serve` を実行してください。
 
-**方法 2：事前ビルド済みのバイナリ**（Web UI は組み込み済み）。[Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) から対象プラットフォームのアーカイブをダウンロードします：`linux-x86_64`、`linux-arm64`、`macos-arm64`。
+**方法 2：事前ビルドバイナリ**（Web UI 内蔵・`PATH` に `herdr` が必要）。[Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) から最新版を取得：
 
 ```bash
-VERSION=v0.2.0          # Releases ページで最新のバージョンを確認してください
+VERSION=v0.2.0          # Releases ページの最新タグに置き換えてください
 ASSET=linux-x86_64      # または linux-arm64 / macos-arm64
 curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
 tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
 install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
-agents-managerd serve
+agents-managerd serve   # ~/.local/bin が PATH に含まれていることを確認してください
 ```
 
-各アーカイブの隣には検証用の `.sha256` ファイルがあります。macOS では、ダウンロードしたバイナリに対して一度 `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` が必要になる場合があります。アーカイブには `scripts/` 配下のスクリプト（`agm` など）は含まれていません。必要な場合はソースを clone してください。
+macOS では初回のみ `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` が必要な場合があります。
 
-**方法 3：ソースからビルド**（開発用、または上記に含まれないプラットフォーム向け）。まず clone します：
+**方法 3：ソースからビルド**（`herdr`・Rust・Bun が必要）
 
 ```bash
 git clone https://github.com/Eden-Sun/agents-manager.git
 cd agents-manager
-
-# 1. Web フロントエンドをビルド（daemon に組み込まれます）
-(cd web && bun install && bun run build)
-
-# 2. daemon をビルド
+(cd web && bun install && bun run build)        # Web UI をビルドして daemon に埋め込み
 cargo build --release -p agents-managerd
-
-# 3. 起動（フォアグラウンド。Ctrl-C で停止）
 ./target/release/agents-managerd serve
 ```
 
-どの方法でも、ブラウザで **http://127.0.0.1:7788** を開いてください。`127.0.0.1` から開くと自動的にサインインします。別のデバイスからは `~/.config/agents-manager/ui-token` の内容を貼り付けてください。
+起動後、ブラウザで **http://127.0.0.1:7788** を開きます（ローカルは自動サインイン。スマートフォンや別端末からは `http://<ホストIP>:7788` を開き `~/.config/agents-manager/ui-token` を貼り付けます）。**Add Project** → **Add Bot** を選べばチャットを始められます。
 
-herdr や daemon なしで画面だけを確認したい場合は、モックバックエンドを使えます：
+## データとセキュリティ
 
-```bash
-cd web && bun install && VITE_MOCK=1 bun run dev
-```
+- 設定と履歴は `~/.config/agents-manager/` に保存されます（`AM_DATA_DIR` で変更可能）。リモートプロジェクトのデータは各ホストに残ります。
+- 同ディレクトリの `ui-token` は Web UI の全権限を持つため、厳重に管理してください。
+- `agents-managerd serve` を直接実行すると LAN／Tailscale 上の端末から接続できるよう全インターフェースで待ち受けます（ローカル限定にするには `AM_DEV_LAN=0`）。パッケージ版 macOS アプリは `127.0.0.1` のみで待ち受けます。
+- 課金を伴う外部機能（Claude API、OpenAI API、メッセージ翻訳、共有機能）は明示的に有効化するまでオフです。
+- Web Push は各ブラウザベンダーのプッシュサービスを経由します（本文は暗号化されますが、送信メタデータはサービス側から見えます）。
 
-長期間動かす場合、Homebrew では `brew services` が管理してくれます。それ以外では systemd の user unit、launchd、または herdr の pane の中で動かしてください。Linux ホストでのスケジュールの詳細は [SPEC §18.2e](docs/SPEC.md) を参照してください。
-
-## 最初の操作
-
-1. **プロジェクトを追加**：サイドバー下部の「Add Project」を押し、ローカルまたは SSH ホスト上のディレクトリを選んで、ラベルを付けます。
-2. **bot を追加**：プロジェクトの「＋」メニューを開き、「Add Bot」を選びます。kind（`claude`、`codex`、`grok`、`agy`、`claude-api`、`openai-api`）を選び、必要に応じて identity とモデルを指定します。daemon が herdr の pane を開いて CLI を起動するか、API 顧問を直接作成します。
-3. **会話**：入力欄でメッセージを送ります。ターン実行中に送ったメッセージはキューに入ります。確認や選択式の質問はカードとして表示されます。停止ボタンでターンを中断できます。生の画面を見たいときは「Terminal」タブに切り替えてください。
-4. **bot に作業を委任させる**：bot が `herdr agent start …` を実行すると、子 agent がその下に表示され、子が完了またはスタックした際に bot に通知されます。エキスパートモードでは、管理者がプロジェクト内の executor や advisor に直接作業を振り分けます。
-5. **自動化**：同じ「＋」メニューに「Add Schedule」があります。クォータ、モデル一覧、更新チェック、ホストは Settings にあります。
-6. **スマートフォンから開く**：同じネットワーク（LAN や Tailscale）上で `http://<このマシンのアドレス>:7788` を開き、`ui-token` の内容を貼り付けます。
-
-## 対応する kind とモデル
-
-AG Man は 2 つのカテゴリの bot をサポートしています：
-- **CLI bot**（`claude`、`codex`、`grok`、`agy`）：[herdr](https://herdr.dev) の端末 pane 内で hook を注入して動作します。シェルコマンドの実行、ファイルの編集、完全な agent ループを実行できます。
-- **API bot**（`claude-api`、`openai-api`）：CLI や端末 pane を介さず、API キーを使って daemon から直接プロバイダー API を呼び出します。厳密に**顧問（Advisor）**として動作し（相談やセカンドオピニオン）、ターンごとのコスト上限設定（または無制限）をサポートします。
-
-> **注意**：daemon は各 CLI および API プロバイダーから最新のモデル一覧を動的に取得します。以下の表はリリース／執筆時点（2026-11-27）のスナップショットです。
-
-| kind | 種類 | 説明 | 現在のモデル（ファミリー／価格順） | effort の範囲 |
-|---|---|---|---|---|
-| `claude` | CLI | herdr pane で動作する Anthropic Claude Code | `opus`、`sonnet`（既定）、`haiku`、`fable` | `low`、`medium`、`high`、`xhigh`、`max` |
-| `codex` | CLI | herdr pane で動作する OpenAI Codex CLI | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol`（既定） < `gpt-6-astra` < `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max`、`ultra`（luna は `max` まで） |
-| `grok` | CLI | herdr pane で動作する xAI Grok CLI | `grok-4.7`（既定） | `low`、`medium`、`high`、`xhigh` |
-| `agy` | CLI | herdr pane で動作する Google Antigravity | アカウント別：既定アカウント ag0、その他 identity ag1…；アカウントごとに利用可能なモデルが異なる（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：3.8 Flash のみ）、ホスト＋アカウント別にモデルメニューを表示；context ウィンドウ 1,048,576；1 時間 cache カウントダウン、保温なし | モデル名にあらかじめプリセット；アイドル時に `/model` と `/effort` をその場で切り替え可能 |
-| `claude-api` | API | Anthropic API 直接通信（Advisor 専用） | `claude-opus-5-5`（既定）、`claude-fable-5-2` | `low`、`medium`、`high`、`xhigh`、`max` |
-| `openai-api` | API | OpenAI API 直接通信（Advisor 専用） | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra`（既定） | `none`（luna）、`low`、`medium`、`high`、`xhigh`、`max` |
-
-### bot の追加方法
-- **Web UI**：プロジェクトの「＋」メニューから **Add Bot**（「新增 Bot」）を選び、kind、モデル、effort レベルを選択します（エキスパートモードでは role を選択可能。API bot は advisor のみ）。
-- **CLI（エキスパートモード）**：
-  ```bash
-  agm hire <名前> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>] [--identity <identity>]
-  ```
-  *（注：`agm hire` は執行者 `executor` [既定] または専門家 `specialist` [`--track` 必須] のみ雇用できます。顧問 [advisor] はユーザーが Web UI で作成します。執行者の命名規則は `<アカウント>-<モデル略称>-<連番>` です。例：`agm hire cc0-hk-1 --kind claude --model haiku --effort medium`、`agm hire ag0-ne-1 --kind agy --model gemini-4-neon-medium`、または identity 指定：`agm hire cc1-hk-1 --kind claude --model haiku --effort medium --identity cc1`）*
-
-### 対応する agent CLI と hook の仕組み
-
-各 CLI は起動時に hook が注入されるため、応答は画面からスクレイピングされるのではなく、構造化されたイベントとして届きます。
-
-| kind | 応答の取得元 | 備考 |
-|---|---|---|
-| `claude` | `--settings` の hook（`SessionStart`／`Stop`／`StopFailure`） | 複数 identity に対応。モデルと effort はその場で切り替えられます |
-| `codex` | 標準入力の `Stop` hook および `notify` hook | モデル、effort、Fast をその場で切り替えられます |
-| `grok` | `GROK_HOME` 内の hook ファイル | モデルはその場で切り替えられます。effort は再起動が必要です。[SPEC §12](docs/SPEC.md) を参照 |
-| `agy` | Antigravity CLI 設定の名前付き hook | ヘッダーに更新通知を表示。複数 identity（ag0、ag1…）；アイドル時の `/model`・`/effort` 即時切り替え；生成画像をチャット＆outbox に自動収集；context ウィンドウ 1,048,576；1 時間 cache カウントダウン、保温なし；[SPEC §12a](docs/SPEC.md) を参照 |
-| `claude-api` | Anthropic API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、prompt cache カウントダウン |
-| `openai-api` | OpenAI Responses API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、reasoning tokens 表示 |
-
-hook の詳細は [`docs/HOOK.md`](docs/HOOK.md) にあります。
-
-## 設定とデータの場所
-
-既定の場所は `~/.config/agents-manager/` です（環境変数 `AM_DATA_DIR` で変更できます）。
-
-| ファイル | 内容 |
-|---|---|
-| `config.toml` | 望ましい状態：プロジェクト、bot、ホスト、設定。これが正となる情報源です。 |
-| SQLite データベース | 実行時の状態：ターン、メッセージ、スケジュールの記録など。 |
-| `ui-token` | Web UI へのサインインに使う token。パーミッションは 0600 です。 |
-
-設定の例（値とパスは説明用です）：
-
-```toml
-[server]
-listen = "127.0.0.1:7788"
-herdr_session = "agents-manager"
-
-[[projects]]
-id = "01EXAMPLE000000000000000000"
-path = "/home/example/project/foo"
-label = "foo"
-
-  [[projects.bots]]
-  id = "01EXAMPLE000000000000000001"
-  name = "foo-claude"
-  kind = "claude"
-```
-
-- データは設定ファイルと同じ場所に置かれます。`--config` で別のパスを指定した場合、データベースと `ui-token` はそのディレクトリ（または `[server] data_dir`）に従います。両者は一致させてください。
-- `config.toml` へ書き戻すときは、コメントとレイアウトを保持します。
-- 設定ページ（Settings）のタブ：Setup、Hosts、Update check、Identities、Jev suggestions、Claude API、OpenAI API、Display。
-
-すべてのフィールドは [SPEC §5](docs/SPEC.md) を参照してください。
-
-## セキュリティ上の注意
-
-- **ネットワークのバインド**：パッケージ化された macOS アプリは `127.0.0.1` のみにバインドします。それ以外の場合（`agents-managerd serve` を直接実行した場合を含む）、daemon は既定ですべてのインターフェースにバインドし、同じネットワーク上のスマートフォンからも接続できるようにします。ローカルだけで使う場合は `AM_DEV_LAN=0` を設定してください。
-- **ui-token**：これを持つ者は Web UI の全権限を持ち、bot の起動と停止も含まれます。git にコミットしたり、公開の場に貼り付けたりしないでください。共有 token による LAN 上のリスクは、意図的に受け入れた設計上のトレードオフです。[API.md §0](docs/API.md) を参照してください。
-- **データはローカルに留まる**：会話、設定、データベースはお使いのマシンに保存されます。リモートホスト上のプロジェクトは SSH 経由でアクセスされ、データはそのホストに残ります。
-- **サードパーティのサービスは既定で無効**：Claude API（単発の LLM 処理、changelog のトリアージ、メッセージ翻訳）、OpenAI API（顧問、翻訳）、Jev 判断層（外部 API key）、共有の入口は、いずれも明示的に有効にする必要があります。翻訳ボタンは、クリックしたときだけ費用が発生します。簡体字から繁体字への変換はローカルで行われ、API は呼び出しません。
-- **Web Push**：通知はブラウザベンダーのプッシュサービスを経由して届きます。内容は暗号化されていますが、プッシュサービスは送信の時刻と宛先を知ることができます。設定でオフにできます。
-- **共有 bot**：共有リンクを使うと、制限付きまたは信頼された bot を別の入口から他の人が利用できます。[SPEC §20](docs/SPEC.md) を参照してください。
-- **広範囲 kill の防止**：PreToolUse hook（claude、ローカル grok）および `pkill`／`killall` の PATH shim が、他の agent を終了させてしまう可能性のあるコマンドを遮断します：対象のない `pkill`／`killall`、agent プロセス名に一致するパターン、BSD `pkill` が誤読するオプション順、`kill -1`／`kill 0`。明示的な PID や `lsof -ti :PORT | xargs kill` は許可されます。書き方を変えてこれを回避しようとしないでください。各 CLI の対象範囲は SPEC §4.4c を参照してください。
-
-## 開発と検証
+## 開発
 
 ```bash
-scripts/check.sh changed    # origin/main と比べて変更があった部分だけを検証（コミット前に実行）
-scripts/check.sh web        # TypeScript、lint、フロントエンドのテストとビルド
-scripts/check.sh daemon     # daemon、xtask、crates の cargo テスト
-scripts/check.sh ops        # シェルスクリプトの lint と隔離テスト
+scripts/check.sh changed    # origin/main との差分のみ検証
+cargo dev                   # daemon (:7788) と Vite (:5173) を同時起動（停止は cargo down）
 ```
 
-- 開発モード：`cargo dev` で daemon（`0.0.0.0:7788`）と Vite の dev server（`0.0.0.0:5173`）を同時に起動します。`cargo down` で停止します。
-- フロントエンドのコマンドと規約は [`docs/FRONTEND.md`](docs/FRONTEND.md) と [`web/README.md`](web/README.md) を参照してください。
-- 検証と CI の流れは [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) を参照してください。
+詳細は [`docs/FRONTEND.md`](docs/FRONTEND.md)、[`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)、[`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) を参照してください。
 
-## ドキュメント一覧
+## ドキュメント
 
 | ドキュメント | 内容 |
 |---|---|
-| [`docs/SPEC.md`](docs/SPEC.md) | 現在の動作の仕様：データモデル、hook、照合、リモートホスト、クォータ、identity、スーパーバイザー、クラスタ、スケジュール |
-| [`docs/API.md`](docs/API.md) | HTTP／WebSocket の契約。bot とサービス identity の認可範囲を含みます |
-| [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 決定済みの UI のトレードオフ |
-| [`docs/FRONTEND.md`](docs/FRONTEND.md) | フロントエンドの構成、コマンド、規約 |
-| [`docs/HOOK.md`](docs/HOOK.md) | hook サブコマンドの契約とタイミングテスト |
-| [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | 検証と CI のワークフロー |
-| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze による開発ビルドと sccache の依存キャッシュ |
+| [`docs/SPEC.md`](docs/SPEC.md) | 全体の動作仕様（bot、hook、ホスト、クォータ、アカウント、エキスパートモード、スケジュール） |
+| [`docs/API.md`](docs/API.md) | HTTP / WebSocket API |
+| [`docs/HOOK.md`](docs/HOOK.md) | 各 CLI の hook による応答通知 |
+| [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 確定済みの UI 設計判断 |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | macOS `.dmg` のパッケージング |
-| [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Claude ネイティブの転送と herdr の比較評価 |
-| [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | 任意機能の ChatGPT Web 相談 worker |
-| [`web/README.md`](web/README.md) | フロントエンドのクイックコマンド |
 
 ## ライセンス
 
