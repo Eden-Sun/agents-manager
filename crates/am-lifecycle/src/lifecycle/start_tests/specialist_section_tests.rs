@@ -31,6 +31,7 @@ fn manager_role_section_only_present_for_manager() {
     assert!(manager_sec.contains("claude-api 顧問（`agm peers` 標 billing=api）用 API 額度"), "{manager_sec}");
     assert!(manager_sec.contains("其他 claude-api 成員不能派工"), "{manager_sec}");
 
+    assert!(manager_sec.contains("agm ledger claim L<no> --expect-version <v>"), "提醒叫管理者跑的指令要在管理者的指引裡");
     assert!(manager_role_section(Some("executor")).is_none());
     assert!(manager_role_section(Some("advisor")).is_none());
     assert!(manager_role_section(Some("specialist")).is_none());

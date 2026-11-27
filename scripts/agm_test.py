@@ -1476,6 +1476,54 @@ class ExpertBotCommandsTest(CliCase):
             missing = self.bad("lineage", "retire", "nope")
             self.assertIn("lineage_session_not_found", json.dumps(missing))
 
+    def test_ledger_subcommands_patch_each_op_with_bot_proof(self):
+        item = {"id": "01X", "code": "L3", "version": 4, "status": "untriaged"}
+        FakeDaemon.routes["GET /api/projects/p1/ledger"] = (200, {"items": [item], "counts": {"open": 1}})
+        FakeDaemon.routes["PATCH /api/projects/p1/ledger/L3"] = (200, dict(item, version=5))
+        env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+        with patch.dict(os.environ, env):
+            self.assertEqual(self.ok("ledger", "list")["items"], [item])
+            self.ok("ledger", "list", "--status", "all", "--owner", "unassigned")
+            self.assertEqual(self.ok("ledger", "claim", "L3", "--expect-version", "4")["version"], 5)
+            self.ok("ledger", "handback", "L3", "--expect-version", "5")
+            self.ok("ledger", "handback", "L3", "--expect-version", "5", "--to", "bot-b")
+            self.ok("ledger", "update", "L3", "--expect-version", "6", "--status", "answered", "--deliverable", "commit abc1234", "--wait-for", "")
+            self.ok("ledger", "merge", "L3", "--expect-version", "7", "--into", "L1")
+            self.ok("ledger", "cancel", "L3", "--expect-version", "8")
+            self.ok("ledger", "cancel", "L3", "--expect-version", "8", "--reason", "dup")
+        seen = FakeDaemon.seen
+        self.assertEqual([(r["method"], r["path"]) for r in seen[:2]], [
+            ("GET", "/api/projects/p1/ledger"),
+            ("GET", "/api/projects/p1/ledger?status=all&owner=unassigned"),
+        ])
+        self.assertTrue(all((r["method"], r["path"]) == ("PATCH", "/api/projects/p1/ledger/L3") for r in seen[2:]))
+        for request in seen:
+            self.assertEqual((request["bot_id"], request["bot_token"], request["token"]), ("bot-a", "bot-secret", None))
+        self.assertEqual([r["body"] for r in seen[2:]], [
+            {"op": "claim", "expected_version": 4},
+            {"op": "handback", "expected_version": 5},
+            {"op": "handback", "expected_version": 5, "owner_bot_id": "bot-b"},
+            {"op": "update", "expected_version": 6, "status": "answered", "deliverable": "commit abc1234", "wait_for": ""},
+            {"op": "merge", "expected_version": 7, "merged_into_id": "L1"},
+            {"op": "cancel", "expected_version": 8},
+            {"op": "cancel", "expected_version": 8, "close_reason": "dup"},
+        ])
+
+    def test_ledger_rejects_bad_args_locally_and_surfaces_version_conflicts(self):
+        FakeDaemon.routes["PATCH /api/projects/p1/ledger/L3"] = (409, {"error": "ledger_version_conflict", "current_version": 9, "current_owner_bot_id": "bot-b"})
+        env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+        with patch.dict(os.environ, env):
+            os.environ.pop("AM_PROJECT_ID", None)
+            self.assertEqual(self.bad("ledger", "list")["error"], "no_project")
+        with patch.dict(os.environ, dict(env, AM_PROJECT_ID="p1")):
+            self.assertNotEqual(self.run_cli("ledger", "claim", "L3")[0], 0, "--expect-version 必填")
+            self.assertNotEqual(self.run_cli("ledger", "merge", "L3", "--expect-version", "1")[0], 0, "--into 必填")
+            self.assertEqual(self.bad("ledger", "update", "L3", "--expect-version", "1")["error"], "bad_args")
+            self.assertEqual(FakeDaemon.seen, [])
+            conflict = self.bad("ledger", "claim", "L3", "--expect-version", "4")
+            self.assertIn("ledger_version_conflict", json.dumps(conflict))
+            self.assertIn("9", json.dumps(conflict))
+
     def test_lineage_pick_single_cross_and_unmatched(self):
         res = self.ok("lineage", "pick", "web/src/App.tsx", "web/package.json")
         self.assertEqual(res["line"], "web")

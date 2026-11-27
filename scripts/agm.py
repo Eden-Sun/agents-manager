@@ -1586,6 +1586,40 @@ def cmd_lineage_advance(client: Client, cfg: dict, args) -> object:
 def cmd_lineage_retire(client: Client, cfg: dict, args) -> object:
     return client.post(_lineage_path("/retire"), {"session_id": args.session_id})
 
+def _ledger_path(tail: str = "") -> str:
+    return "/api/projects/" + urllib.parse.quote(_project_id(), safe="") + "/ledger" + tail
+
+def _ledger_item_path(item: str) -> str:
+    item = item.strip()
+    if not item:
+        raise AgmError("bad_args", "需要帳本項目（L<編號> 或 id）", 2)
+    return _ledger_path("/" + urllib.parse.quote(item, safe=""))
+
+def cmd_ledger_list(client: Client, cfg: dict, args) -> object:
+    """列出本專案的承諾帳本（預設 open，含待驗收 answered）；--owner 可給 bot id 或 unassigned。"""
+    return client.get(_ledger_path(), {"status": args.status, "owner": args.owner, "source_message_id": args.source_message_id})
+
+_LEDGER_UPDATE_FIELDS = ("title", "status", "deliverable", "next_step", "wait_for", "due_at", "owner_bot_id", "close_reason", "deploy_sha")
+
+def cmd_ledger_patch(client: Client, cfg: dict, args) -> object:
+    """PATCH 一個帳本項目：op 由子命令決定，只送有給的欄位；版本不符時 daemon 回 409 ledger_version_conflict。"""
+    body: dict = {"op": args.ledger_command, "expected_version": args.expect_version}
+    if args.ledger_command == "update":
+        for key in _LEDGER_UPDATE_FIELDS:
+            value = getattr(args, key, None)
+            if value is not None:
+                body[key] = value
+        if len(body) == 2:
+            raise AgmError("bad_args", "ledger update 至少要改一個欄位", 2)
+    elif args.ledger_command in ("claim", "handback"):
+        if args.owner_bot_id:
+            body["owner_bot_id"] = args.owner_bot_id
+    elif args.ledger_command == "merge":
+        body["merged_into_id"] = args.into
+    elif args.ledger_command == "cancel" and args.reason:
+        body["close_reason"] = args.reason
+    return client.patch(_ledger_item_path(args.item), body)
+
 def _valid_line(line: str) -> bool:
     return (
         bool(line)
@@ -3306,6 +3340,42 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
     s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
     s.set_defaults(func=cmd_peers)
+    s = sub.add_parser("ledger", help="承諾帳本（#1862）：list 同專案都可讀；claim／handback／update／merge／cancel 限管理入口（管理者、代班副管理者）")
+    ledger = s.add_subparsers(dest="ledger_command", required=True)
+    s = ledger.add_parser("list", help="列出帳本項目（每項帶 code＝L<編號> 與 version）")
+    s.add_argument("--status", help="open（預設，含待驗收 answered）、all，或逗號分隔的狀態")
+    s.add_argument("--owner", help="承辦 bot id，或 unassigned")
+    s.add_argument("--source-message-id", dest="source_message_id", help="只看從這則訊息拆出的項目")
+    s.set_defaults(func=cmd_ledger_list)
+
+    def _ledger_item(p) -> None:
+        p.add_argument("item", help="項目：L<編號> 或 id")
+        p.add_argument("--expect-version", dest="expect_version", type=int, required=True, help="list 看到的 version；不符回 409")
+        p.set_defaults(func=cmd_ledger_patch)
+
+    s = ledger.add_parser("claim", help="認領：承辦人設為自己（或 --owner）")
+    _ledger_item(s)
+    s.add_argument("--owner", dest="owner_bot_id", help="承辦 bot id（預設自己）")
+    s = ledger.add_parser("handback", help="交回：沒給 --to 就回到待接手佇列")
+    _ledger_item(s)
+    s.add_argument("--to", dest="owner_bot_id", help="交給這顆管理入口 bot")
+    s = ledger.add_parser("update", help="分流、改內容或交件（交件＝--status answered 並填 --deliverable）")
+    _ledger_item(s)
+    s.add_argument("--title")
+    s.add_argument("--status", help="例 following、waiting、answered、done")
+    s.add_argument("--deliverable", help="交了什麼")
+    s.add_argument("--next-step", dest="next_step")
+    s.add_argument("--wait-for", dest="wait_for", help="等待條件；空字串清掉")
+    s.add_argument("--due-at", dest="due_at", help="RFC 3339 時間")
+    s.add_argument("--owner", dest="owner_bot_id", help="指定承辦人")
+    s.add_argument("--close-reason", dest="close_reason")
+    s.add_argument("--deploy-sha", dest="deploy_sha", help="部署 commit（7–40 位 hex）；空字串清掉")
+    s = ledger.add_parser("merge", help="併入另一項（狀態改 merged）")
+    _ledger_item(s)
+    s.add_argument("--into", required=True, help="併入的目標：L<編號> 或 id")
+    s = ledger.add_parser("cancel", help="取消（狀態改 cancelled）")
+    _ledger_item(s)
+    s.add_argument("--reason", help="取消原因（預設 cancelled）")
     s = sub.add_parser("lineage", help="codex session 血統（#1943）：按模組線記檢查點；list 同專案都可讀，其餘限管理者／AGM（母子模式為頂層 bot）")
     lineage = s.add_subparsers(dest="lineage_command", required=True)
 
@@ -3487,7 +3557,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult", "ops-alert", "project", "identity") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "ledger", "consult", "ops-alert", "project", "identity") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)
