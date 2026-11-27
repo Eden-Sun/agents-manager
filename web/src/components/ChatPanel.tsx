@@ -365,7 +365,7 @@ export function LiveBubble({
           {from ? <span className="msg-from">{from}</span> : null}
           <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
           {}
-          <span>{text ? (act ? `${t('輸出中…')} · ${act}` : t('輸出中…')) : (act ?? t('等待回覆…'))}</span>
+          <span className="live-activity">{text ? (act ? `${t('輸出中…')} · ${act}` : t('輸出中…')) : (act ?? t('等待回覆…'))}</span>
           {isApiKind(kind) && botId ? <ApiTurnProgress botId={botId} /> : null}
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>

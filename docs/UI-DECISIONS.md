@@ -228,6 +228,7 @@
 
 - 訊息結構：18px metadata 列＋氣泡；hook／系統輸出有左 rail 與 monospace 來源標；來源標只在非 `hook` 時畫。
 - 輸出中的半成品預設收著（「輸出中…」＋「看目前內容」）；回合進行中輸入框不鎖，Enter 直接請 daemon 排一格（issue #733 的 `queue_if_busy:true`），不是瀏覽器記憶體暫存。daemon turn 與 user message 是唯一狀態源，任何網址、分頁與裝置都顯示同一則；composer 顯示「已排隊，Bot 這回合結束後會自動送出」及原文，提供「撤回並放回」按鈕。
+- **窄寬不裁切進行中的列（2026-11-27，UI 體檢 ⑦⑧）**：半成品下方的活動文字放不下時以省略號收，「看目前內容」不縮、永遠完整可點；手機（≤640px）的 Running 橫幅收成一列——狀態字（例「執行中 · 送出排隊」）讓位給按鈕、放不下時省略（全文在 `title`），按鈕不換行、維持 32px 高。
   槽位已被佔用時第二次送出由 daemon 回 `queue_slot_taken`，保留原列與輸入框草稿；不覆蓋或搬動第一則。撤回只對 daemon 尚未領走的 queued turn 成功，原文字與已上傳附件卡片放回輸入列；已領走就照實說可能已送出，不假裝撤回或再送一次。重試排程由 daemon 的 lifecycle queue 負責；「插隊」與「補充」仍只作用於輸入框中的草稿，不改寫那筆 daemon 佇列。
   daemon retryable 409（最常見是有人在那顆 bot 的終端打了字沒送）時保留 turn 並退避：1s 起加倍、封頂 30s，連同第一次共七次之後停手，訊息留在佇列並講一次「先停下來了」（#530；以前是每收到一幀 `bot_status` 就重送一次、跳一則一樣的 toast）。同一則通知還掛在畫面上時不再疊第二張。
   ![Desktop queued-send row](screenshots/queued-send/queued-send-desktop.png) ![Phone queued-send row](screenshots/queued-send/queued-send-mobile-390.png)

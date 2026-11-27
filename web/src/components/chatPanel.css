@@ -148,6 +148,16 @@
   color: var(--text);
 }
 
+.msg.live .live-activity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg.live .live-peek {
+  flex: none;
+}
+
 .msg-meta {
   display: flex;
   align-items: center;
@@ -857,13 +867,17 @@
   }
 
   .bot-composer .composer-lock.running > span:first-child {
-    flex: 1 0 auto;
+    flex: 1 1 0;
+    min-width: 4em;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .bot-composer .composer-lock.running .mini-btn {
     min-height: 32px;
     padding: 0 6px;
+    white-space: nowrap;
   }
 
   .bot-composer .composer-box {
