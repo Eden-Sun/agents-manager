@@ -964,5 +964,30 @@ equals "完全沒有舊版這一輪不算失敗" "$(cat "$AGM_DIR/release-triage
 check_no "完全沒有舊版不推 ops alert" "ops-alert" "$AGM_DIR/calls.log"
 teardown
 
+setup
+mk_pending claude 2.1.279 2.1.279; mk_empty codex
+python3 - "$ROOT/triage/claude.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pending"][0]["kept"][0]["text"] = "x" * 100000
+json.dump(d, open(sys.argv[1], "w"))
+PY
+(trap '' PIPE; bash "$SCRIPT") 2>"$ROOT/sigpipe.err"
+equals "SIGPIPE 被忽略（systemd）且 changelog 很大時照常派工" "$(assigns)" "1"
+check_no "SIGPIPE 被忽略且 changelog 很大時不印 Broken pipe" "Broken pipe" "$ROOT/sigpipe.err"
+teardown
+
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+sleep 1
+mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+(trap '' PIPE; bash "$SCRIPT") 2>"$ROOT/sigpipe-binary.err"
+equals "SIGPIPE 被忽略時 binary-only 照常派工" "$(assigns)" "1"
+check_no "binary-only（python 不讀 stdin 的分支）不印 Broken pipe" "Broken pipe" "$ROOT/sigpipe-binary.err"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

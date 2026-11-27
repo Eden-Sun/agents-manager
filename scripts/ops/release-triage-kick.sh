@@ -213,11 +213,11 @@ for KIND in claude codex agy grok; do
     [ -e "$NO_PUBLISH_NOTE" ] || { log "bin/agm 不認得 release-triage（舊版，exit 2），略過 publish 重試；換新 agm 後才會有效"; : > "$NO_PUBLISH_NOTE"; }
     break
   elif [ "$RC" -ne 0 ]; then
-    note_fail "release-triage publish --kind ${KIND} 失敗（rc=${RC}）：$(printf '%s' "$OUT" | head -c 200)"
+    note_fail "release-triage publish --kind ${KIND} 失敗（rc=${RC}）：$(head -c 200 <<< "$OUT")"
     continue
   fi
   rm -f "$NO_PUBLISH_NOTE" 2>/dev/null
-  printf '%s' "$OUT" | KIND="$KIND" python3 -c '
+  KIND="$KIND" python3 -c '
 import json, os, sys
 try:
     res = json.load(sys.stdin).get("results") or []
@@ -228,7 +228,7 @@ for r in res:
     if x.get("outcome") in ("published", "failed"):
         print("%s %s：publish %s%s" % (r.get("kind") or os.environ["KIND"], r.get("version"), x["outcome"],
                                        "（" + str(x["error"])[:200] + "）" if x.get("error") else ""))
-' 2>/dev/null | while IFS= read -r _l; do log "$_l"; done
+' <<< "$OUT" 2>/dev/null | while IFS= read -r _l; do log "$_l"; done
 done
 
 ISSUE_TASK="$DIR/release-issue-task.md"
@@ -242,7 +242,7 @@ for KIND in "$@"; do
     note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
     continue
   fi
-  TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" SKIPPED="$SKIPPED" python3 -c '
+  TODO=$(HANDED="$HANDED" SKIPPED="$SKIPPED" python3 -c '
 import json, os, sys
 try:
     data = json.load(sys.stdin)
@@ -267,7 +267,7 @@ for r in rows:
             continue
         ref = i.get("url") or ("https://github.com/%s/issues/%s" % (data["repo"], i["number"]) if data.get("repo") else "-")
         print("ready\t%s\t%s\t%s\t%s" % (i["number"], ref, r.get("kind") or "", r.get("version") or ""))
-' 2>/dev/null)
+' <<< "$SHOW" 2>/dev/null)
   if [ "$?" -ne 0 ]; then
     note_fail "release-triage show --kind ${KIND} 回傳資料無法解析，尚未交接的 issue 留待下一輪"
     continue
@@ -360,14 +360,14 @@ except Exception:
 
 api_triage() {
   _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || { log "查不到 API 模式，這輪不派協調者"; return 3; }
-  _enabled=$(printf '%s' "$_en" | python3 -c 'import json,sys; v=json.load(sys.stdin)["enabled"]; assert isinstance(v,bool); print(1 if v else 0)' 2>/dev/null) || return 3
+  _enabled=$(python3 -c 'import json,sys; v=json.load(sys.stdin)["enabled"]; assert isinstance(v,bool); print(1 if v else 0)' <<< "$_en" 2>/dev/null) || return 3
   [ "$_enabled" = 1 ] || return 0
   _vargs=(); _vcount=0
   while IFS= read -r _v; do
     [ -n "$_v" ] || continue
     _vargs+=(--version "$_v"); _vcount=$((_vcount + 1))
-  done <<< "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
-for p in json.load(sys.stdin)["pending"]: print(p["version"])' 2>/dev/null)"
+  done <<< "$(python3 -c 'import json,sys
+for p in json.load(sys.stdin)["pending"]: print(p["version"])' <<< "$PAYLOAD" 2>/dev/null)"
   [ "$_vcount" -gt 0 ] || return 3
   _dargs=()
   if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ] && [ -f "$BINDIFF" ]; then
@@ -382,7 +382,7 @@ for p in json.load(sys.stdin)["pending"]: print(p["version"])' 2>/dev/null)"
     log "release-triage auto --kind ${KIND} 失敗，API 模式不派協調者"
     return 3
   }
-  _rest=$(printf '%s' "$_out" | AUTO_OUT="$_out" PAYLOAD="$PAYLOAD" TO="$TO" python3 -c '
+  _rest=$(AUTO_OUT="$_out" PAYLOAD="$PAYLOAD" TO="$TO" python3 -c '
 import json, os, sys
 try:
     res = json.load(sys.stdin)["results"]
@@ -405,8 +405,8 @@ payload["to"] = to or payload.get("to")
 print("%d %d" % (len(pend), 1 if json.loads(os.environ["AUTO_OUT"]).get("binary_used") else 0))
 print(to)
 print(json.dumps(payload, ensure_ascii=False, indent=2))
-' 2>>"$LOG") || return 3
-  _head=$(printf '%s\n' "$_rest" | sed -n 1p)
+' <<< "$_out" 2>>"$LOG") || return 3
+  _head=$(sed -n 1p <<< "$_rest")
   _left=${_head%% *}; _bin=${_head##* }
   if [ "$_bin" = 1 ]; then
     if write_claude_state "$CLAUDE_DIFF_NEW"; then
@@ -417,8 +417,8 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
     fi
   fi
   if [ "$_left" = 0 ]; then return 3; fi
-  TO=$(printf '%s\n' "$_rest" | sed -n 2p)
-  PAYLOAD=$(printf '%s\n' "$_rest" | sed 1,2d)
+  TO=$(sed -n 2p <<< "$_rest")
+  PAYLOAD=$(sed 1,2d <<< "$_rest")
   return 3
 }
 
@@ -432,7 +432,7 @@ for KIND in claude codex agy grok; do
     PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
   }
   if [ "$BINARY_ONLY" -eq 0 ]; then
-  PICK=$(printf '%s' "$REPORT" | MAXV="$MAX_VERSIONS" MAXE="$MAX_ENTRIES" python3 -c '
+  PICK=$(MAXV="$MAX_VERSIONS" MAXE="$MAX_ENTRIES" python3 -c '
 import json, os, sys
 d = json.load(sys.stdin)
 pend = [p for p in (d.get("pending") or []) if isinstance(p, dict)]
@@ -453,7 +453,7 @@ out["pending"] = picked
 out["deferred_versions"] = [p.get("version") for p in pend[len(picked):]]
 print(to)
 print(json.dumps(out, ensure_ascii=False, indent=2))
-' 2>>"$LOG"); RC=$?
+' <<< "$REPORT" 2>>"$LOG"); RC=$?
   case $RC in
     0) ;;
     3)
@@ -477,8 +477,8 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
       ;;
   esac
   if [ "$BINARY_ONLY" -eq 0 ]; then
-    TO=$(printf '%s\n' "$PICK" | head -1)
-    PAYLOAD=$(printf '%s\n' "$PICK" | sed 1d)
+    TO=$(head -1 <<< "$PICK")
+    PAYLOAD=$(sed 1d <<< "$PICK")
   fi
   fi
 
@@ -490,7 +490,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
     fi
   else
     _mode=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || continue
-    _enabled=$(printf '%s' "$_mode" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' 2>/dev/null) || continue
+    _enabled=$(python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' <<< "$_mode" 2>/dev/null) || continue
     if [ "$_enabled" = 1 ]; then
       log "API 模式缺 changelog，跳過 binary-only 協調者派工"
       continue
@@ -512,7 +512,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
       printf '\n\n---\n本輪沒有待分診的 changelog 版本；以下 JSON 的 pending 為空，只需完成 binary diff 並在同一則通知回報。\n\n```json\n%s\n```\n' "$PAYLOAD"
     else
       printf '\n\n---\n本次：kind=%s，%s 版待分診（新版 %s）。以下 JSON 是 `agents-managerd release-triage-check` 的輸出，逐條 verdict 用它的 `id`。\n\n```json\n%s\n```\n' \
-        "$KIND" "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')" "$TO" "$PAYLOAD"
+        "$KIND" "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))' <<< "$PAYLOAD")" "$TO" "$PAYLOAD"
     fi
     if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
       cat "$CLAUDE_DIFF_TASK"
@@ -528,7 +528,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
       continue
     }
   fi
-  ASSIGN_ID=$(printf '%s' "$SHOW_ASSIGN" | PAYLOAD="$PAYLOAD" KIND="$KIND" TO="$TO" BINARY_ONLY="$BINARY_ONLY" \
+  ASSIGN_ID=$(PAYLOAD="$PAYLOAD" KIND="$KIND" TO="$TO" BINARY_ONLY="$BINARY_ONLY" \
     BINARY_OLD="$CLAUDE_DIFF_OLD" BINARY_NEW="$CLAUDE_DIFF_NEW" python3 -c '
 import hashlib, json, os, sys
 try:
@@ -560,18 +560,18 @@ try:
 except Exception as exc:
     print(f"cannot build assignment request-id: {exc}", file=sys.stderr)
     sys.exit(1)
-  ' 2>>"$LOG") || {
+  ' <<< "$SHOW_ASSIGN" 2>>"$LOG") || {
     note_fail "讀不到 ${KIND} 帳本目前代號，這輪不派工"
     continue
   }
   if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
        --request-id "$ASSIGN_ID" >> "$LOG" 2>&1; then
     log "${KIND} → ${TO}：已派 ${BOT} 分診"
-    VERS=$(printf '%s' "$PAYLOAD" | python3 -c '
+    VERS=$(python3 -c '
 import json, sys
 for p in json.load(sys.stdin)["pending"]:
     print(p["version"])
-' 2>>"$LOG") || VERS=""
+' <<< "$PAYLOAD" 2>>"$LOG") || VERS=""
     VARGS=(); VARGS_COUNT=0
     while IFS= read -r _v; do
       [ -n "$_v" ] || continue
