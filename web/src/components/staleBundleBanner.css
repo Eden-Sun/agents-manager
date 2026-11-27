@@ -73,3 +73,9 @@
     border-color: #6b5520;
   }
 }
+
+:root[data-theme='dark'] .stale-bundle-banner {
+  background: #3a2f10;
+  color: #ffe9a8;
+  border-color: #6b5520;
+}
