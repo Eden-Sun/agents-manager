@@ -2148,7 +2148,7 @@ button.pane-toggle:hover:not(:disabled) {
 .notices {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: calc(var(--composer-bottom-offset, 64px) + 12px);
   display: flex;
   flex-direction: column;
   gap: 8px;

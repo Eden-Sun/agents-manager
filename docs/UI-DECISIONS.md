@@ -1915,3 +1915,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 過期或超量清除後，縮圖位置顯示「已過期」（原本的「已清除」文案改掉），提示寫明保留 7 天、每顆 bot 上限 200 MB。
 - 產圖額度用盡只在回合上留一則說明，文案明講「與文字額度分開計算，不影響這顆 bot 的文字回合」。
 
+
+## 桌機 toast 讓開輸入列、額度 stale 改小點、active 鈕副標對比（2026-11-27，UI 體檢任務 A）
+
+- **toast**：寬於 1366px 的桌機，`.notices` 改墊在輸入列上方（`bottom: calc(var(--composer-bottom-offset, 64px) + 12px)`；`--composer-bottom-offset` 由 ChatPanel 依 dock 實高寫入）。沒有 dock 的頁面（專案設定）用 64px 後備，高過 sticky Save 列。平板（top 136px）、手機（輸入列上方膠囊）、modal 開啟時讓到左下角的規則不變。
+- **額度 stale**：`舊`／`stale` 字樣不再以上標疊在進度條上，改成窗口標籤左側 5px 黃點（`--lamp-yellow`），文字保留給讀屏，完整說明仍在 tooltip。
+- **active 選項鈕副標**：`.opt.on` 裡的 `field-note`（如「不在清單」「舊版」）改用 `var(--accent-text)`。不加透明度：亮色主題白字在 `#2f6fe4` 上只有 4.65:1，打 0.9 透明就掉到約 4.0:1；深色主題約 7.7:1。

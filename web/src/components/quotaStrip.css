@@ -290,12 +290,23 @@
   text-align: right;
 }
 
+.quota-window-name:has(> .quota-window-stale) {
+  position: relative;
+}
+
 .quota-window-stale {
-  margin-left: 1px;
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--lamp-yellow);
+  position: absolute;
+  top: 50%;
+  left: -5px;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lamp-yellow);
+  overflow: hidden;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
   cursor: help;
 }
 

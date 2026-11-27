@@ -50,6 +50,10 @@
   color: inherit;
 }
 
+.opt-group .opt.on .field-note {
+  color: var(--accent-text);
+}
+
 @media (width <= 640px) {
 
   .live-note:not(.primary) {
