@@ -1191,6 +1191,7 @@ mod arc_port_73_turneventhostservices {
     impl<T: crate::lifecycle::s6_ports::TurnEventHostServices + ?Sized> crate::lifecycle::s6_ports::TurnEventHostServices for std::sync::Arc<T> {
         fn child_done_after_completed_turn(&self, turn_id: &str) { <T as crate::lifecycle::s6_ports::TurnEventHostServices>::child_done_after_completed_turn(self.as_ref(), turn_id) }
         fn publish_lifecycle_turn(&self, bot_id: &str, turn_id: &str, status: &str, delivery: &str) { <T as crate::lifecycle::s6_ports::TurnEventHostServices>::publish_lifecycle_turn(self.as_ref(), bot_id, turn_id, status, delivery) }
+        fn ask_answers_after_fallback<'a>(&'a self, bot_id: &'a str, run_id: &'a str, turn_id: &'a str) -> impl Future<Output = ()> + Send + 'a { <T as crate::lifecycle::s6_ports::TurnEventHostServices>::ask_answers_after_fallback(self.as_ref(), bot_id, run_id, turn_id) }
     }
 }
 

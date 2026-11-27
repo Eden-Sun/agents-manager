@@ -65,6 +65,19 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
     Ok(())
 }
 
+/// 終端備援收掉回合（Stop hook 沒到）之後補記：同 [`after_turn_end`]，本機 bot 讀 run 記的 transcript。
+pub(crate) async fn after_fallback(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str) -> Result<()> {
+    let body = crate::hook_body::HookBody {
+        bot_id: bot_id.to_owned(),
+        provider: "claude".into(),
+        payload: serde_json::json!({"hook_event_name": "Stop"}),
+        received_at: None,
+        truncated: false,
+        run_id: Some(run_id.to_owned()),
+    };
+    after_turn_end(app, &body, Some(run_id), turn_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +142,46 @@ mod tests {
         assert_eq!(imported, 0, "外部 JSONL 的答案不能混進本機 bot 對話");
         let still_here: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE id=?").bind(&turn).fetch_optional(&app.db).await.unwrap();
         assert_eq!(still_here.as_deref(), Some(turn.as_str()));
+    }
+
+    /// Stop hook 沒到、回合由終端備援收掉：從 run 記的本機 transcript 補記答案。
+    #[tokio::test]
+    async fn fallback_closed_turn_records_answers_from_the_run_transcript() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ask-after-fallback").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?, 'web', 'completed_fallback', 'ok', ?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let scratch = crate::testing::track(std::env::temp_dir().join(format!("am-ask-fallback-{}", db::ulid())));
+        let path = crate::testing::trusted_transcript(&app, &bot.id, &scratch, "t.jsonl").await;
+        let log = [ask("fallback-tool-id", qs()), answered("fallback-tool-id", &db::now(), json!({"拋單怎麼處理？": "FALLBACK-ANSWER-2238"}))].join("\n");
+        std::fs::write(&path, log).unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy().as_ref()).bind(&run_id).execute(&app.db).await.unwrap();
+
+        after_fallback(&app, &bot.id, &run_id, &turn).await.unwrap();
+
+        let imported: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%FALLBACK-ANSWER-2238%'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(imported, 1, "備援收尾也要補記回合內已回答的提問");
+        after_fallback(&app, &bot.id, &run_id, &turn).await.unwrap();
+        let again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%FALLBACK-ANSWER-2238%'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(again, 1, "重複補記不重複寫");
     }
 
     #[tokio::test]

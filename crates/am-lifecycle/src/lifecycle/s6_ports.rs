@@ -659,6 +659,8 @@ impl<T> RelayWatchContext for T where
 pub trait TurnEventHostServices: Send + Sync {
     fn child_done_after_completed_turn(&self, turn_id: &str);
     fn publish_lifecycle_turn(&self, bot_id: &str, turn_id: &str, status: &str, delivery: &str);
+    /// 終端備援收掉回合之後補記回合內已回答的 `AskUserQuestion`（Stop hook 沒到時的對應）。
+    fn ask_answers_after_fallback<'a>(&'a self, bot_id: &'a str, run_id: &'a str, turn_id: &'a str) -> impl Future<Output = ()> + Send + 'a;
 }
 
 pub trait InterruptGraceHostServices: Send + Sync {

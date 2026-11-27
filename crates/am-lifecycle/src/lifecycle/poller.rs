@@ -1586,7 +1586,11 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
                     tracing::warn!(error = ?e, "hookless terminal capture failed");
                 }
             }
-            Ok(true) => {}
+            Ok(true) => {
+                if let Some(turn_id) = armed_for.as_deref() {
+                    app2.ask_answers_after_fallback(&bot_id, &run_id, turn_id).await;
+                }
+            }
             Err(e) => tracing::warn!(error = ?e, "terminal fallback failed"),
         }
         if let Err(e) = capture_codex_usage_notices(&app2, &bot_id, &run_id).await {

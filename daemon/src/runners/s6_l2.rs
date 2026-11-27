@@ -17,6 +17,14 @@ impl s6_ports::TurnEventHostServices for App {
             delivery: delivery.to_owned(),
         });
     }
+
+    fn ask_answers_after_fallback<'a>(&'a self, bot_id: &'a str, run_id: &'a str, turn_id: &'a str) -> impl Future<Output = ()> + Send + 'a {
+        Box::pin(async move {
+            if let Err(e) = crate::runners::ask_answers::after_fallback(&self.shared(), bot_id, run_id, turn_id).await {
+                tracing::warn!(bot = bot_id, run_id, turn = turn_id, error = ?e, "ask answers after terminal fallback failed");
+            }
+        })
+    }
 }
 
 impl s6_ports::InterruptGraceHostServices for App {
