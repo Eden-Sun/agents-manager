@@ -34,9 +34,11 @@
 }
 
 .mem-badge .mem-cpu {
+  flex: none;
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .mem-badge.mem-low,
@@ -50,7 +52,7 @@
   font-weight: 650;
 }
 
-@media (width <= 1366px) {
+@media (width <= 1760px) {
   .mem-badge .mem-cpu-k {
     display: none;
   }

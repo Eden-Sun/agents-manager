@@ -58,6 +58,7 @@
 
 .sidebar-head .head-ram.multi .mem-badge {
   flex-wrap: nowrap;
+  white-space: nowrap;
   justify-content: flex-start;
 }
 
