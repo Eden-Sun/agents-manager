@@ -7177,3 +7177,45 @@ fn only_the_limits_are_recorded_as_stop_reasons() {
     assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::EndTurn)), None);
     assert_eq!(limit_stop_reason(&Ok(crate::api_bot::runner::Halt::Refusal)), None);
 }
+
+/// #2230：openai-api 的更新區塊與 prompt 接在同一個字串裡。改指示後連續三回合：
+/// 第二回合補一次「[Instructions updated by AG Man]」，第三回合不再補。
+#[tokio::test]
+async fn openai_changed_instructions_add_update_block_only_once() {
+    let env = crate::testing::env().await;
+    let (endpoint, seen, shutdown, server) = openai_text_server("ok").await;
+    enable_fake_openai_runtime(&env, endpoint, Arc::new(OkTools(Arc::new(AtomicUsize::new(0))))).await;
+    let instructions_file = env.dir.join("AGENT-2230.md");
+    std::fs::write(&instructions_file, "V1 INSTRUCTIONS").unwrap();
+    let instr_path = instructions_file.to_str().unwrap().to_string();
+    env.app.cfg.update(move |c| { c.agents.instructions_file = Some(instr_path); Ok(()) }).await.unwrap();
+    let bot = insert_openai_bot(&env, "openai-instr-update").await;
+    let run = crate::lifecycle::start_bot(&env.app, &bot).await.expect("openai-api native start");
+    for (i, prompt) in ["turn 1 prompt", "turn 2 prompt", "turn 3 prompt"].into_iter().enumerate() {
+        if i == 1 {
+            std::fs::write(&instructions_file, "V2 UPDATED INSTRUCTIONS").unwrap();
+        }
+        let sent = crate::lifecycle::prompt(&env.app, &bot, prompt, &crate::db::ulid()).await.unwrap();
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: sent.turn_id };
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+    }
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    let last_user_text = |body: &Value| -> String {
+        let input = body["input"].as_array().unwrap();
+        let user = input.iter().rfind(|i| i["role"] == "user").unwrap();
+        user["content"][0]["text"].as_str().or_else(|| user["content"].as_str()).unwrap().to_string()
+    };
+    let t1 = last_user_text(&seen[0]);
+    let t2 = last_user_text(&seen[1]);
+    let t3 = last_user_text(&seen[2]);
+    assert!(!t1.contains("[Instructions updated by AG Man]"), "{t1}");
+    assert!(t2.starts_with("[Instructions updated by AG Man]\n\n"), "{t2}");
+    assert!(t2.contains("V2 UPDATED INSTRUCTIONS") && t2.ends_with("turn 2 prompt"), "{t2}");
+    assert!(!t3.contains("[Instructions updated by AG Man]"), "第三回合又補了一次：{t3}");
+    assert!(t3.contains("turn 3 prompt"), "{t3}");
+}

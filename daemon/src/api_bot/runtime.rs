@@ -2672,8 +2672,12 @@ async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner
     }
 }
 
+/// 最近一次「[Instructions updated by AG Man]」區塊是否已經是 `fresh`。
+/// claude-api 的更新區塊是獨立 text block，完全相等；openai-api 把區塊與使用者 prompt 接成同一字串
+/// （`{區塊}\n\n{prompt}`），所以字串內容也接受「區塊＋\n\n」開頭（#2230）。
 fn already_updated_with(messages: &[super::protocol::Message], fresh: &str) -> bool {
     let expected_prefix = format!("[Instructions updated by AG Man]\n\n{fresh}");
+    let expected_with_prompt = format!("{expected_prefix}\n\n");
     for m in messages.iter().rev() {
         if m.role == "user" {
             if let Some(blocks) = m.content.as_array() {
@@ -2690,7 +2694,7 @@ fn already_updated_with(messages: &[super::protocol::Message], fresh: &str) -> b
                     }
                 }
             } else if let Some(text) = m.content.as_str() {
-                if text == expected_prefix {
+                if text == expected_prefix || text.starts_with(&expected_with_prompt) {
                     return true;
                 }
                 if text.starts_with("[Instructions updated by AG Man]\n\n") {
