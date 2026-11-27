@@ -1350,15 +1350,12 @@ export function Sidebar() {
             {phone ? <UpdateQuotaChip /> : null}
           </div>
           <div className="head-brand-meta">
-            <PaneBadge />
+            <TabsBadge />
             <ThemeToggle />
             <ConnBadge socket={socket} connected={connected} />
           </div>
         </div>
-        <HeadMemBadges />
-        <div className="head-right">
-          <TabsBadge />
-        </div>
+        <HeadMemBadges pane={<PaneBadge />} />
       </div>
 
       {}

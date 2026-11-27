@@ -114,9 +114,10 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
   )
 }
 
-export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; children: React.ReactNode }) {
+export function MemPopover({ host: initialHost = LOCAL_HOST, hosts, children }: { host?: string; hosts?: string[]; children: React.ReactNode }) {
   const t = useT()
   const [open, setOpen] = useState(false)
+  const [host, setHost] = useState(initialHost)
   const [data, setData] = useState<MemProcesses | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -128,14 +129,14 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
 
   const gen = useRef(0)
   const inflight = useRef(0)
-  const load = useCallback(async () => {
+  const load = useCallback(async (target: string = host) => {
     const mine = ++gen.current
     inflight.current += 1
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(new DOMException(t('記憶體行程清單讀取逾時'), 'TimeoutError')), LOAD_TIMEOUT_MS)
     setLoading(true)
     try {
-      const d = await fetchMemProcesses(host, controller.signal)
+      const d = await fetchMemProcesses(target, controller.signal)
       if (mine !== gen.current) return
       setData(d)
       setErr(null)
@@ -235,6 +236,28 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
           aria-label={t('{title} 的記憶體明細', { title })}
           style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden', left: 0, top: 0 }}
         >
+          {hosts && hosts.length > 1 ? (
+            <div className="mem-pop-hosts" role="tablist" aria-label={t('主機')}>
+              {hosts.map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  role="tab"
+                  aria-selected={h === host}
+                  className={`mem-pop-host${h === host ? ' on' : ''}`}
+                  onClick={() => {
+                    if (h === host) return
+                    setData(null)
+                    setErr(null)
+                    setHost(h)
+                    void load(h)
+                  }}
+                >
+                  {h === LOCAL_HOST ? t('本機') : `@${h}`}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="mem-pop-head">
             <span className="mem-pop-title">
               {title} RAM {humanBytes(row?.total_bytes ?? 0)} · herdr {humanBytes(row?.herdr_bytes ?? 0)} · {t('{n} 個 process', { n: row?.processes ?? 0 })}
@@ -331,7 +354,10 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
         aria-expanded={open}
         aria-label={t('{title} 的記憶體明細', { title })}
         onClick={() => {
-          if (!open) void load()
+          if (!open) {
+            setHost(initialHost)
+            void load(initialHost)
+          }
           setOpen(!open)
         }}
       >

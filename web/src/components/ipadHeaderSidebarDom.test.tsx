@@ -54,12 +54,11 @@ test('環境設定副標拆成不可斷開的片段，窄側欄時整段換行�
   assert.match(block(side, '.env-note-part {'), /white-space: nowrap;/)
 })
 
-test('平板側欄頂部出現部署狀態時，RAM 膠囊移到第二列不再與 Deploying／主題鈕重疊', () => {
+test('側欄頂部出現部署狀態時，徽章橫排留在第一列，不把 RAM 或主題鈕擠到別列', () => {
   const side = css('./sidebar.css')
-  const media = block(side, '@media (width >= 641px) and (width <= 1366px) {')
-  assert.match(media, /\.sidebar-head:has\(\.head-deploy:not\(:empty\)\) \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto;/)
-  assert.match(media, /\.sidebar-head:has\(\.head-deploy:not\(:empty\)\) \.head-ram \{[^}]*grid-row: 2;[^}]*grid-column: 1 \/ -1;/)
-  assert.match(media, /\.head-ram\.multi \{[^}]*flex-wrap: wrap;/)
+  assert.match(block(side, '.sidebar-head .head-brand-title > .head-deploy {'), /flex-direction: row;[\s\S]*overflow: hidden;/)
+  assert.match(block(side, '.head-brand-title {'), /min-width: 0;[\s\S]*white-space: nowrap;/)
+  assert.match(block(side, '.head-brand-meta {'), /flex: none;/)
 })
 
 test('平板直向 bot header 標題收斂寬度，把空間讓給額度條', () => {

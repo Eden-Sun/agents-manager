@@ -210,3 +210,28 @@
     min-width: 40px;
   }
 }
+
+.mem-pop-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+
+.mem-pop-host {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.mem-pop-host.on {
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 650;
+}
