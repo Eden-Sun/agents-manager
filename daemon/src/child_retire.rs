@@ -27,6 +27,7 @@ pub(crate) trait IntentConnRepo {
 }
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
+/// 隱式退役的軟刪與「沒有執行中的 run」寫在同一句 UPDATE（#2236）：呼叫端在交易外判定之後，child 剛被接回就回 `Protected`。
 #[track_caller]
 pub(crate) fn retire<'a, C>(
     app: &'a C,
@@ -118,14 +119,26 @@ where
             }
         }
         tx.record_done_intent(RECORD_KIND, &bot.id, &host, &record).await?;
-        let n = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
-            .bind(db::now())
-            .bind(&bot.id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        let n = sqlx::query(
+            "UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL
+               AND (? = 0 OR NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = bots.id AND r.state IN ('starting','running','stopping')))",
+        )
+        .bind(db::now())
+        .bind(&bot.id)
+        .bind(i64::from(mode == Mode::Implicit))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         if n == 0 {
+            let still_here: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE id = ? AND deleted_at IS NULL)")
+                .bind(&bot.id)
+                .fetch_one(&mut *tx)
+                .await?;
             tx.rollback().await?;
+            if still_here {
+                tracing::info!(bot = %bot.name, bot_id = %bot.id, why, caller = %at, "child not retired: it came back with a live run after the retirement was decided");
+                return Ok(Outcome::Protected);
+            }
             return Ok(Outcome::AlreadyGone);
         }
         tx.commit().await?;
@@ -538,6 +551,38 @@ mod tests {
         assert_eq!(cause("promoted", None, Pane::Unknown), "promoted");
         assert_eq!(cause("promote_recovered", None, Pane::Present), "promoted");
         assert_eq!(cause("herdr_maintenance_closed", Some("pane exited"), Pane::Gone), "herdr_restarted");
+    }
+
+    /// #2236：維護關窗／reconcile 在交易外判定 child 沒有執行中的 run，之後 reconcile 把它接回（寫下 running run）。
+    /// 軟刪那一句要重查，不刪、也不留退役紀錄；明確退役（promote）不受影響。
+    #[tokio::test]
+    async fn a_child_adopted_after_the_retirement_was_decided_is_not_retired() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        let adopt_app = app.clone();
+        let adopt_id = kid.clone();
+        crate::race_point::arm("child_retire_before_transaction", &kid, move || async move {
+            sqlx::query("INSERT INTO runs (id, bot_id, state, pane_id, started_at) VALUES (?,?,'running','w1:p1',?)")
+                .bind(db::ulid())
+                .bind(&adopt_id)
+                .bind(db::now())
+                .execute(&adopt_app.db)
+                .await
+                .unwrap();
+        });
+
+        let outcome = retire(&app, &kid, "herdr_maintenance_closed", Mode::Implicit).await.unwrap();
+        assert_eq!(outcome, Outcome::Protected);
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none(), "接回的 child 還在");
+        let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intents WHERE kind='retire_child' AND subject_id=?")
+            .bind(&kid)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(records, 0, "沒退役就不留退役紀錄");
+
+        assert_eq!(retire(&app, &kid, "promoted", Mode::Explicit).await.unwrap(), Outcome::Retired, "明確退役照舊");
     }
 
     /// #554：`runs.exit_reason` 只記把 run 收成 exited 的那一次；之後別的路徑再收（CAS 輸掉）不改寫。

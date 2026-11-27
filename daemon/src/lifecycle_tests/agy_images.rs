@@ -97,6 +97,40 @@ mod agy_images_tests {
         assert_eq!(bytes.as_ref(), PNG);
     }
 
+    /// 收圖的交易失敗時不留孤兒檔：sweep 只照 `agy_images` 的列刪檔，沒有列指著的圖永遠清不掉。
+    /// 交易成功後圖才出現在正式位置，暫存檔不留。
+    #[tokio::test]
+    async fn a_failed_collection_leaves_no_image_file_behind() {
+        let sid = format!("img-{}", db::ulid());
+        let c = running_agy(&sid).await;
+        let app = c.env.app.clone();
+        let out = prompt(&app, &c.bot_id, "做一張圖", "agy-img-rollback").await.expect("直接送出");
+        std::fs::write(c.brain.join("mockup.png"), PNG).unwrap();
+        turn_controller::set_status(&app.db, &out.turn_id, "in_flight", "completed", "agy images test").await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_agy_images BEFORE INSERT ON agy_images BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        agy_images_collect::collect_due(&app).await;
+
+        let dir = crate::attach::local_copy_dir(&app, &c.bot_id).unwrap();
+        let files = |dir: &std::path::Path| -> Vec<String> {
+            std::fs::read_dir(dir).map(|it| it.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
+        };
+        assert!(files(&dir).is_empty(), "交易失敗不留圖檔：{:?}", files(&dir));
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE bot_id = ?").bind(&c.bot_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(rows, 0, "附件列一起回滾");
+
+        sqlx::query("DROP TRIGGER fail_agy_images").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE agy_image_marks SET next_at = NULL WHERE turn_id = ?").bind(&out.turn_id).execute(&app.db).await.unwrap();
+        agy_images_collect::collect_due(&app).await;
+        let left = files(&dir);
+        assert_eq!(left.len(), 1, "成功後只剩正式位置的一張：{left:?}");
+        assert!(left[0].starts_with("agy-") && left[0].ends_with(".png"), "{left:?}");
+        let path: String = sqlx::query_scalar("SELECT local_path FROM attachments WHERE bot_id = ?").bind(&c.bot_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), PNG);
+    }
+
     #[tokio::test]
     async fn a_prompt_queued_for_the_next_turn_takes_the_snapshot_too() {
         let sid = format!("img-{}", db::ulid());

@@ -127,12 +127,48 @@ async fn collect(app: &impl Host, mark: &agy_images::Mark) -> Result<&'static st
     }
     let dir = attach::local_copy_dir(app, &mark.bot_id)?;
     tokio::fs::create_dir_all(&dir).await?;
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(collected.images.len());
+    let written = store(app, mark, &conversation_id, &root, &dir, &collected, &notes, &mut staged).await;
+    let msg = match written {
+        Ok(msg) => msg,
+        Err(e) => {
+            for (tmp, _) in &staged {
+                let _ = tokio::fs::remove_file(tmp).await;
+            }
+            return Err(e);
+        }
+    };
+    for (tmp, local) in &staged {
+        if let Err(e) = tokio::fs::rename(tmp, local).await {
+            tracing::warn!(path = %local.display(), error = ?e, "agy images: collected image could not be moved into place");
+            let _ = tokio::fs::remove_file(tmp).await;
+        }
+    }
+    emit_message_added(app, &mark.bot_id, msg).await;
+    Ok("done")
+}
+
+/// 圖檔先寫成同目錄的暫存名（`.agy-<sha>.<ext>.stage-<ulid>`），收進 `staged`；交易提交後呼叫端才改名到正式位置，
+/// 交易失敗時呼叫端刪掉暫存檔，不留沒有列指著、sweep 永遠清不到的孤兒檔。
+#[allow(clippy::too_many_arguments)]
+async fn store(
+    app: &impl Host,
+    mark: &agy_images::Mark,
+    conversation_id: &str,
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    collected: &Collected,
+    notes: &[String],
+    staged: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<db::Message> {
     let mut tx = app.db().begin().await?;
-    let mut msg = insert_message_tx(&mut tx, &conversation_id, Some(&mark.turn_id), "assistant", &notes.join("\n"), "system", false, None).await?;
+    let mut msg = insert_message_tx(&mut tx, conversation_id, Some(&mark.turn_id), "assistant", &notes.join("\n"), "system", false, None).await?;
     let mut items = Vec::with_capacity(collected.images.len());
     for img in &collected.images {
         let local = dir.join(format!("agy-{}.{}", img.sha256, img.kind));
-        tokio::fs::write(&local, &img.bytes).await?;
+        let tmp = dir.join(format!(".agy-{}.{}.stage-{}", img.sha256, img.kind, db::ulid()));
+        staged.push((tmp.clone(), local.clone()));
+        tokio::fs::write(&tmp, &img.bytes).await?;
         let id = db::ulid();
         let name = img.rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| format!("agy-{}.{}", img.sha256, img.kind));
         let mime = agy_images::mime_of(img.kind);
@@ -166,8 +202,7 @@ async fn collect(app: &impl Host, mark: &agy_images::Mark) -> Result<&'static st
     msg.attachments_json = message_attachments_json(&items)?;
     sqlx::query("UPDATE agy_image_marks SET state = 'done' WHERE turn_id = ?").bind(&mark.turn_id).execute(&mut *tx).await?;
     tx.commit().await?;
-    emit_message_added(app, &mark.bot_id, msg).await;
-    Ok("done")
+    Ok(msg)
 }
 
 /// 推給畫面的 `message_added` 要帶跟 DB 同一份附件清單：訊息是附件綁上去之前插入的，不補的話畫面要重新整理才看得到圖。
