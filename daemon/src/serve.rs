@@ -309,6 +309,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     runners::hookrecv::spawn_spool_scanner(app.clone());
     panes::spawn_scanner(app.clone());
     crate::runners::build_scheduler::spawn_sweeper(app.clone());
+    crate::runners::build_counts::spawn_push(app.clone());
 
     supervisor::maintenance::release_restart_on_startup(&app).await;
     crate::runners::herdr_maintenance::arm_on_startup(&app).await;

@@ -234,6 +234,7 @@ mod tool_install_shell;
 pub(crate) mod shell_stream;
 mod read_marks;
 pub mod remote_cargo;
+pub mod remote_cargo_runs;
 mod reconcile;
 mod state;
 mod state_timing;

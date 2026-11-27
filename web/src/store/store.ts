@@ -1,4 +1,5 @@
 import { receiveCodexReset } from './codexReset'
+import { receiveBuildSlots } from './buildSlots'
 import { isApiKind } from '../components/kindMeta'
 import { handleToolInstallDone } from '../lib/toolInstallDone'
 import { autoInstallNotice } from './integrationAutoInstall'
@@ -3211,6 +3212,10 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         entry.apply?.()
       }, LIVE_THROTTLE_MS)
       liveThrottle.set(pendingKey, entry)
+      return
+    }
+    case 'build_slots_updated': {
+      receiveBuildSlots(data)
       return
     }
     case 'mem_updated': {

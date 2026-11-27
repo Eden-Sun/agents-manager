@@ -1137,6 +1137,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `quota_updated` | 見 §12.5 |
 | `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
+| `build_slots_updated` | 與 `GET /api/build-slots` 同形；有訂閱者時每 5 秒比一次，人數、每格 holder／狀態、各遠端人數或外部編譯明細變了才推（續約改 `expires_at` 不推）。不進重播環，重連後網頁自己重抓 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `update_restart_changed` | 見 §10.3b |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
@@ -1682,6 +1683,11 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 
 `remote.hosts`（#1956）是每台一格、照設定順序：`[{target, local, remote_reachable, checked_at, reason}]`（`target`＝`local` 或 `user@host:port`，`local`＝是不是本機執行器），
 沒開時是空陣列；頂層的 `target`／`remote_reachable`／`checked_at`／`reason` 維持是第一台的那格，舊的讀法不用改。
+
+即時人數（狀態列「建置 N」晶片）：
+- `remote.hosts[].active`／`waiting`：那台建置主機上守門 flock 住的 `<remote_root>/.slots/<n>`（正在跑）與 `.queue/<token>`（排隊）數，只試鎖、不建不刪。本機執行器在本機跑，其他一次 ssh，最多 2 秒，結果快取 5 秒；連不上、逾時或讀不懂是 `null`，不擋回應。指到 daemon 這台自己的熱池（`local`／`127.0.0.1`／`localhost`）時，本機原生 cargo 也拿同一組 `.slots`，所以扣掉本機 `held` 數（不小於 0）才不重算；本機 cargo 拿到 daemon 名額、還在等熱池那一下會少算一個。
+- `remote_runs`：`[{call_id, bot_id, purpose, since, target}]`，這台的 `remote-cargo` helper 每次呼叫在資料目錄 `remote-cargo-runs/<call_id>.json` 的登錄（`purpose`＝cargo 參數，最多 200 字；`target`＝排到的那台，`null`＝還在挑主機或排名額）。helper 整段持有該檔的 flock，鎖沒人持有的殘檔讀的時候刪掉。
+- `total_active`＝本機 `held` 數＋各台 `active`（`null` 不算）；`total_waiting`＝本機 `waiting` 數＋各台 `waiting`。
 
 `remote` 是外部編譯主機這一格（issue #428）：本機的隊伍排得再長，也要看得出來是不是因為遠端連不上、整批
 `check`／`test`／`clippy` 都退回本機在搶那兩個名額。`remote_reachable` 是**上一次真的嘗試**的結論

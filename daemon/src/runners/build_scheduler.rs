@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Value};
 use crate::build_scheduler::{
-    acquire, authenticate, field_limit_error, has_oversized_fields, release_as, renew, status,
+    acquire, authenticate, field_limit_error, has_oversized_fields, release_as, renew,
     sweep, up, AcquireIn, Acquired, ReleaseIn, RenewErr, RenewIn, MAX_FIELD_CHARS,
     MAX_ROWS_PER_BOT, SWEEP_EVERY,
 };
@@ -37,7 +37,7 @@ pub(crate) static PANIC_NEXT_TICK: std::sync::atomic::AtomicBool = std::sync::at
 pub(crate) static TICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub async fn get_status(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(status(app.as_ref()).await.map_err(up)?))
+    Ok(Json(super::build_counts::snapshot(app.as_ref()).await.map_err(up)?))
 }
 
 pub async fn post_acquire(

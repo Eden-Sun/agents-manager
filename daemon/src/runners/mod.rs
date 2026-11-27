@@ -15,6 +15,7 @@ pub mod background_jobs;
 mod background_tracking_tests;
 #[cfg(test)]
 mod quota_grok_probe_tests;
+pub mod build_counts;
 pub mod build_scheduler;
 pub mod bulk_restart;
 pub mod child_alerts;

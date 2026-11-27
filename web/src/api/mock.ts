@@ -1,5 +1,6 @@
 import { mockOpenAiBalance } from './mockOpenAiBalance'
 
+import { mockBuildSlots, type MockBuildScene } from './mockBuildSlots'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind, RuntimeSettings } from './types'
@@ -636,6 +637,7 @@ export class MockTransport implements Transport {
     (botId, projectId) => this.bots.some((b) => b.id === botId && b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
   )
   readonly remoteCargo = new MockRemoteCargo()
+  buildScene: MockBuildScene = 'idle'
   readonly integrationUpdates = new MockIntegrationUpdates()
   readonly herdrUpdate = new MockHerdrUpdate({
     emit: (type, data) => this.emit(type, data),
@@ -1191,6 +1193,7 @@ export class MockTransport implements Transport {
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     { const r = this.serverSchedules.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
+    if (method === 'GET' && rawPath === '/build-slots') return mockBuildSlots(this.buildScene, this.bots.map((x) => x.id))
     { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
     { const r = this.integrationUpdates.handle(method, rawPath, seg, b); if (r !== undefined) return r }
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
@@ -2323,6 +2326,11 @@ export class MockTransport implements Transport {
 
   remoteDraft(key: string, text: string) {
     this.serverDrafts.remote(key, text, (t, d) => this.emit(t, d))
+  }
+
+  setBuildScene(scene: MockBuildScene) {
+    this.buildScene = scene
+    this.emit('build_slots_updated', mockBuildSlots(scene, this.bots.map((x) => x.id)))
   }
 
   private emit(type: string, data: unknown) {
@@ -4376,6 +4384,7 @@ function installDevHelpers(mock: MockTransport) {
     hostUp: (name: string) => mock.setHostConnected(name, true),
     hosts: () => mock.hostNames(),
     remoteDemo: (host?: string) => mock.remoteDemo(host),
+    buildSlots: (scene: MockBuildScene) => mock.setBuildScene(scene),
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
     suggestion: (botIdOrName: string, text: string | null) => mock.setPromptSuggestion(mock.botIdByName(botIdOrName) ?? botIdOrName, text),

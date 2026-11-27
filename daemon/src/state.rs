@@ -40,7 +40,7 @@ pub const WS_MAX_INBOUND_BYTES: usize = 64 * 1024;
 pub use am_base::ws_event::WsEvent;
 
 pub fn is_ephemeral(kind: &str) -> bool {
-    kind == "turn_progress"
+    kind == "turn_progress" || kind == "build_slots_updated"
 }
 
 /// 事件廣播給所有 UI 連線，也留在重播環裡：欄位名含 `token` 或 `secret` 一律不外送（含巢狀；token 使用量計數除外）。
@@ -608,6 +608,11 @@ impl App {
 
     pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.bus.subscribe()
+    }
+
+    /// 現在有幾個事件訂閱者（UI 連線與暫時等事件的內部工作）；0＝沒人看，週期推送可以跳過。
+    pub fn ws_listeners(&self) -> usize {
+        self.bus.receiver_count()
     }
 
     /// 訂閱回合結束。沒有 ring buffer：落後的訂閱者拿到 `RecvError::Lagged`，自己回頭讀 DB。

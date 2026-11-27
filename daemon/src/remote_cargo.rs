@@ -550,7 +550,7 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
 
 /// 在建置主機上跑一段 POSIX sh（#1956）：ssh 主機照舊是 ssh＋登入 shell 包一層 `sh -c`；
 /// 本機執行器（`host = "local"`）直接 `sh -c`，其餘（守門腳本、目錄配置、manifest、失效 touch）全部同一套。
-fn host_shell(remote: &BuildRemoteCfg, data_dir: &Path, script: &str) -> anyhow::Result<Command> {
+pub(crate) fn host_shell(remote: &BuildRemoteCfg, data_dir: &Path, script: &str) -> anyhow::Result<Command> {
     if remote.is_local() {
         return local_shell(script);
     }
@@ -596,7 +596,7 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 /// 同 `Command::output`，但超過 `limit` 就砍掉子行程並回錯。
-fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::Result<std::process::Output> {
+pub(crate) fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::Result<std::process::Output> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = cmd.spawn()?;
     let pid = child.id() as i32;
@@ -3274,11 +3274,15 @@ fn run_offload_on_with_id_and_engine(
         return EXIT_ENGINE_NOT_ENABLED;
     }
     let mut used = 0;
+    let mut run = crate::remote_cargo_runs::RunGuard::start(data_dir, call_id, args);
     let result = (|| -> anyhow::Result<i32> {
         let (root, sub) = source_root(cwd);
         let (i, mut lease) = acquire(hosts, data_dir, &root, ctl)?;
         used = i;
         let remote = &hosts[i];
+        if let Some(run) = run.as_mut() {
+            run.running_on(&remote.target_label());
+        }
         let outcome = match lease.obs.outcome.as_deref() {
             Some("shared") => "shared",
             Some("isolated") => "isolated",
