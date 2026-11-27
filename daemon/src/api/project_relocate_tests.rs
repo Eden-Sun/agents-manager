@@ -153,3 +153,17 @@ async fn a_running_bot_a_taken_path_or_a_missing_dir_refuses() {
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "path_not_found"), "{err:?}");
     assert_eq!(project_path(&e).await, (old.clone(), old));
 }
+
+/// 軟刪的 bot 的 cwd 也跟著搬：還原後才不會指向舊路徑。
+#[tokio::test]
+async fn a_soft_deleted_bot_moves_with_the_project() {
+    let e = crate::testing::env().await;
+    let old = e.repo.to_string_lossy().to_string();
+    seed(&e, vec![]).await;
+    let new = moved(&e);
+    let gone = crate::testing::claude_bot(&e.app, &e.project_id, "reloc-gone").await;
+    sqlx::query("UPDATE bots SET cwd=?, deleted_at=? WHERE id=?").bind(format!("{old}/sub")).bind(db::now()).bind(&gone.id).execute(&e.app.db).await.unwrap();
+    relocate(&e, RequestPrincipal::User, &new).await.map_err(|e| format!("{e:?}")).unwrap();
+    let cwd: Option<String> = sqlx::query_scalar("SELECT cwd FROM bots WHERE id=?").bind(&gone.id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(cwd.as_deref(), Some(format!("{new}/sub").as_str()));
+}

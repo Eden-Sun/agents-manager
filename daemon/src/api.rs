@@ -2243,7 +2243,11 @@ async fn delete_bot_route(
     Query(q): Query<DeleteQuery>,
     principal: Option<Extension<RequestPrincipal>>,
 ) -> Result<Response, LcError> {
-    require_confirm_principal(&app, principal.map(|Extension(p)| p), q.confirm.as_deref()).await?;
+    let principal = principal.map(|Extension(p)| p);
+    if matches!(principal, Some(RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. })) {
+        refuse_last_manager(&app.db, &id).await?;
+    }
+    require_confirm_principal(&app, principal, q.confirm.as_deref()).await?;
     delete_bot_http(State(app), Path(id), Query(q)).await
 }
 
@@ -2265,6 +2269,23 @@ pub(crate) async fn delete_bot_route_for_test(
     principal: Option<Extension<RequestPrincipal>>,
 ) -> Result<Response, LcError> {
     delete_bot_route(state, path, query, principal).await
+}
+
+/// bot 刪除 expert 專案唯一的 manager：409 `last_manager`（使用者照舊交給 config 驗證）。
+async fn refuse_last_manager(pool: &sqlx::SqlitePool, id: &str) -> Result<(), LcError> {
+    let last: Option<String> = sqlx::query_scalar(
+        "SELECT b.project_id FROM bots b JOIN projects p ON p.id = b.project_id
+         WHERE b.id = ? AND b.deleted_at IS NULL AND b.parent_bot_id IS NULL AND b.role = 'manager' AND p.mode = 'expert'
+           AND (SELECT COUNT(*) FROM bots o WHERE o.project_id = b.project_id AND o.role = 'manager' AND o.parent_bot_id IS NULL AND o.deleted_at IS NULL) <= 1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(any_err)?;
+    match last {
+        Some(project_id) => Err(LcError::conflict("last_manager", json!({"bot_id": id, "project_id": project_id}))),
+        None => Ok(()),
+    }
 }
 
 async fn require_confirm_principal(app: &Arc<App>, principal: Option<RequestPrincipal>, confirm: Option<&str>) -> Result<(), LcError> {
@@ -3295,6 +3316,22 @@ async fn put_bot_role(
     Ok(response)
 }
 
+/// 非使用者（fleet operator）改 env 時能設定的鍵（#2234）：只放不涉及路徑、端點、憑證、行程注入的 claude 調校鍵，明確列出、不用前綴放行。
+pub(crate) const FLEET_ENV_ALLOWED_KEYS: [&str; 4] = [
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+];
+
+/// `current` → `next` 裡新增或改了值、又不在 [`FLEET_ENV_ALLOWED_KEYS`] 的鍵（排序過）。刪鍵一律放行。
+pub(crate) fn fleet_env_forbidden_keys(current: &BTreeMap<String, String>, next: &BTreeMap<String, String>) -> Vec<String> {
+    next.iter()
+        .filter(|(k, v)| current.get(*k) != Some(*v) && !FLEET_ENV_ALLOWED_KEYS.contains(&k.as_str()))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// PATCH 的 `env`：使用者，或對這顆 bot 成立 [`fleet_operator_over`] 的 fleet operator（使用者 2026-11-27 授權）。
 async fn patch_env_allowed(app: &Arc<App>, principal: &RequestPrincipal, id: &str) -> Result<bool, LcError> {
     match principal {
@@ -3328,6 +3365,15 @@ async fn patch_bot(
             }
         }
         b.env = Some(env);
+    }
+    if principal != RequestPrincipal::User {
+        if let Some(next) = b.env.as_ref() {
+            let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?.env();
+            let forbidden = fleet_env_forbidden_keys(&current, next);
+            if !forbidden.is_empty() {
+                return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "env_key_forbidden", "keys": forbidden})));
+            }
+        }
     }
     if (b.identity.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));

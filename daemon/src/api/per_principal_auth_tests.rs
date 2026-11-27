@@ -3094,23 +3094,53 @@ async fn a_fleet_operator_patches_env_but_not_args_or_persona() {
     let f = fleet_env().await;
     set_fleet_operators(&f.e, &[&f.operator.id]).await;
     let t = &f.target.id;
-    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env":{"FOO":"1","BAR":"2"}}"#).await;
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"1","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"2"}}"#).await;
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
-    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"FOO":"9","BAR":null,"BAZ":"3"}}"#).await;
-    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+        .bind(r#"{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"1","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"2","OLD_KEY":"x"}"#)
+        .bind(t)
+        .execute(&f.e.app.db)
+        .await
+        .unwrap();
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"9","CLAUDE_CODE_MAX_OUTPUT_TOKENS":null,"OLD_KEY":null}}"#).await;
+    assert!(r.starts_with("HTTP/1.1 200"), "deleting any key and setting an allowed one pass: {r}");
     let env = db::bot(&f.e.app.db, t).await.unwrap().unwrap().env();
-    assert_eq!(env, [("BAZ".to_string(), "3".to_string()), ("FOO".to_string(), "9".to_string())].into());
-    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env":{"AM_BOT_ID":"x"}}"#).await;
-    assert!(r.starts_with("HTTP/1.1 4") && !forbidden(&r), "reserved keys are still refused: {r}");
+    assert_eq!(env, [("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), "9".to_string())].into());
+    for body in [r#"{"env":{"AM_BOT_ID":"x"}}"#, r#"{"env_merge":{"FOO":"1"}}"#] {
+        let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), body).await;
+        assert!(forbidden(&r) && r.contains("env_key_forbidden"), "{body}: {r}");
+    }
     for body in [r#"{"args":["--x"]}"#, r#"{"persona":"p"}"#, r#"{"identity":"cc2"}"#] {
         let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), body).await;
         assert!(forbidden(&r), "PATCH {body} stays forbidden: {r}");
     }
     let plain = distinct_bot(&f.e, "fleet-env-plain").await;
     fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
-    let r = as_bot(&f.e, &plain, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"FOO":"0"}}"#).await;
+    let r = as_bot(&f.e, &plain, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"0"}}"#).await;
     assert!(forbidden(&r), "{r}");
-    assert_eq!(db::bot(&f.e.app.db, t).await.unwrap().unwrap().env().get("FOO").map(String::as_str), Some("9"));
+    assert_eq!(db::bot(&f.e.app.db, t).await.unwrap().unwrap().env().get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").map(String::as_str), Some("9"));
+}
+
+/// #2234：身份、端點、代理、行程注入的鍵 fleet operator 一律設不了，錯誤列出鍵名。
+#[tokio::test]
+async fn a_fleet_operator_cannot_set_identity_endpoint_or_injection_env_keys() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let t = &f.target.id;
+    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "HTTPS_PROXY", "PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS", "CLAUDE_CODE_OAUTH_TOKEN"] {
+        for body in [format!(r#"{{"env":{{"{key}":"/x"}}}}"#), format!(r#"{{"env_merge":{{"{key}":"/x"}}}}"#)] {
+            let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), &body).await;
+            assert!(forbidden(&r) && r.contains("env_key_forbidden") && r.contains(key), "{body}: {r}");
+        }
+    }
+    assert!(db::bot(&f.e.app.db, t).await.unwrap().unwrap().env().is_empty());
+}
+
+#[test]
+fn fleet_env_diff_only_flags_added_or_changed_keys_outside_the_list() {
+    let cur: std::collections::BTreeMap<String, String> = [("HOME".into(), "/h".into()), ("A".into(), "1".into())].into();
+    let next: std::collections::BTreeMap<String, String> = [("HOME".into(), "/h".into()), ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "5".into()), ("PATH".into(), "/p".into())].into();
+    assert_eq!(super::fleet_env_forbidden_keys(&cur, &next), vec!["PATH".to_string()], "unchanged and deleted keys pass");
 }
 
 #[tokio::test]

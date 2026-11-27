@@ -137,3 +137,38 @@ async fn expert_manager_hires_with_user_selected_settings_and_ignores_retired_po
     assert!(project.get("executor_pool").is_none());
 }
 
+
+/// 刪掉副管理者：config 的 `[projects.deputy]` 與 DB 的 `projects.deputy_bot_id` 一起清掉；bot 刪 expert 專案唯一的 manager → 409 `last_manager`。
+#[tokio::test]
+async fn deleting_the_deputy_clears_it_and_a_bot_cannot_delete_the_last_manager() {
+    let env = crate::testing::env().await;
+    seed(&env).await;
+    let manager = add(&env, "del-dep-manager").await;
+    let advisor = add(&env, "del-dep-advisor").await;
+    make_expert(&env, &manager).await;
+    let advisor_id = advisor.clone();
+    crate::projection::update_and_project(&env.app.cfg, &env.app.db, move |cfg| {
+        let p = cfg.projects.iter_mut().find(|p| p.mode == "expert").unwrap();
+        for b in &mut p.bots {
+            if b.id.as_deref() == Some(advisor_id.as_str()) { b.role = Some("advisor".into()); }
+        }
+        Ok(())
+    }).await.unwrap();
+    patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(serde_json::from_value::<PatchProject>(json!({"deputy": {"bot_id": advisor}})).unwrap())).await.unwrap();
+    let col = || sqlx::query_scalar::<_, Option<String>>("SELECT deputy_bot_id FROM projects WHERE id=?").bind(env.project_id.clone()).fetch_one(&env.app.db);
+    assert_eq!(col().await.unwrap(), Some(advisor.clone()));
+
+    let del = |id: &str, p: RequestPrincipal| delete_bot_route_for_test(State(env.app.clone()), Path(id.to_string()), Query(DeleteQuery { confirm: None }), Some(Extension(p)));
+    for p in [RequestPrincipal::Bot(advisor.clone()), RequestPrincipal::Bot(manager.clone())] {
+        match del(&manager, p).await {
+            Err(LcError::Conflict(v)) => assert_eq!(v["reason"], "last_manager", "{v}"),
+            other => panic!("expected 409 last_manager, got {:?}", other.map(|r| r.status())),
+        }
+    }
+    assert!(db::bot(&env.app.db, &manager).await.unwrap().unwrap().deleted_at.is_none());
+
+    del(&advisor, RequestPrincipal::User).await.map_err(|e| format!("{e:?}")).unwrap();
+    assert_eq!(col().await.unwrap(), None, "DB 投影清掉");
+    let cfg = env.app.cfg.get().await;
+    assert!(cfg.projects.iter().find(|p| p.id.as_deref() == Some(env.project_id.as_str())).unwrap().deputy.is_none(), "config 也清掉");
+}

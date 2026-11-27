@@ -156,6 +156,7 @@ async fn delete_from_config_at(at: &'static Location<'static>, store: &ConfigSto
             next.projects.retain(|p| !p.id.as_ref().is_some_and(|id| allow.projects.contains(id)));
             for p in next.projects.iter_mut() {
                 p.bots.retain(|b| !b.id.as_ref().is_some_and(|id| allow.bots.contains(id)));
+                p.clear_invalid_deputy();
             }
             let (live_projects, live_bots) = live_ids(&next);
             let (gone_bots, gone_projects) = removals(&db_bots, &db_projects, &live_projects, &live_bots, Some(&allow));

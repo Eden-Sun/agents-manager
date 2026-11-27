@@ -164,7 +164,7 @@ pub(crate) async fn rewrite_db(pool: &sqlx::SqlitePool, project_id: &str, r: &Re
     let from = r.old.chars().count() as i64 + 1;
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "UPDATE bots SET cwd = ? || substr(cwd, ?) WHERE project_id = ? AND deleted_at IS NULL AND (cwd = ? OR substr(cwd, 1, ?) = ?)",
+        "UPDATE bots SET cwd = ? || substr(cwd, ?) WHERE project_id = ? AND (cwd = ? OR substr(cwd, 1, ?) = ?)",
     )
     .bind(&r.new).bind(from).bind(project_id).bind(&r.old).bind(from).bind(&prefix)
     .execute(&mut *tx)
