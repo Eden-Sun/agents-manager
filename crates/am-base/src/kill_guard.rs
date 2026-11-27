@@ -30,6 +30,21 @@ pub const PKILL_DENY: &str = "擋下 pkill：pkill 一律不准用（不論 -f�
 pub const KILLALL_DENY: &str = "擋下 killall：killall 一律不准用（會殺掉同名的全部行程，包含其他 agent）。\
 正確做法：啟動時把 PID 記下來（`cmd & echo $!`），收尾時 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。";
 pub const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
+/// 守門自己跑不起來（hook 起不來、逾時、awk 失敗）時擋下的訊息：告訴 agent 這是暫時狀態、稍後重試，不要改寫成別的殺法。
+pub const KILL_GUARD_UNAVAILABLE_MSG: &str = "擋下 Bash：廣域 kill 守門暫時無法執行（daemon 換版或 hook 逾時），為安全起見先不放行。請稍後重試同一條指令。";
+
+/// 遠端主機的守門腳本檔名，裝在遠端根目錄（`~/<遠端根>/kill-guard.sh`），claude／grok／agy 的 PreToolUse 都指向它。
+pub const REMOTE_KILL_GUARD_SH: &str = "kill-guard.sh";
+
+/// 遠端版守門（2026-11-27 m4p `pkill -P 1` 事故）：POSIX sh＋POSIX awk，不依賴 jq／python，判定與 [`check_command`] 相同
+/// （`kill_guard.parity` 測試用同一批案例比對兩邊）。`$1` 是 provider；擋下時印各 CLI 的決策 JSON，判斷本身失敗就擋。
+pub fn remote_kill_guard_sh() -> String {
+    include_str!("kill_guard.sh")
+        .replace("__PKILL_DENY__", PKILL_DENY)
+        .replace("__KILLALL_DENY__", KILLALL_DENY)
+        .replace("__HOW_TO__", HOW_TO)
+        .replace("__UNAVAILABLE__", KILL_GUARD_UNAVAILABLE_MSG)
+}
 
 /// 一次判斷的共用狀態：「判不出來所以放行」的原因（給 hook 寫 stderr）。
 struct Ctx {

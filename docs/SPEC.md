@@ -988,7 +988,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 被擋時的訊息都寫明正確做法：啟動時把 PID 記下來（`cmd & echo $!`），收尾時 `kill $!` 或 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。
 
-**守門本身失效時一律擋下**（issue #2228）：PreToolUse 的 command hook 帶 `"onFailure": "block"`（Claude Code 2.1.295 起），hook 起不來（daemon 換版瞬間）、逾時或退出碼不對都會擋下 Bash；指令外層另包 `|| { echo <提示> >&2; exit 2; }`，舊版忽略 `onFailure` 時仍會擋並印出「暫時無法執行、稍後重試」。這只改 claude 本機 bot 的 PreToolUse；遠端 bot 沒有 PreToolUse 守門（見上），agy 的 PreToolUse 守門未改。
+**守門本身失效時一律擋下**（issue #2228）：PreToolUse 的 command hook 帶 `"onFailure": "block"`（Claude Code 2.1.295 起），hook 起不來（daemon 換版瞬間）、逾時或退出碼不對都會擋下 Bash；指令外層另包 `|| { echo <提示> >&2; exit 2; }`，舊版忽略 `onFailure` 時仍會擋並印出「暫時無法執行、稍後重試」。本機 claude 與遠端 claude 都這樣包；agy 本機的 PreToolUse 守門未改（dispatcher 失敗時放行），遠端 agy／grok 由 `kill-guard.sh` 自己在判斷失敗時印 deny（見下「遠端」）。
 
 受保護名單（`PROTECTED_NAMES`，不加 `-f` 時比對行程名）：`claude codex grok herdr agents-managerd agy antigravity node sh bash zsh sshd`（`node`：claude／codex 的 npm 安裝版行程名就是 node；shell：herdr pane 的 shell）。
 `-f` 時比對整條命令列，拿 `PROTECTED_CMDLINES` 的樣本試（claude 帶 bot 的 `--settings …/bots/<id>/…`、npm 版 `node …/claude-code/cli.js`、codex、grok、`herdr server`、`agents-managerd serve`、agy）。
@@ -1008,12 +1008,17 @@ PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的
 
 | CLI | 本機 bot | 子 agent | 遠端 bot |
 |---|---|---|---|
-| claude | ✅ 啟動時的 `--settings` 檔多一組 `PreToolUse`（`matcher: "Bash"`，同一支 hook 指令）。**既有 bot 要重啟才會拿到新的 `--settings`**（`kill` 規則本身在 hook binary，換 daemon 版本就生效） | ❌ 子 pane 是 `herdr agent start` 開的，沒有 `--settings`；`kill -9 -1`／`kill 0` 沒有守門，`pkill`／`killall` 由 shim 補 | ❌ 遠端 `hook.sh` 是 POSIX sh，沒有判斷邏輯；`pkill`／`killall` 由 shim 補，`kill` 內建沒有守門 |
-| agy | ✅ 全域 `~/.gemini/config/hooks.json` 的具名項多一個 `PreToolUse`（包 `{matcher:"*",hooks}`，指向 dispatcher；dispatcher 對 PreToolUse 原樣轉出 hook 的決策 JSON） | ✅ 全域檔、dispatcher 靠 pane env（子 pane 繼承 `AM_BOT_ID`）判斷歸屬 | ❌ 同上 |
-| grok | ✅ 本機 grok 的全域 hook 檔（`~/.grok/hooks/agents-manager[-<實例>].json`）多一個 `PreToolUse`（不帶 matcher，guard 只看 shell 指令）；`hooks_json_merged_local`。**既有 grok session 要重啟才會載入新檔** | （同本機，pane env 繼承） | ❌ 遠端 dispatcher 會把每個 PreToolUse 轉去 `hook.sh` spool，所以不帶；shim 補 `pkill`／`killall` |
+| claude | ✅ 啟動時的 `--settings` 檔多一組 `PreToolUse`（`matcher: "Bash"`，同一支 hook 指令）。**既有 bot 要重啟才會拿到新的 `--settings`**（`kill` 規則本身在 hook binary，換 daemon 版本就生效） | ❌ 子 pane 是 `herdr agent start` 開的，沒有 `--settings`；`kill -9 -1`／`kill 0` 沒有守門，`pkill`／`killall` 由 shim 補 | ✅ 遠端 `claude-settings.json` 的 `PreToolUse`（`matcher: "Bash"`）指向遠端根目錄的 `kill-guard.sh claude`，同樣 `onFailure: "block"`＋`\|\| { …; exit 2; }`。**既有遠端 bot 要重啟才生效** |
+| agy | ✅ 全域 `~/.gemini/config/hooks.json` 的具名項多一個 `PreToolUse`（包 `{matcher:"*",hooks}`，指向 dispatcher；dispatcher 對 PreToolUse 原樣轉出 hook 的決策 JSON） | ✅ 全域檔、dispatcher 靠 pane env（子 pane 繼承 `AM_BOT_ID`）判斷歸屬 | ✅ 遠端 `hooks.json` 具名項的 `PreToolUse` 直接指向 `kill-guard.sh agy`（不經遠端 dispatcher：它每個事件都回 `{}`，1.4.7 會當拒絕） |
+| grok | ✅ 本機 grok 的全域 hook 檔（`~/.grok/hooks/agents-manager[-<實例>].json`）多一個 `PreToolUse`（不帶 matcher，guard 只看 shell 指令）；`hooks_json_merged_local`。**既有 grok session 要重啟才會載入新檔** | （同本機，pane env 繼承） | ✅ 遠端 hook 檔的 `PreToolUse` 指向 `kill-guard.sh grok`（`hooks_json_merged_remote`，不經 dispatcher、不 spool）。既有 grok session 要重啟 |
 | codex | ❌ codex 0.163 的 hooks 在 `~/.codex/hooks.json`／`config.toml`，**需要使用者在 `/hooks` 審核信任**（改了內容就要重審），不是 per-launch 旗標；本版不去改使用者的 `~/.codex`。目前只有 PATH 上的 shim 補 `pkill`／`killall`，`kill -9 -1`、`kill 0` 沒有守門 | ❌ | ❌ |
 
-沒被 hook 蓋到的路徑（子 claude、遠端、codex、grok）由 **PATH 上的 `pkill`／`killall` shim** 補（`crates/am-base/src/kill_shim.rs`）：子 pane 繼承 PATH、遠端也有，argv 已經被 shell 切好，不必解析指令字串。
+**遠端**（2026-11-27 m4p 事故：遠端 bot 跑 `pkill -P 1`，對該帳號所有 PPID=1 的行程送 SIGTERM；當時遠端完全沒有 PreToolUse 守門）：遠端主機沒有 daemon binary，所以 bot 啟動時（`install_remote_hook`，umask 077、暫存檔＋`mv`、0700）在遠端根目錄裝一支 `kill-guard.sh`（`kill_guard::remote_kill_guard_sh()`；`crates/am-base/src/kill_guard.sh`）。
+它是 POSIX sh＋POSIX awk（`LC_ALL=C`；GNU awk、mawk、busybox awk、macOS BSD awk 都要能跑，不依賴 jq／python），從 stdin 讀 PreToolUse payload，取第一個 `command`／`commandLine`／`cmd` 字串欄位（不分大小寫），判斷邏輯是 `check_command` 的 awk 版（同樣的切指令、剝前綴、`$(…)`／`bash -c`／`eval`／heredoc 遞迴、`kill`／`xargs kill`／`pkill`／`killall` 規則），擋下訊息由 `PKILL_DENY`／`KILLALL_DENY`／`HOW_TO` 代入。
+`$1` 是 provider：擋下時 claude／grok 印 `hookSpecificOutput`、agy 只印 `decision`／`reason`；放行 stdout 為空。grok／agy 的 hook 檔是全域的，所以 pane 沒有 `AM_BOT_ID` 時直接放行。awk 失敗或輸出不對＝**判不出來就擋**：claude exit 2（stderr 印「暫時無法執行」），grok／agy 印 deny JSON。
+**parity 測試**（`kill_guard.parity`）把同一張案例表（約 200 條）同時餵 `check_command` 與 `sh kill-guard.sh`（本機每個可用的 awk 各跑一遍），判定與原因字串都必須一致。codex 遠端與本機一樣沒有 PreToolUse 守門。
+
+沒被 hook 蓋到的路徑（子 claude、codex）由 **PATH 上的 `pkill`／`killall` shim** 補（`crates/am-base/src/kill_shim.rs`）：子 pane 繼承 PATH、遠端也有，argv 已經被 shell 切好，不必解析指令字串。
 
 - **同一份規則**：一支 POSIX sh（macOS `/bin/sh`、Linux dash 都跑得動；不呼叫 daemon、不連網路、只用 `grep`／`tr`），`pkill`、`killall` 兩個檔名同一份內容，以 `basename $0` 分派。保護名單、cmdline 樣本、短 pattern 門檻、pattern 長度上限、訊號名單**由 `kill_guard` 的常數代入**（`shim_sh()`），不另抄；判斷邏輯是 `check_pkill`／`check_killall` 的 sh 版。regex 比對交給 `grep -E`（線性時間、不會災難性回溯），語法被 grep 拒絕就退回「含有這串字」，與 Rust 一致。**parity 測試**把同一張案例表（約 60 條）同時餵 `kill_guard` 與 shim（每個可用的 shell 各跑一遍），結果必須一致。
 - **不分作業系統**：BSD（macOS）遇到第一個非選項參數就停止解析選項、procps（Linux）會重排；選項寫在 pattern 之後的寫法本身就不可攜，所以兩邊都擋（與 hook 同一條規則），shim 不依 `uname` 分岔，不會對同一條指令跟 PreToolUse hook 給不同答案。

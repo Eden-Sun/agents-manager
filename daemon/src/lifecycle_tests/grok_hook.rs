@@ -4,7 +4,7 @@
 //! 起因（2026-10-02 c6）：使用者真實的 `~/.grok/hooks/agents-manager.json` 指向早就刪掉的 `/tmp/am-test-…/data/grok-hook.sh`——
 //! 測試啟動 grok bot 時，`dirs::home_dir()` 是**真的** HOME，把測試資料目錄的 dispatcher 路徑寫進了使用者的檔案。
 
-use crate::lifecycle::grok_hook::{heal_at_startup, hooks_json_merged, hooks_json_merged_local, install_local};
+use crate::lifecycle::grok_hook::{heal_at_startup, hooks_json_merged, hooks_json_merged_local, hooks_json_merged_remote, install_local};
 use crate::testing as tt;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt as _;
@@ -254,5 +254,18 @@ fn local_grok_hooks_get_a_pre_tool_use_kill_guard_and_remote_ones_do_not() {
     assert_eq!(commands(&m, "PreToolUse"), ["/home/u/guard.sh", "/data/grok-hook.sh"]);
     let again: Value = serde_json::from_str(&hooks_json_merged_local(Some(&m.to_string()), "/data/grok-hook.sh")).unwrap();
     assert_eq!(commands(&again, "PreToolUse"), ["/home/u/guard.sh", "/data/grok-hook.sh"], "冪等");
+}
+
+/// 2026-11-27 m4p 事故：遠端 grok 的 `PreToolUse` 指向遠端根目錄的 `kill-guard.sh grok`，不經 dispatcher（不 spool）；使用者自己的 hook 保留、冪等。
+#[test]
+fn remote_grok_hooks_point_pre_tool_use_at_the_sh_kill_guard() {
+    let guard = "'/h/.config/agents-manager/kill-guard.sh' grok";
+    let existing = json!({"hooks": {"PreToolUse": [user_hook("/home/u/guard.sh")]}}).to_string();
+    let v: Value = serde_json::from_str(&hooks_json_merged_remote(Some(&existing), "/h/.config/agents-manager/grok-hook.sh", guard)).unwrap();
+    assert_eq!(commands(&v, "PreToolUse"), ["/home/u/guard.sh", guard]);
+    assert_eq!(commands(&v, "Stop"), ["/h/.config/agents-manager/grok-hook.sh"]);
+    assert_eq!(commands(&v, "SessionStart"), ["/h/.config/agents-manager/grok-hook.sh"]);
+    let again: Value = serde_json::from_str(&hooks_json_merged_remote(Some(&v.to_string()), "/h/.config/agents-manager/grok-hook.sh", guard)).unwrap();
+    assert_eq!(again, v, "冪等");
 }
 

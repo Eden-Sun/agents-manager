@@ -156,8 +156,9 @@ pub async fn install_remote(conn: &HostConn, instance: Option<&str>, identity_ho
         bail!("remote agy dispatcher install did not confirm:\n{}", out.trim());
     }
     let name = cfg::hook_name(instance);
+    let guard = format!("{} agy", sh_quote(&format!("{real_home}/{root}/{}", crate::kill_guard::REMOTE_KILL_GUARD_SH)));
     let mut changed = crate::trust::update_remote_file(conn, &format!("{home}/.gemini/config/hooks.json"), |existing| {
-        cfg::hooks_merge(existing, &name, &dispatcher)
+        cfg::hooks_merge_remote(existing, &name, &dispatcher, &guard)
     })
     .await?;
     let statusline = format!("{} state", sh_quote(&dispatcher));

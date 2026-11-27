@@ -872,7 +872,11 @@ mod remote_install_permission_tests {
         let dispatcher = home.join(crate::hosts::REMOTE_ROOT).join(GROK_DISPATCH_SH);
         assert_eq!(mode_of(&dispatcher), 0o700, "remote dispatcher stays private and executable");
         assert_eq!(installed["user_note"], "keep me");
-        assert_eq!(installed["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);
+        let pre = installed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre[0], existing["hooks"]["PreToolUse"][0], "使用者自己的 PreToolUse 原樣保留");
+        let guard = format!("'{}' grok", home.join(crate::hosts::REMOTE_ROOT).join("kill-guard.sh").display());
+        assert_eq!(pre[1]["hooks"][0]["command"], guard.as_str(), "遠端 PreToolUse 指向 kill-guard.sh");
+        assert_eq!(pre.len(), 2);
         assert_eq!(
             installed["hooks"]["Stop"][0]["hooks"][0]["command"],
             "/home/u/stop.sh",
@@ -1005,7 +1009,9 @@ mod remote_grok_merge_tests {
         };
         assert_eq!(commands("SessionStart").iter().filter(|s| *s == "/home/u/grok-hook.sh").count(), 1);
         assert!(commands("SessionStart").iter().any(|s| s.ends_with("/grok-hook.sh") && s.starts_with(remote_home.as_str())));
-        assert_eq!(commands("PreToolUse"), ["/home/u/guard.sh"]);
+        let pre = commands("PreToolUse");
+        assert_eq!(pre[0], "/home/u/guard.sh");
+        assert!(pre.len() == 2 && pre[1].ends_with("/kill-guard.sh' grok"), "{pre:?}");
     }
     #[test]
     fn remote_grok_reader_caps_growth_after_the_fd_size_check() {

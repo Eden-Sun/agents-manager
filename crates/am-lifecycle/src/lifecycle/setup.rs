@@ -597,7 +597,8 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
     let read = conn.ssh_exec(&remote_grok_read_script(&hooks_dir, &grok_hooks_file(instance))).await?;
     let existing = parse_remote_grok_file(&read)?;
-    let merged = super::grok_hook::hooks_json_merged(existing.as_ref().map(|(text, _)| text.as_str()), &dispatcher);
+    let guard = remote_kill_guard_cmd(&format!("{home}/{root}/{}", am_base::kill_guard::REMOTE_KILL_GUARD_SH), "grok");
+    let merged = super::grok_hook::hooks_json_merged_remote(existing.as_ref().map(|(text, _)| text.as_str()), &dispatcher, &guard);
     let expected = existing.as_ref().map(|(_, hash)| hash.as_str());
     let script = format!(
         "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\nWT=$(mktemp \"$W.tmp.XXXXXX\")\ncat > \"$WT\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$WT\"\nmv -f \"$WT\" \"$W\"\nG={g}\nmkdir -p \"$G\"\n[ ! -L \"$G\" ] && [ -d \"$G\" ] || {{ printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }}\nchmod 700 \"$G\"\ncd \"$G\"\nF={file}\n{guard}\nT=$(mktemp .agents-manager.XXXXXX)\ntrap 'rm -f \"$T\"' EXIT HUP INT TERM\ncat > \"$T\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$T\"\n{guard}\n{publish}\nprintf 'AM_GROK_INSTALLED\\n'\n",
@@ -690,6 +691,8 @@ pub struct RemoteHookPaths {
     pub dir: String,
     pub hook_sh: String,
     pub settings: String,
+    /// 遠端根目錄的 `kill-guard.sh`（所有 bot 共用，claude／grok／agy 的 PreToolUse 都指向它）。
+    pub kill_guard: String,
 }
 
 pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
@@ -697,16 +700,26 @@ pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let home = conn.home().await?;
-    let dir = format!("{home}/{}/bots/{bot_id}", crate::hosts::remote_root_for(instance));
-    Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
+    let root = format!("{home}/{}", crate::hosts::remote_root_for(instance));
+    let dir = format!("{root}/bots/{bot_id}");
+    let kill_guard = format!("{root}/{}", am_base::kill_guard::REMOTE_KILL_GUARD_SH);
+    Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), kill_guard, dir })
 }
 
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 /// 遠端 claude bot 的 settings：hook 指令指向遠端的 `hook.sh`。受限 bot 再由 `cage_settings` 蓋一次（見 `injected_args`）。
+/// PreToolUse（Bash）只交給遠端的 `kill-guard.sh`，不進 `hook.sh` 的 spool。
 fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot, time_zone: &str) -> Value {
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
-    claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0, time_zone)
+    let mut settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0, time_zone);
+    with_kill_guard(&mut settings, &remote_kill_guard_cmd(&p.kill_guard, "claude"));
+    settings
+}
+
+/// 遠端 PreToolUse 的指令：`'<遠端根>/kill-guard.sh' <provider>`。
+pub fn remote_kill_guard_cmd(path: &str, provider: &str) -> String {
+    format!("{} {provider}", sh_quote(path))
 }
 
 async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>, time_zone: &str) -> anyhow::Result<RemoteHookPaths> {
@@ -714,8 +727,10 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let settings = remote_claude_settings(&p, bot, time_zone);
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
-        "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nprintf 'AM_INSTALLED\\n'\n",
+        "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nKG={kg}\nKT=$(mktemp \"$KG.tmp.XXXXXX\")\ncat > \"$KT\" <<'AM_KILL_GUARD_EOF'\n{guard}AM_KILL_GUARD_EOF\nchmod 700 \"$KT\"\nmv -f \"$KT\" \"$KG\"\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
+        kg = sh_quote(&p.kill_guard),
+        guard = am_base::kill_guard::remote_kill_guard_sh(),
         hook = remote_hook_sh(&crate::hosts::remote_root_for(instance)),
         settings = settings_text,
     );
@@ -997,8 +1012,8 @@ fn codex_notification_args(legacy: Vec<String>, trusted: anyhow::Result<bool>) -
 }
 
 /// issue #1884：Bash 工具跑之前先過廣域 kill 守門。同一支 `agents-managerd hook claude`——它看到 PreToolUse 只判斷、不送 daemon、
-/// 只有要擋時才印決策 JSON（`kill_guard`）。只給本機 bot：遠端的 `hook.sh` 是 POSIX sh、沒有這段邏輯，把 PreToolUse 交給它只會每個
-/// Bash 呼叫多 spool 一筆（SPEC「廣域 kill 守門」寫明遠端目前沒有守門）。
+/// 只有要擋時才印決策 JSON（`kill_guard`）。遠端 bot 的 `hook_cmd` 是遠端根目錄的 `kill-guard.sh claude`（POSIX sh＋awk 版，
+/// 2026-11-27 m4p 事故後補上），不經 `hook.sh`，所以 PreToolUse 不會進 spool。
 ///
 /// 守門失效（hook 起不來、逾時、退出碼不對）一律擋下：`onFailure: "block"`（Claude Code 2.1.295 起；舊版忽略這個欄位，
 /// 外層的 `|| …` 仍會擋下並印原因）。擋下時 stderr 的訊息告訴 agent 這是暫時狀態、稍後重試，不要改寫成別的殺法。
@@ -1007,7 +1022,7 @@ fn with_kill_guard(settings: &mut Value, hook_cmd: &str) {
     settings["hooks"]["PreToolUse"] = json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": guarded, "timeout": 5, "onFailure": "block"}]}]);
 }
 
-const KILL_GUARD_UNAVAILABLE_MSG: &str = "擋下 Bash：廣域 kill 守門暫時無法執行（daemon 換版或 hook 逾時），為安全起見先不放行。請稍後重試同一條指令。";
+const KILL_GUARD_UNAVAILABLE_MSG: &str = am_base::kill_guard::KILL_GUARD_UNAVAILABLE_MSG;
 
 /// 每顆 claude bot 自己的 `claude-settings.json`。
 ///
@@ -1686,11 +1701,41 @@ mod hook_cmd_parts_tests {
 }
 
 #[cfg(test)]
+mod remote_kill_guard_tests {
+    use super::{remote_claude_settings, RemoteHookPaths, KILL_GUARD_UNAVAILABLE_MSG};
+
+    /// 2026-11-27 m4p `pkill -P 1` 事故：遠端 claude bot 的 Bash 也要先過守門，指向遠端根目錄的 `kill-guard.sh`，不經 `hook.sh` 的 spool。
+    #[test]
+    fn a_remote_claude_bot_gets_a_bash_pre_tool_use_kill_guard_that_fails_closed() {
+        let p = RemoteHookPaths {
+            dir: "/h/.config/agents-manager/bots/b".into(),
+            hook_sh: "/h/.config/agents-manager/bots/b/hook.sh".into(),
+            settings: "/h/.config/agents-manager/bots/b/claude-settings.json".into(),
+            kill_guard: "/no/such/.config/agents-manager/kill-guard.sh".into(),
+        };
+        let v = remote_claude_settings(&p, &super::model_args_tests::bot("claude", None, None, false), "Asia/Taipei");
+        let groups = v["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["matcher"], "Bash");
+        let hook = &groups[0]["hooks"][0];
+        assert_eq!(hook["onFailure"], "block");
+        assert_eq!(hook["timeout"], 5);
+        let cmd = hook["command"].as_str().unwrap();
+        assert!(cmd.starts_with("'/no/such/.config/agents-manager/kill-guard.sh' claude || "), "{cmd}");
+        assert!(!cmd.contains("hook.sh"), "PreToolUse 不進 spool：{cmd}");
+        assert!(v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().contains("hook.sh"));
+        let out = std::process::Command::new("sh").arg("-c").arg(cmd).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "腳本不在就擋");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(KILL_GUARD_UNAVAILABLE_MSG));
+    }
+}
+
+#[cfg(test)]
 mod model_args_tests {
     use super::model_args;
     use crate::db::Bot;
 
-    fn bot(kind: &str, model: Option<&str>, effort: Option<&str>, fast: bool) -> Bot {
+    pub(super) fn bot(kind: &str, model: Option<&str>, effort: Option<&str>, fast: bool) -> Bot {
         Bot { role: None, manager_use: 1, track: None, runtime_override_json: None,
             id: "b".into(),
             project_id: "p".into(),
@@ -3256,7 +3301,7 @@ mod claude_settings_tests {
     }
 
     /// issue #1884：本機 claude bot 的 Bash 呼叫先過廣域 kill 守門（同一支 hook 指令，它自己分辨 PreToolUse）；
-    /// 遠端用的 `claude_settings` 本身不帶，因為遠端的 `hook.sh` 沒有守門邏輯。
+    /// `claude_settings` 本身不帶，本機與遠端各自用 `with_kill_guard` 接上（遠端指向 `kill-guard.sh`）。
     #[test]
     fn a_local_claude_bot_gets_a_bash_pre_tool_use_kill_guard_on_the_same_hook_command() {
         let mut v = claude_settings("hook", "sl", false, true, "Asia/Taipei");

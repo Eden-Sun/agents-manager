@@ -15,7 +15,7 @@ use super::setup::{grok_hooks_file, grok_home, local_grok_dispatch_sh, GROK_DISP
 
 const EVENTS: [&str; 2] = ["SessionStart", "Stop"];
 /// 本機版多訂 `PreToolUse`（廣域 kill 守門，#1884）：hook 只在要擋時印決策 JSON，放行不送 daemon、不 spool。
-/// 遠端的 dispatcher 會把每一個 PreToolUse 轉進 `hook.sh` 去 spool，所以遠端不帶（見 [`hooks_json_merged`]）。
+/// 遠端的 dispatcher 會把每一個 PreToolUse 轉進 `hook.sh` 去 spool，所以遠端的 PreToolUse 改指向 `kill-guard.sh`（見 [`hooks_json_merged_remote`]）。
 const LOCAL_EVENTS: [&str; 3] = ["SessionStart", "Stop", "PreToolUse"];
 
 fn is_ours(command: &str, dispatcher: &str, proven_legacy: &std::collections::HashSet<String>) -> bool {
@@ -35,6 +35,12 @@ pub fn hooks_json_merged(existing: Option<&str>, dispatcher: &str) -> String {
 /// 本機 grok：同 [`hooks_json_merged`]，外加 `PreToolUse`（廣域 kill 守門）。
 pub fn hooks_json_merged_local(existing: Option<&str>, dispatcher: &str) -> String {
     hooks_json_merged_with_legacy(existing, dispatcher, &std::collections::HashSet::new(), &LOCAL_EVENTS)
+}
+
+/// 遠端 grok：`SessionStart`／`Stop` 指向 dispatcher，`PreToolUse` 指向遠端根目錄的 `kill-guard.sh grok`（不經 dispatcher、不 spool）。
+pub fn hooks_json_merged_remote(existing: Option<&str>, dispatcher: &str, guard: &str) -> String {
+    let events = hooks_json_merged(existing, dispatcher);
+    hooks_json_merged_with_legacy(Some(&events), guard, &std::collections::HashSet::new(), &["PreToolUse"])
 }
 
 fn hooks_json_merged_with_legacy(existing: Option<&str>, dispatcher: &str, proven_legacy: &std::collections::HashSet<String>, events: &[&str]) -> String {

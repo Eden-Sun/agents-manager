@@ -76,6 +76,20 @@
         assert!(hooks_merge_guarded(&old, "agents-manager", "/d/agy-hook.sh").unwrap().expect("upgraded").contains("PreToolUse"));
     }
 
+    /// 2026-11-27 m4p 事故：遠端版的 `PreToolUse` 直接指向 `kill-guard.sh agy`，不經 dispatcher（它每個事件都回 `{}`，1.4.7 當拒絕）。
+    #[test]
+    fn the_remote_hook_subscribes_pre_tool_use_to_the_sh_kill_guard() {
+        let guard = "'/h/.config/agents-manager/kill-guard.sh' agy";
+        let out = hooks_merge_remote("{}", "agents-manager", "/h/.config/agents-manager/agy-hook.sh", guard).unwrap().expect("new entry");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let g = &v["agents-manager"]["PreToolUse"][0];
+        assert_eq!(g["matcher"], "*");
+        assert_eq!(g["hooks"][0]["command"], guard);
+        assert_eq!(g["hooks"][0]["timeout"], 5);
+        assert_eq!(v["agents-manager"]["Stop"][0]["command"], "'/h/.config/agents-manager/agy-hook.sh' Stop");
+        assert_eq!(hooks_merge_remote(&out, "agents-manager", "/h/.config/agents-manager/agy-hook.sh", guard).unwrap(), None, "idempotent");
+    }
+
     #[test]
     fn instances_get_their_own_hook_name() {
         assert_eq!(hook_name(None), "agents-manager");
