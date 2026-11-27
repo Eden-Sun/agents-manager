@@ -9,9 +9,13 @@ import './outboxFiles.css'
 
 const isHoverPointer = (pointerType: string) => pointerType === 'mouse' || pointerType === 'pen'
 
-export function OutboxFiles() {
+export function OutboxFiles({ onCount }: { onCount?: (n: number) => void } = {}) {
   const t = useT()
   const { botId, files, reason, dir, kept, fetchedAt, now, loadedFor, busy, refresh, download, openPreview } = useOutboxFiles()
+  const settled = !botId || loadedFor === botId
+  useEffect(() => {
+    if (settled) onCount?.(files.length)
+  }, [settled, files.length, onCount])
   const [peek, setPeek] = useState<{ name: string; owner?: string; modified: number; anchor: DOMRect } | null>(null)
   const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const peekKey = useRef<string | null>(null)
