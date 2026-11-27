@@ -42,7 +42,7 @@ async fn deleting_or_recreating_an_identity_drops_its_cached_model_list() {
     assert!(cache_has(app, "local/codex/other").await, "別的身份不動");
 
     cache_put(app, "local/codex/work").await;
-    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }), None).await.unwrap();
     assert!(!cache_has(app, "local/codex/work").await, "刪掉之後退回預設家目錄，不能再回舊帳號的清單");
     assert!(cache_has(app, "local/codex/other").await);
     assert!(crate::models::cached(app.as_ref(), "local", "codex", Some("work")).await.is_none());
@@ -75,7 +75,7 @@ async fn deleting_an_identity_forgets_its_quota_reading() {
         app.quotas.lock().await.insert(key.into(), reading("local"));
         crate::quota::persist_cache_for_test(app, key, &reading("local")).await;
     }
-    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }), None).await.unwrap();
     assert!(!app.quotas.lock().await.contains_key("claude:work"), "已刪帳號的額度格不能留著");
     assert!(app.quotas.lock().await.contains_key("claude:other"), "別的身份不動");
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key = 'claude:work'").fetch_one(&app.db).await.unwrap();
@@ -96,7 +96,7 @@ async fn an_identity_whose_name_a_shell_alias_still_carries_keeps_its_quota_read
         utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
     });
     app.quotas.lock().await.insert("claude:cc1".into(), reading("local"));
-    delete_identity(State(app.clone()), Path("cc1".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+    delete_identity(State(app.clone()), Path("cc1".into()), Query(IdentityHostQuery { host: None }), None).await.unwrap();
     assert!(app.quotas.lock().await.contains_key("claude:cc1"), "shell 的 cc1 還在用這把 key");
 }
 
@@ -116,7 +116,7 @@ async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it
     app.cfg.update(|_| Ok(())).await.unwrap();
     crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
 
-    let del = || delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }));
+    let del = || delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }), None);
     match del().await {
         Err(LcError::Conflict(body)) => assert_eq!((body["bot_id"].as_str(), body["host"].as_str()), (Some("b9"), Some("mac_builder"))),
         other => panic!("遠端 bot 還靠它：{:?}", other.map(|r| r.status())),
@@ -148,7 +148,7 @@ async fn a_bot_created_while_its_identity_is_deleted_is_refused() {
         .unwrap();
     let (a2, pid) = (app.clone(), env.project_id.clone());
     crate::race_point::arm("create_bot_after_identity_check", &env.project_id, move || async move {
-        delete_identity(State(a2.clone()), Path("racer".into()), Query(IdentityHostQuery { host: None }))
+        delete_identity(State(a2.clone()), Path("racer".into()), Query(IdentityHostQuery { host: None }), None)
             .await
             .expect("沒有 bot 在用，刪得掉");
         let _ = pid;
@@ -181,7 +181,7 @@ async fn an_identity_taken_by_a_bot_while_it_is_being_deleted_survives() {
         let body = json!({"name": "early", "kind": "codex", "identity": "racer2"});
         create_bot(State(a2.clone()), Path(pid), Json(serde_json::from_value(body).unwrap())).await.expect("身份還在：建得起來");
     });
-    let res = delete_identity(State(app.clone()), Path("racer2".into()), Query(IdentityHostQuery { host: None })).await;
+    let res = delete_identity(State(app.clone()), Path("racer2".into()), Query(IdentityHostQuery { host: None }), None).await;
     assert!(matches!(res, Err(LcError::Conflict(_))), "有 bot 剛開始用它：不能刪：{:?}", res.map(|r| r.status()));
     assert!(app.cfg.get().await.identities.iter().any(|i| i.name == "racer2"), "身份還在");
 }
@@ -212,7 +212,7 @@ async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
         ht.identities.insert("work".into(), crate::tools::IdentityInfo::shell("work", "codex", None));
         app.tools.lock().await.insert(host.into(), ht);
     }
-    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: Some("mac_builder".into()) }))
+    delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: Some("mac_builder".into()) }), None)
         .await
         .expect("沒有 bot 在用");
     let tools = app.tools.lock().await;

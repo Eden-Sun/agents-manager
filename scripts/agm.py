@@ -2938,6 +2938,23 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     collision_check_hint(args, number, issue.get("title") or f"#{number}", me, payload)
     return out
 
+def env_merge_arg(sets: list, unsets: list) -> dict:
+    out: dict = {}
+    for item in sets:
+        key, sep, val = item.partition("=")
+        if not sep or not key:
+            raise AgmError("bad_args", f"--env 要寫成 KEY=VALUE，收到 {item!r}", 2)
+        out[key] = val
+    for key in unsets:
+        if not key or key in out:
+            raise AgmError("bad_args", f"--env-unset {key!r} 空白或跟 --env 重複", 2)
+        out[key] = None
+    return out
+
+def cmd_identity(client: Client, cfg: dict, args) -> object:
+    query = f"?{urllib.parse.urlencode({'host': args.host})}" if args.host else ""
+    return client.delete(f"/api/identities/{path_segment(args.name)}{query}")
+
 def cmd_bot(client: Client, cfg: dict, args) -> object:
     if args.op == "create":
         if not args.project or not args.name:
@@ -2951,8 +2968,11 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
         raise AgmError("bad_args", f"bot {args.op} 需要 bot id", 2)
     if args.op == "set":
         body = {key: val for key, val in (("model", args.model), ("effort", args.effort), ("identity", args.identity), ("name", args.name)) if val is not None}
+        env_merge = env_merge_arg(getattr(args, "env", None) or [], getattr(args, "env_unset", None) or [])
+        if env_merge:
+            body["env_merge"] = env_merge
         if not body:
-            raise AgmError("bad_args", "bot set 至少需要 --model、--effort、--name 或 --identity 其中一個", 2)
+            raise AgmError("bad_args", "bot set 至少需要 --model、--effort、--name、--identity、--env 或 --env-unset 其中一個", 2)
         return client.patch(f"/api/bots/{path_segment(args.bot_id)}", body)
     if args.op == "delete":
         query = "?confirm=supervisor" if getattr(args, "confirm_supervisor", False) else ""
@@ -3425,7 +3445,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--session", help="跟 --resume native 或 --resume fork 一起：不看 DB，指名接回或分岔這一段 session id")
     s.add_argument("--confirm-supervisor", dest="confirm_supervisor", action="store_true",
                    help="delete：確定要刪 AGM 的 bot（總管專案裡的、總管的 child）；沒帶會 409 supervisor_owned")
+    s.add_argument("--env", action="append", metavar="KEY=VALUE", help="set：設定一個環境變數（可重複；與現有 env 合併）")
+    s.add_argument("--env-unset", dest="env_unset", action="append", metavar="KEY", help="set：刪掉一個環境變數（可重複）")
     s.set_defaults(func=cmd_bot)
+
+    s = sub.add_parser("identity", help="管理身份：delete（還有 bot 在用會 409）")
+    s.add_argument("op", choices=["delete"])
+    s.add_argument("name", help="身份名")
+    s.add_argument("--host", help="主機（省略＝local）")
+    s.set_defaults(func=cmd_identity)
 
     s = sub.add_parser("consult", help="唯讀諮詢 thinker 血統檢查點（#1943 C：ephemeral fork，不登記不前移）")
     s.add_argument("question", nargs="?", help="要問 thinker 的問題（與 --prompt-file 擇一）")
@@ -3459,7 +3487,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult", "ops-alert", "project") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult", "ops-alert", "project", "identity") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

@@ -2978,13 +2978,14 @@ async fn a_fleet_operator_cannot_delete_reconfigure_or_reach_beyond_the_lifecycl
     let t = &f.target.id;
     let before = db::bot(&f.e.app.db, t).await.unwrap().unwrap();
     let denied: Vec<(&str, String, &str)> = vec![
-        ("DELETE", format!("/api/bots/{t}"), ""),
+        ("DELETE", format!("/api/bots/{t}?confirm=supervisor"), ""),
         ("DELETE", format!("/api/projects/{}", f.other_project), ""),
         ("PATCH", format!("/api/projects/{}", f.other_project), r#"{"label":"x"}"#),
         ("PUT", format!("/api/bots/{t}/role"), r#"{"role":"executor"}"#),
         ("PATCH", format!("/api/bots/{t}"), r#"{"role":"manager"}"#),
         ("PATCH", format!("/api/bots/{t}"), r#"{"identity":"cc2"}"#),
-        ("PATCH", format!("/api/bots/{t}"), r#"{"env":{"X":"1"}}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"env":{"X":"1"},"args":["--x"]}"#),
+        ("POST", "/api/identities".to_string(), r#"{"name":"cc9","kind":"claude"}"#),
         ("PATCH", format!("/api/bots/{t}"), r#"{"args":["--x"]}"#),
         ("PATCH", format!("/api/bots/{t}"), r#"{"persona":"p"}"#),
         ("PATCH", format!("/api/bots/{t}"), r#"{"auto_approve":true}"#),
@@ -3044,6 +3045,93 @@ async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role()
     assert!(db::active_run(&f.e.app.db, &patrol.id).await.unwrap().is_some());
     let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{}", patrol.id), r#"{"model":"opus"}"#).await;
     assert!(r.starts_with("HTTP/1.1 200"), "PATCH model on the patrol is allowed: {r}");
+}
+
+#[tokio::test]
+async fn a_fleet_operator_deletes_a_top_level_bot_in_another_project_with_its_children() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let child = fleet_other_project_bot(&f.e, &f.other_project, "fleet-del-child").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.target.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
+    let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", child.id), "").await;
+    assert!(forbidden(&r), "a child stays out of reach: {r}");
+    let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", f.operator.id), "").await;
+    assert!(forbidden(&r), "the operator cannot delete itself: {r}");
+    let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", f.target.id), "").await;
+    assert!(!forbidden(&r) && r.starts_with("HTTP/1.1 2"), "{r}");
+    assert!(db::bot(&f.e.app.db, &f.target.id).await.unwrap().unwrap().deleted_at.is_some(), "the target is soft-deleted");
+    assert!(db::bot(&f.e.app.db, &child.id).await.unwrap().unwrap().deleted_at.is_some(), "its child goes with it");
+    assert!(db::bot(&f.e.app.db, &f.operator.id).await.unwrap().unwrap().deleted_at.is_none());
+}
+
+#[tokio::test]
+async fn a_fleet_operator_cannot_delete_a_share_bot_an_agm_role_and_a_plain_bot_cannot_delete_at_all() {
+    let f = fleet_env().await;
+    let shared = fleet_other_project_bot(&f.e, &f.other_project, "fleet-del-shared").await;
+    sqlx::query("INSERT INTO shared_bots(bot_id,profile,workspace,created_at) VALUES (?,'trusted','/tmp/shared-ws',?)").bind(&shared.id).bind(db::now()).execute(&f.e.app.db).await.unwrap();
+    fleet_register(&f.e, &f.other_project, &shared).await;
+    let patrol = fleet_other_project_bot(&f.e, &f.other_project, "fleet-del-patrol").await;
+    crate::supervisor::store::get_or_init(&f.e.app.db).await.unwrap();
+    crate::supervisor::store::set_env(&f.e.app.db, &patrol.id, &f.other_project, "/tmp").await.unwrap();
+    fleet_register(&f.e, &f.other_project, &patrol).await;
+    let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", f.target.id), "").await;
+    assert!(forbidden(&r), "without the setting a delete stays 403: {r}");
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    for victim in [&shared, &patrol] {
+        let r = as_bot(&f.e, &f.operator, "DELETE", &format!("/api/bots/{}", victim.id), "").await;
+        assert!(forbidden(&r), "{} stays undeletable: {r}", victim.name);
+        assert!(db::bot(&f.e.app.db, &victim.id).await.unwrap().unwrap().deleted_at.is_none());
+    }
+    let plain = distinct_bot(&f.e, "fleet-del-plain").await;
+    fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
+    let r = as_bot(&f.e, &plain, "DELETE", &format!("/api/bots/{}", f.target.id), "").await;
+    assert!(forbidden(&r), "a bot that is not an operator cannot delete: {r}");
+    assert!(db::bot(&f.e.app.db, &f.target.id).await.unwrap().unwrap().deleted_at.is_none());
+}
+
+#[tokio::test]
+async fn a_fleet_operator_patches_env_but_not_args_or_persona() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let t = &f.target.id;
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env":{"FOO":"1","BAR":"2"}}"#).await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"FOO":"9","BAR":null,"BAZ":"3"}}"#).await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    let env = db::bot(&f.e.app.db, t).await.unwrap().unwrap().env();
+    assert_eq!(env, [("BAZ".to_string(), "3".to_string()), ("FOO".to_string(), "9".to_string())].into());
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), r#"{"env":{"AM_BOT_ID":"x"}}"#).await;
+    assert!(r.starts_with("HTTP/1.1 4") && !forbidden(&r), "reserved keys are still refused: {r}");
+    for body in [r#"{"args":["--x"]}"#, r#"{"persona":"p"}"#, r#"{"identity":"cc2"}"#] {
+        let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{t}"), body).await;
+        assert!(forbidden(&r), "PATCH {body} stays forbidden: {r}");
+    }
+    let plain = distinct_bot(&f.e, "fleet-env-plain").await;
+    fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
+    let r = as_bot(&f.e, &plain, "PATCH", &format!("/api/bots/{t}"), r#"{"env_merge":{"FOO":"0"}}"#).await;
+    assert!(forbidden(&r), "{r}");
+    assert_eq!(db::bot(&f.e.app.db, t).await.unwrap().unwrap().env().get("FOO").map(String::as_str), Some("9"));
+}
+
+#[tokio::test]
+async fn a_fleet_operator_deletes_an_unused_identity_but_not_one_in_use() {
+    let f = fleet_env().await;
+    let ident = |name: &str| crate::config::IdentityCfg { name: name.into(), kind: "claude".into(), host: Some("local".into()), env: [("CLAUDE_CONFIG_DIR".into(), format!("/tmp/{name}"))].into(), args: vec![] };
+    let (free, used) = (ident("cc8"), ident("cc7"));
+    f.e.app.cfg.update(move |cfg| { cfg.identities.push(free); cfg.identities.push(used); Ok(()) }).await.unwrap();
+    sqlx::query("UPDATE bots SET identity='cc7' WHERE id=?").bind(&f.target.id).execute(&f.e.app.db).await.unwrap();
+    let plain = distinct_bot(&f.e, "fleet-id-plain").await;
+    fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
+    let r = as_bot(&f.e, &plain, "DELETE", "/api/identities/cc8?host=local", "").await;
+    assert!(forbidden(&r), "{r}");
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let r = as_bot(&f.e, &f.operator, "DELETE", "/api/identities/cc7?host=local", "").await;
+    assert!(r.starts_with("HTTP/1.1 409"), "an identity in use is refused: {r}");
+    let r = as_bot(&f.e, &f.operator, "DELETE", "/api/identities/cc8?host=local", "").await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    let cfg = f.e.app.cfg.get().await;
+    let names: Vec<&str> = cfg.identities.iter().map(|i| i.name.as_str()).collect();
+    assert!(!names.contains(&"cc8") && names.contains(&"cc7"), "{names:?}");
 }
 
 #[tokio::test]

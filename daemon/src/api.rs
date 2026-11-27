@@ -1113,7 +1113,13 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
             && !manager_base
             && matches!(&principal, RequestPrincipal::Bot(_))
             && Box::pin(fleet_codex_stop_hook_route(&app, bot_id, method, path)).await;
-        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base && !fleet_codex_hook) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle && !fleet_project_path) {
+        let fleet_identity_delete = policy == Some(BotRoutePolicy::UserOrAgm)
+            && !is_agm_role
+            && method == "DELETE"
+            && matches!(&principal, RequestPrincipal::Bot(_))
+            && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 3 && p[0] == "api" && p[1] == "identities")
+            && is_fleet_operator(&app, bot_id).await.unwrap_or(false);
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base && !fleet_codex_hook) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle && !fleet_project_path && !fleet_identity_delete) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -2895,6 +2901,8 @@ struct PatchBot {
     #[serde(default, deserialize_with = "double_option")]
     identity: Option<Option<String>>,
     env: Option<BTreeMap<String, String>>,
+    /// 合併進現有 env：字串＝設定該鍵，`null`＝刪掉該鍵；跟 `env` 互斥，權限同 `env`。
+    env_merge: Option<BTreeMap<String, Option<String>>>,
 }
 
 fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -3019,8 +3027,8 @@ pub(crate) async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &d
     Ok(db::project(&app.db, &me.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none() && p.mode == "expert"))
 }
 
-/// fleet operator 能做的操作形狀：start／restart／stop／interrupt、PATCH（欄位在 `patch_bot` 限 model／effort／fast／name）、讀 terminal。
-/// 刪除、角色、credential、fork／promote／rewind／login、子資源一律不在內。
+/// fleet operator 能做的操作形狀：start／restart／stop／interrupt、PATCH（欄位在 `patch_bot` 限 model／effort／fast／name／env）、
+/// 讀 terminal、刪除（使用者 2026-11-27 授權）。角色、credential、fork／promote／rewind／login、子資源一律不在內。
 fn fleet_operator_op(method: &str, parts: &[impl AsRef<str>]) -> bool {
     if parts.len() < 3 || parts[0].as_ref() != "api" || parts[1].as_ref() != "bots" {
         return false;
@@ -3028,13 +3036,13 @@ fn fleet_operator_op(method: &str, parts: &[impl AsRef<str>]) -> bool {
     match (method, parts.len(), parts.get(3).map(|p| p.as_ref())) {
         ("POST", 4, Some("start" | "restart" | "stop" | "interrupt")) => true,
         ("GET" | "HEAD", 4, Some("terminal")) => true,
-        ("PATCH", 3, None) => true,
+        ("PATCH" | "DELETE", 3, None) => true,
         _ => false,
     }
 }
 
 /// `caller` 列在 `[agents] fleet_operators`（熱重載，只認 bot id）、本身是存活的頂層 bot，而 `target` 是任何專案、任何主機上
-/// 別的存活頂層 bot，且這次是 [`fleet_operator_op`] 的操作。child 不繼承；分享用 bot 一律不碰；AGM 角色（巡檢／協調者）不能被 stop。
+/// 別的存活頂層 bot，且這次是 [`fleet_operator_op`] 的操作。child 不繼承；分享用 bot 一律不碰；AGM 角色（巡檢／協調者）不能被 stop 或刪除。
 async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> Result<bool, LcError> {
     if !fleet_operator_op(method, parts) || target.id == caller || target.parent_bot_id.is_some() || target.managed_by == "child" || target.deleted_at.is_some() {
         return Ok(false);
@@ -3045,7 +3053,7 @@ async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: 
     if !matches!(db::is_share_bot(&app.db, &target.id).await, Ok(false)) {
         return Ok(false);
     }
-    if parts.get(3).map(|p| p.as_ref()) == Some("stop") && crate::supervisor::roles::role_of_bot(&app.db, &target.id).await.map_err(any_err)?.is_some() {
+    if (parts.get(3).map(|p| p.as_ref()) == Some("stop") || method == "DELETE") && crate::supervisor::roles::role_of_bot(&app.db, &target.id).await.map_err(any_err)?.is_some() {
         return Ok(false);
     }
     Ok(true)
@@ -3080,7 +3088,7 @@ async fn fleet_operator_route(app: &Arc<App>, caller: &str, method: &str, path: 
 /// 稽核：fleet operator 的跨專案操作每次都記一行（caller、target、專案、操作）。
 #[inline(never)]
 fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) {
-    let op = parts.get(3).map(|p| p.as_ref()).unwrap_or("patch");
+    let op = parts.get(3).map(|p| p.as_ref()).unwrap_or(if method == "DELETE" { "delete" } else { "patch" });
     tracing::info!(
         http = %crate::config_audit::http_caller(),
         fleet_operator = %caller,
@@ -3287,13 +3295,41 @@ async fn put_bot_role(
     Ok(response)
 }
 
+/// PATCH 的 `env`：使用者，或對這顆 bot 成立 [`fleet_operator_over`] 的 fleet operator（使用者 2026-11-27 授權）。
+async fn patch_env_allowed(app: &Arc<App>, principal: &RequestPrincipal, id: &str) -> Result<bool, LcError> {
+    match principal {
+        RequestPrincipal::User => Ok(true),
+        RequestPrincipal::Bot(caller) => {
+            let Some(target) = db::bot(&app.db, id).await.map_err(any_err)? else { return Ok(false) };
+            Ok(Box::pin(fleet_operator_over(app, caller, "PATCH", &["api", "bots", id], &target)).await?)
+        }
+        _ => Ok(false),
+    }
+}
+
 async fn patch_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Extension(principal): Extension<RequestPrincipal>,
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
-    if (b.identity.is_some() || b.env.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
+    if (b.env.is_some() || b.env_merge.is_some()) && !patch_env_allowed(&app, &principal, &id).await? {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    if let Some(changes) = b.env_merge.take() {
+        if b.env.is_some() {
+            return Err(LcError::Bad("env and env_merge are mutually exclusive".into()));
+        }
+        let mut env = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?.env();
+        for (k, v) in changes {
+            match v {
+                Some(v) => { env.insert(k, v); }
+                None => { env.remove(&k); }
+            }
+        }
+        b.env = Some(env);
+    }
+    if (b.identity.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
     if let RequestPrincipal::Bot(caller) = &principal {
@@ -5442,8 +5478,24 @@ async fn delete_identity(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Query(q): Query<IdentityHostQuery>,
+    principal: Option<Extension<RequestPrincipal>>,
 ) -> Result<Response, LcError> {
     let host = q.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
+    if let Some(Extension(RequestPrincipal::Bot(caller))) = &principal {
+        if crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none() {
+            if !is_fleet_operator(&app, caller).await? {
+                return Err(bot_user_only());
+            }
+            tracing::info!(
+                http = %crate::config_audit::http_caller(),
+                fleet_operator = %caller,
+                target_identity = %name,
+                target_host = %host,
+                op = "delete_identity",
+                "fleet operator cross-project bot operation"
+            );
+        }
+    }
     let cfg = app.cfg.get().await;
     let removing_hostless = host == crate::config::LOCAL_HOST && cfg.identities.iter().any(|i| i.name == name && i.is_hostless());
     for b in db::live_bots(&app.db).await.map_err(any_err)? {

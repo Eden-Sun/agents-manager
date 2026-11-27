@@ -2854,11 +2854,11 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 Fleet operator（使用者 2026-11-18）：`[agents] fleet_operators = ["<bot_id>", …]`（預設空）。列在裡面的 bot 代表主控 daemon，可跨專案、跨主機管理頂層 bot 的生命週期——別台機器上的 bot 也聽它的。規則：
 
 - **誰算**：只認 bot id（名稱不算）；該 bot 必須存在、未刪除、是頂層 bot。child 不繼承，就算把 child 的 id 寫進去也不算。清單只能由使用者改 `config.toml`，沒有任何 API 會寫它；`[agents]` 熱重載（`ConfigStore::agents_fresh`），加入／移除在下一個請求生效。
-- **能做**（對象：任何專案、任何主機上別的存活頂層 bot）：`POST /bots/{id}/start|restart|stop|interrupt`、`PATCH /bots/{id}`（只收 model／effort／fast／name，跟專家管理者同一份白名單）、`GET /bots/{id}/terminal`。
+- **能做**（對象：任何專案、任何主機上別的存活頂層 bot）：`POST /bots/{id}/start|restart|stop|interrupt`、`PATCH /bots/{id}`（只收 model／effort／fast／name，跟專家管理者同一份白名單；另收 `env`／`env_merge`）、`GET /bots/{id}/terminal`；使用者 2026-11-27 授權代為清理：`DELETE /bots/{id}`（與使用者刪除相同：軟刪、子 agent 一起收；`?confirm=supervisor` 照舊只限使用者與 AGM 角色）、改 `env`（保留鍵檢查照舊）、`DELETE /api/identities/{name}`（還有 bot 在用照舊 409）。
 - **代使用者確認 Codex Stop hook 信任**（使用者 2026-11-18）：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust` 對 fleet operator 放行（路由仍是 UserOnly，其他 bot、operator 的 child、AGM 角色照舊 403 `user_only`）；信任時記一行 log（`op="codex_stop_hook_trust"`、`host`）。
-- **不能做**：刪 bot／專案、改角色、credential rotate、改 identity／env／args／persona、fork／promote／rewind／login、讀訊息與附件、碰分享用 bot（任何操作）、碰別人的 child、stop AGM 角色（巡檢／協調者）、host／shell／ui-token 類的 User-only 路由。
-- **實作**：`api.rs` 的 `fleet_operator_over`（路徑範圍，`authorize_bot_path`）與 `fleet_operator_route`（UserOrAgm 閘）；`patch_bot` 對「目標不在 caller 自己 bot 樹」的 Bot principal 一律套四欄白名單。放行時記一行 info log `fleet operator cross-project bot operation`（caller、target bot、專案、操作）。
-- **CLI**：`agm bot start|stop|restart|set <bot_id>` 沒有本地的專案檢查，直接交給 daemon 判斷，跨專案 bot 可直接用。
+- **不能做**：刪專案、改角色、credential rotate、改 identity／args／persona、新增身份與身份 login／logout、fork／promote／rewind／login、讀訊息與附件、碰分享用 bot（任何操作）、碰別人的 child、刪自己、stop 或刪 AGM 角色（巡檢／協調者）、host／shell／ui-token 類的 User-only 路由。
+- **實作**：`api.rs` 的 `fleet_operator_over`（路徑範圍，`authorize_bot_path`）與 `fleet_operator_route`（UserOrAgm 閘）；`patch_bot` 對「目標不在 caller 自己 bot 樹」的 Bot principal 一律套四欄白名單，`env` 另由 `patch_env_allowed` 驗 `fleet_operator_over`；刪身份由 UserOrAgm 閘的 `fleet_identity_delete` 放行、`delete_identity` 再驗一次。放行時記一行 info log `fleet operator cross-project bot operation`（caller、target bot、專案、操作）。
+- **CLI**：`agm bot start|stop|restart|set|delete <bot_id>` 沒有本地的專案檢查，直接交給 daemon 判斷，跨專案 bot 可直接用；`agm bot set <id> --env KEY=VALUE --env-unset KEY`（送 `env_merge`，由 daemon 合併，跨專案讀不到現有 env 也能用）、`agm identity delete <name> [--host]`。
 
 使用者時區（#2047，2026-11-17）：`[agents] user_time_zone`（IANA 名稱，沒寫＝`Asia/Taipei`）可在設定改，`PUT /api/settings/time-zone` 寫入。agent md 最前面會注入「使用者時區」一段（對話時間換算成該時區並標 UTC 偏移，如 `(+8)`）；CLI 的 `timeZone` 也跟著同一值。新啟動的 bot 套用，已在跑的 bot 不重讀。
 

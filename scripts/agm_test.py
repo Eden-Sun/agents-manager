@@ -2021,6 +2021,25 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
         self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/projects/p9")
         self.assertEqual(FakeDaemon.seen[-1]["body"], {"path": "/Users/m4p/project/wt"})
 
+    def test_bot_set_env_sends_an_env_merge(self):
+        FakeDaemon.routes["PATCH /api/bots/b7"] = (200, {"ok": True})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("bot", "set", "b7", "--env", "A=1", "--env", "B=x=y", "--env-unset", "C")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b7")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"env_merge": {"A": "1", "B": "x=y", "C": None}})
+        bad = self.bad("bot", "set", "b7", "--env", "NOEQUALS")
+        self.assertEqual(bad["error"], "bad_args")
+        clash = self.bad("bot", "set", "b7", "--env", "A=1", "--env-unset", "A")
+        self.assertEqual(clash["error"], "bad_args")
+
+    def test_identity_delete_uses_bot_proof_and_host(self):
+        FakeDaemon.routes["DELETE /api/identities/cc3"] = (200, {})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("identity", "delete", "cc3", "--host", "m4p")
+        self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
+        self.assertTrue(FakeDaemon.seen[-1]["path"].startswith("/api/identities/cc3"), FakeDaemon.seen[-1])
+        self.assertIn("host=m4p", FakeDaemon.seen[-1].get("query", "") + FakeDaemon.seen[-1]["path"])
+
     def test_hire_requires_kind_and_rejects_retired_pool_flag(self):
         missing_kind = self.bad("hire", "w2")
         self.assertEqual(missing_kind["error"], "bad_args")

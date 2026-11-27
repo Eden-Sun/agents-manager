@@ -99,12 +99,14 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | 放行 | 限制 |
 |---|---|
 | `POST /api/bots/{id}/start`、`/restart`、`/stop`、`/interrupt` | AGM 角色（巡檢／協調者）不能被 `/stop` |
-| `PATCH /api/bots/{id}` | 只收 `model`／`effort`／`fast`／`name`；帶其他欄位 403 `user_only` |
+| `PATCH /api/bots/{id}` | 只收 `model`／`effort`／`fast`／`name`／`env`／`env_merge`（env 使用者 2026-11-27 授權；保留鍵檢查照舊）；帶其他欄位 403 `user_only` |
 | `GET /api/bots/{id}/terminal` | 唯讀 |
+| `DELETE /api/bots/{id}` | 使用者 2026-11-27 授權；與使用者刪除相同（軟刪、子 agent 一起收）；不能刪自己、AGM 角色；帶 `?confirm=supervisor` → 403 |
+| `DELETE /api/identities/{name}` | 使用者 2026-11-27 授權；沒有目標 bot，只看 caller；還有 bot 在用 → 409 `identity still used by bots`。新增身份、login／logout 不放行 |
 
 另外可代使用者查看與確認 Codex Stop hook 信任：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust`（body `{"host":"<主機名>","identity":null}`；這兩支沒有目標 bot，只看 caller 是不是 fleet operator）；信任時記一行 log `fleet operator trusts the Codex Stop hook on behalf of the user`（`op="codex_stop_hook_trust"`、`host`、`identity`、`codex_home`）。
 
-不放行：`DELETE` bot／專案、`PUT …/role`、`credential/rotate`、`identity`／`env`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot（任何操作）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`）。
+不放行：`DELETE` 專案、`PUT …/role`、`credential/rotate`、`identity`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot（任何操作）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`；刪身份記 `target_identity`、`target_host`、`op="delete_identity"`）。
 
 跨資源測試逐一打上述動態路徑家族的每個方法，並覆蓋 Bot A 對 Bot B、編碼 ID、同 bot、child、AGM 專用任務／交辦例外與 User principal。
 
@@ -124,11 +126,11 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/relay-requests` | 同 GET |
 | GET | `/api/relay/resolve` | 已驗證 Bot；依 relay 授權解析目標 |
 | HEAD | `/api/relay/resolve` | 同 GET |
-| DELETE | `/api/bots/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| DELETE | `/api/bots/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制；fleet operator 見上（2026-11-27） |
 | DELETE | `/api/bots/{id}/preview` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/hosts/{name}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/hosts/{name}/shells/{pane_id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| DELETE | `/api/identities/{name}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| DELETE | `/api/identities/{name}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制；fleet operator 放行（2026-11-27） |
 | DELETE | `/api/projects/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/*` | 無 principal；前端靜態檔 fallback |
@@ -1960,7 +1962,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 ### bot 建立 / 修改
 `POST /api/projects/{id}/bots`、`PATCH /api/bots/{id}` 接受 `identity` 與 `env`：`identity` 省略 = 不變（PATCH）／`null`（POST），傳 `null` 或 `""` 解除；
-`env` 傳整個物件會**取代**。不存在的 identity 404；kind 不符 400。
+`env` 傳整個物件會**取代**；PATCH 另收 `env_merge`（`{"KEY":"值","OLD":null}`，與現有 env 合併、`null` 刪鍵；不能跟 `env` 同時帶，權限與檢查同 `env`）。不存在的 identity 404；kind 不符 400。
 
 輸入檢查（POST／PATCH 一致，不合格一律 400、config.toml 與 DB 都不動）：
 - `name`：1–32 字，不可含 `@ , : ;`、控制字元（含 ESC、BEL）與看不見／改變方向的字元（零寬、U+202A–202E、U+2066–2069、BOM）；空白只能單一個、夾在中間。**只差大小寫的兩個名字可以並存**。
