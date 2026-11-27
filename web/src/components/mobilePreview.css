@@ -132,3 +132,21 @@ body:has(.mobile-preview) .app > .shelf.open {
   color: var(--accent-ink);
   background: var(--bg-active);
 }
+
+@media (width > 1024px) {
+  body:has(.mobile-preview) .app:has(> .shelf:not(.open)) {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  body:has(.mobile-preview) .app > .shelf:not(.open) .shelf-handle {
+    flex-direction: row;
+    justify-content: center;
+    width: 100%;
+    min-height: 34px;
+    padding: 0 8px;
+  }
+
+  body:has(.mobile-preview) .app > .shelf:not(.open) .shelf-handle-label {
+    writing-mode: horizontal-tb;
+  }
+}

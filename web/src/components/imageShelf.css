@@ -340,32 +340,3 @@
 .shelf-head .icon-tip[data-tip]:focus-visible::after {
   transform: translateY(0);
 }
-
-.shelf-edge-fold {
-  position: absolute;
-  top: 72px;
-  left: -9px;
-  z-index: 31;
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 40px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-panel);
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.shelf-edge-fold:hover {
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-
-.shelf-edge-fold:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}

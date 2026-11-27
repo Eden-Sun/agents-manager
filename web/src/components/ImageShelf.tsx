@@ -208,18 +208,6 @@ export function ImageShelf() {
           e.target.value = ''
         }}
       />
-      {open && !atBottom ? (
-        <button
-          type="button"
-          className="shelf-edge-fold"
-          aria-expanded={true}
-          aria-label={t("收合檔案暫存區")}
-          title={t('收合檔案暫存區')}
-          onClick={() => setOpenPersisted(false)}
-        >
-          »
-        </button>
-      ) : null}
       {open ? (
         <div className="shelf-body" {...drop.props}>
           <div className="shelf-head">
@@ -245,19 +233,16 @@ export function ImageShelf() {
               </button>
             ) : null}
             <MobilePreviewButton />
-            {}
-            {atBottom ? (
-              <button
-                type="button"
-                className="icon-btn shelf-fold icon-tip"
-                aria-expanded={true}
-                aria-label={t("收合檔案暫存區")}
-                data-tip={t("收合 · 暫存")}
-                onClick={() => setOpenPersisted(false)}
-              >
-                »
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className="icon-btn shelf-fold icon-tip"
+              aria-expanded={true}
+              aria-label={t("收合檔案暫存區")}
+              data-tip={t("收合 · 暫存")}
+              onClick={() => setOpenPersisted(false)}
+            >
+              »
+            </button>
           </div>
           <div className="shelf-list" role="list">
             {count === 0 ? (
