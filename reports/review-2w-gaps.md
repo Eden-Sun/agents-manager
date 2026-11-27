@@ -513,3 +513,67 @@
 - 草稿：`0f95cb08b` 補打 composer-draft 的路徑沒有在瀏覽器實際操作。
 - 發現 3、4、13、14 沒有實測；發現 3 需要一次冷啟動的實際帳單對照預留值。
 - 原生 alert／confirm／prompt：對 85 個 commit 新增的 ts／tsx 行做過搜尋，沒有新增。深色主題色碼：14 個 commit 的 CSS 有寫死的 hex 或 rgb；只確認了帳本的 `messageLedgerBar.css`（有對應的深色覆寫）與 `trackingBar.css`（都有 token），其餘（`773c0f3cf` 已由 `7e559a4a4` 修、`d8c99894d`、`814476e0e`、`2fdc129ea` 等）沒有逐一確認。
+
+## §9 補審（2026-11-27，§8 列為「未讀」的 33 個 commit＋`0f95cb08b`＋深色色碼）
+
+唯讀。行號以 main `23d2f9696` 為準。已在 #2216–#2232 處理的不重報。
+開出的 issue：**#2233**（發現 1）。其餘發現嚴重度或信心不到門檻，只列在這裡。
+
+### 覆蓋
+
+| 範圍 | 覆蓋 | 說明 |
+|---|---|---|
+| 帳本 `94fecdaab`／`1eeca5e9e`／`c6dba5659`／`fb69cb281` | ✅逐段 | 三個 diff 全讀；`94fecdaab` 的 TSX 已被後續改寫，改讀現行 `MessageLedgerBar.tsx`、`TrackingBar.tsx` 全檔，加上 `ledger_api.rs:150-369`、`ledger.rs:372-605`、`:860-946`、`ledger_reminders.rs:20-135`。CSS 只做色碼掃描。 |
+| 翻譯 `b1047a48f`／`d8cadea59`／`9724d2d26` | ✅逐段（`9724d2d26` 只讀 TS 變更行） | 加上現行 `message_translate.rs:215-420`、`:540-585`、`:700-925`。`d8cadea59` 的複盤路徑已被 `fabdd9748` 取代（現行 `post_translate_report` 只收被擋的譯文，網頁改為唯讀的翻譯紀錄），不另報。 |
+| 身份頁 `5e7498690`／`a737c2c7c` | ✅現行檔 | `5e7498690` 是搬檔，改讀現行 `IdentitiesPanel.tsx`、`IdentityShellRows.tsx`、`IdentityKindCard.tsx`、`IdentityHostTabs.tsx`、`identityRows.ts` 全檔與 `IdentityRow.tsx:120-554`；對過 diff 移除的函式清單，沒有遺失的功能。`a737c2c7c` 讀 `store.ts` 與 `AddIdentityDialog.tsx` 的 diff，加上現行對話框 `:84-235`。對話框 JSX 後半（`:236-482`）沒讀。 |
+| `20a0674a2` 分享 bot 預設 | ✅逐段 | diff 全讀，加上 `runtime_params.rs:1-66`、`runtime_overlay.rs:40-72`、`start.rs:1556-1600`、`setup.rs:1175-1190`。 |
+| `8df02e2ca`、`c00748a10`、`0f95cb08b`、`687dd9522`、`11a009778` | ✅逐段 | diff 全讀。前兩個是等價重構，沒有行為差異。 |
+| `88e23f53b`、`d380c3569`、`663260b48`、`9dd623538`、`d7af5803a`、`7e559a4a4`、`9c718e3af`、`3dc3d1ef3`、`d3880bd24`、`5bbb8b01f`、`86949766b`、`c83e90007`、`ae511749a`、`81d37e282`、`60eb85094`、`c56079f55` | ⚠正式程式的變更行全讀 | 測試、fixture、i18n、CSS 沒讀；`9c718e3af`／`3dc3d1ef3`／`d3880bd24`／`d380c3569` 只看新增與刪除的行，沒有回頭讀周圍未變動的程式。 |
+| `5d738b155`、`e75cfd00c`、`2fdc129ea` | ✅逐段（扣掉 CSS、測試） | diff 全讀。 |
+| 深色主題色碼（14 個 commit） | ✅掃描 | 對附錄 85 個 commit 新增的 CSS 行搜尋 hex／rgb／hsl，共 165 行、14 個 commit；逐行對現行檔，扣掉 `var(--x, 備用值)` 與陰影後看有沒有深色覆寫。沒有在瀏覽器實際切主題。 |
+
+33 個 commit 全部至少讀過正式程式的變更行。沒有任何一項是實機或瀏覽器驗證。
+
+### 發現
+
+| # | sha、檔:行 | 觸發情境 | 嚴重度／信心 | 建議修法 | issue |
+|---|---|---|---|---|---|
+| 1 | `c6dba5659`、`fb69cb281`、`1eeca5e9e`；`daemon/src/runners/ledger_reminders.rs:123`、`crates/am-base/src/ledger.rs:830`、`:677`；`web/src/components/MessageLedgerBar.tsx:103-112`、`web/src/api/ledger.ts:39` | 網頁的「加入追蹤」（提示「交管理者整理」）、「不知道」（下一輪請管理者複查）、「待驗收」（管理者交件）都要管理者動手，但 `scripts/agm.py` 沒有 `ledger` 子命令（0 筆），daemon 的提醒與代班摘要卻寫「請用 `agm ledger claim L<n> --expect-version <v>`」。注入規則與角色提示裡沒有帳本操作說明；`query_actionable_for_actor` 只有測試呼叫。提醒依 `(item, stage, version)` 去重，只發一次。結果：項目停在「待整理」或「進行中」，不會前進。 | 中／高 | 補 `agm ledger`（`list`、`update`／`triage`、`claim`、`handback`、`done`、`cancel`）；提醒每個階段附可執行的指令；CLI 上線前先改掉不存在的指令字樣。 | #2233 |
+| 2 | `b1047a48f` `daemon/src/message_translate.rs:578-580`（配 `:226-234`） | 「重翻沒過就保留舊譯文」的判斷是「快取檔裡的譯文不是空字串」，不是「快取是有效命中」。快取裡的譯文若被 `load` 視為未命中（譯文主要是英文，或含假名），每次開啟該訊息都重新打 API（首次＋升級模型重試），沒過也不寫負面標記，下次再打。原文本身含日文假名的訊息另有一個既有問題：通過檢查的譯文存進快取後 `load` 仍當未命中（`c4b1be6c92`，不在這批）。 | 低–中／中（未實測） | `:578` 改用 `load(path).is_some()`；`load` 的假名過濾改成「原文沒有假名才過濾」。 | — |
+| 3 | `86949766b` `crates/am-base/src/cache_clock.rs:28`；`docs/SPEC.md:4297` | agy 的快取 TTL 由 720 秒改成 3600 秒，commit 訊息沒有理由；三天前 `5bbb8b01f` 的檔頭寫的是本機 56,246 筆實測「12–16 分 0–12% 命中、超過 30 分 0%」。網頁的「快取約 N 分後到期」對 agy 最多高估 48 分。`SPEC.md:4297` 仍寫 `ttl_secs("agy") = None`。 | 低–中／中 | 需使用者裁示：若 1 小時有依據，補進 `cache_clock.rs` 檔頭與 SPEC；沒有就改回實測值。 | — |
+| 4 | `a737c2c7c` `web/src/store/store.ts:557`、`:2674`；`web/src/components/IdentitiesPanel.tsx:165` | `identityLoginPane` 只會寫入，不會清掉；`AddIdentityDialog` 一律拿到 `onOpenTerminal`。先替身份 A 開過背景登入終端，之後新增身份 B 而 B 的終端沒開成功時，對話框的「打開登入終端」會切到 A 的終端（或一個已關閉的 pane）。背景模式遇到既有終端時仍提示「已重新打開」，實際沒有打開。 | 低／中 | 對話框只在 `identityLoginPane` 的 host 與 identity 等於這次建立的身份時才給按鈕；登入完成或 pane 關閉時清掉。 | — |
+| 5 | `20a0674a2` `crates/am-lifecycle/src/lifecycle/start.rs:1566-1574` | 受限分享 bot 的啟動分支只套用 overlay 的模型，沒有 `args.extend(overlay.args)`。受限分享 bot 若是 codex，`-c model_auto_compact_token_limit=400000` 不會帶上，但 `policy_rev` 與網頁分母都記成 400K。 | 低／低（未確認受限分享是否允許 codex） | 受限分支也帶 `overlay.args`，或在 `resolve` 對受限＋codex 不回報已套用。 | — |
+| 6 | `20a0674a2` `crates/am-config/src/runtime_params.rs:42-51`、`runtime_overlay.rs:22-39` | 分享 bot 預設 400K 之後，有設模型的 claude 分享 bot 啟動時模型一律加 `[1m]`（原本只有明確設定 context 超過 200K 才會）。模型若沒有 1M 版本，啟動可能失敗；有的話會改用長 context 計價。 | 低／低（未實機；不知道各模型是否都有 `[1m]`） | 實機開一顆 haiku 的分享 bot 確認；必要時只對有 1M 版本的模型加。 | — |
+| 7 | `d380c3569` `daemon/src/runners/login_assist.rs:135` | agy 登入選單的游標不在「1. Google OAuth」時固定送 `up`＋`enter`，假設游標剛好在它下一列。游標在第三項時會選到第二項（別種登入方式），之後畫面不再是選單，輔助不會修正。 | 低／低（選單預設游標在第一項） | 改成送數字鍵 `1`（若 TUI 支援），或依游標距離送對應次數的 `up`。 | — |
+| 8 | `e75cfd00c` `web/src/lib/agyModelGroup.ts:18`、`:72-76` | 同一家族同時有不帶強度的 slug（`gemini-4-neon`）與帶強度的 slug（`gemini-4-neon-high`）時，兩者分組鍵相同：群組同時有 `single` 與 `variants`，點模型按鈕永遠選到 `single`，`agyGroupMembers` 也只回 `single`。 | 低／低（目前 `agy models` 是否會同時列出兩種未確認） | 不帶強度的 slug 另用一個鍵，或併進 `variants` 當預設強度。 | — |
+| 9 | `c6dba5659` `web/src/components/MessageLedgerBar.tsx:80-84`、`:117-133` | 「這則不用追蹤」逐項取消後不更新本地狀態，靠 `ledger_updated` 事件重抓；中途失敗時已取消的項目仍顯示。每則使用者訊息下方的「⋯」選單沒有點外面或 Esc 關閉（`24e30af31` 的 `useDismiss` 沒套用）。 | 低／高 | 取消後重抓這則的項目；選單套 `useDismiss`。 | — |
+| 10 | `94fecdaab`／`c3e49701c` `web/src/components/TrackingBar.tsx:60-62` | 抓清單失敗（斷線、重啟中）時 `setItems(null)`，整條「追蹤中」列消失，要等下一次帳本事件才回來。 | 低／高 | 失敗時保留上一份清單。 | — |
+| 11 | `7e559a4a4` `daemon/src/runners/supervisor/api.rs:696`、`:718-740` | 每小時 12 則的上限以呼叫者計，本機所有排程腳本都算同一個呼叫者 `user`。一小時內不同腳本、不同 reason 合計超過 12 則時，之後的告警回 409 被丟掉。 | 低／中 | `user` 的額度改成依 `source` 分開計。 | — |
+| 12 | `814476e0e` `web/src/components/staleBundleBanner.css:69-75` | 深色覆寫只寫在 `@media (prefers-color-scheme: dark)` 裡的 `:root:not([data-theme='light'])`。系統是淺色、網頁手動切成深色（`data-theme="dark"`）時，換版橫幅仍是淺色配色。 | 低／中（未實機） | 比照 `messageLedgerBar.css:146-149` 補 `:root[data-theme="dark"]` 那一組。 | — |
+| 13 | `88e23f53b` `web/src/components/QuotaStrip.tsx:424-425` | 沒有任何讀數時一律顯示「查詢中…」，包含查詢已失敗、或該主機不會被探測的情況，文字會一直停在「查詢中…」。 | 低／中 | 有失敗原因或超過一個輪詢週期時改顯示「沒有讀數」。 | — |
+
+**讀過、沒有發現問題的**：`5e7498690`（搬檔，確認框、Bot 綁定檢查、共用身份不可刪都還在）；`8df02e2ca`、`c00748a10`（等價重構）；`0f95cb08b`（每次選取與每次連線各最多一次、進行中不重複）；`687dd9522`；`11a009778`（終端連結只開 http／https）；`60eb85094`、`c56079f55`（`useUpdateChipRequest` 以 `seq` 防重複觸發）；`9dd623538`、`d7af5803a`；`d3880bd24`（Argon 只認週窗、Gemini 只認精確桶 id）；`81d37e282`（只放行 `gemini-pro-orchestrator-` 前綴）；`c83e90007`、`ae511749a`、`5bbb8b01f`；`7e559a4a4` 的 `daemon-update-kick.sh`（`last_deploy.sha_full` 是編進 binary 的 sha，`build_info.rs:122-124`）；`5d738b155`、`2fdc129ea`；`9724d2d26`（「往上讀就先不換」的清單判斷已由 `771b5a03b` 改成只看選取文字，現行檔沒有全文件 `querySelector`）；`fb69cb281` 的 `wait_for` 清空（`agm` 沒有會誤送空字串的呼叫端）；`1eeca5e9e` 的權限（`require_writer`：使用者與專案管理入口；`source_message_id` 會驗專案）。
+
+### 深色主題色碼（14 個 commit）
+
+| commit | 結果 |
+|---|---|
+| `e4297bd1c`（80 行）、`94fecdaab`（18）、`1eeca5e9e`（4）、`c2ee11a18`（5）、`a923fa66c`（2） | `messageLedgerBar.css` 的寫死色碼都有對應的深色覆寫（`prefers-color-scheme` 與 `data-theme="dark"` 各一組）。 |
+| `773c0f3cf`（28） | 已由 `7e559a4a4` 全數改成主題 token，現行檔沒有殘留。 |
+| `d8c99894d`（11） | 手機通知膠囊刻意用固定的深色半透明底與淺色字，兩種主題都可讀；error／warn 另有樣式（`styles.css:3421-3445`）。 |
+| `fb80eb9e8`（2） | `.quota-expiry-badge` 的 `#111`／`#fff` 疊在 `var(--warn)`／`var(--danger)` 上，兩種主題對比都夠。 |
+| `814476e0e`（3） | 見發現 12。 |
+| `c3e49701c`（5）、`deeb02ed6`（3）、`2fdc129ea`（2）、`e8eb454bf`（1）、`5e7498690`（1） | 都是 `var(--x, 備用值)` 的備用值或陰影，現行檔沒有獨立的寫死色碼。 |
+
+### 需使用者裁示（新增）
+
+- **agy 快取 TTL 1 小時**（`86949766b`，發現 3）：與同檔三天前記的實測值相反，沒有說明。
+- **openai-api 預設模型 astra 的價差**（`663260b48`，前文已列）：補一個數字，astra 輸入 $8、輸出 $40，luna 是 $0.10、$0.50（每百萬 tokens），沒選模型就建立的 openai-api bot 單價是 luna 的 80 倍（`crates/am-config/src/lib.rs:2033`、`openai/pricing.rs:28-71`）。
+- **手動完成不經驗收**：管理者 bot 可以直接把項目 PATCH 成 `done`（`patch_item_cas` 不看呼叫者與前一個狀態），「待驗收」只是慣例，不是伺服器強制。若要強制，`answered → done` 只收使用者。
+
+### 仍未覆蓋
+
+- 33 個 commit 的測試、fixture、i18n 字串沒讀；`AddIdentityDialog.tsx:236-482` 的 JSX 沒讀。
+- 發現 2、5、6、7、8、12 沒有實測；發現 6 需要實機開一顆分享 bot。
+- 窄螢幕版面、深色主題仍沒有在瀏覽器實際操作（色碼只做靜態掃描）。
+- §8「只看標題，判定低風險」的 38 個 commit 這次沒有讀 diff（其中 `e4297bd1c`、`814476e0e`、`d8c99894d`、`a923fa66c`、`e8eb454bf` 只看了 CSS 的色碼行）。
