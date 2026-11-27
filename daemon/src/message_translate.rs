@@ -229,7 +229,7 @@ fn load(path: &Path) -> Option<CacheEntry> {
         .filter(|e: &CacheEntry| {
             !e.translation.trim().is_empty()
                 && !is_mostly_english_reply(&e.translation)
-                && !has_japanese_kana(&e.translation)
+                && (!has_japanese_kana(&e.translation) || e.source_head.as_deref().is_some_and(has_japanese_kana))
         })
 }
 
@@ -575,7 +575,7 @@ fn mark_rejected_with(
         ..Default::default()
     };
     tracing::info!(check = reason, src_latin = sl, src_cjk = sc, reply_latin = rl, reply_cjk = rc, identical = (reply.trim() == source.trim()), src_chars = source.chars().count(), reply_chars = reply.chars().count(), "message translate rejected by quality check");
-    if load_entry(path).is_some_and(|e| !e.translation.trim().is_empty()) {
+    if load(path).is_some() {
         return rejection_error_with(reason, Some(reply), Some(&detail));
     }
     if let Err(e) = save(path, &entry) {
@@ -1881,6 +1881,34 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中負面標記不調用 API");
         let _ = translate_with(&app, "m_fail", content, true).await;
         assert_eq!(f.calls.load(Ordering::SeqCst), 3, "force 略過標記");
+    }
+
+    /// 快取檔裡有譯文但 `load` 不認（主要是英文）時，重翻沒過要寫負面標記，下次開啟不再打 API。
+    #[tokio::test]
+    async fn invalid_cached_translation_is_replaced_by_rejection_marker() {
+        let (app, _dir) = app(true).await;
+        let content = "The 504 comes from GitHub, not AG Man's own server. The check for new codex versions asks GitHub for the latest 100 codex releases.";
+        let path = cache_path(&app.data_dir, &cache_key("m_bad_cache", content));
+        save(&path, &CacheEntry { prompt_version: PROMPT_VERSION.into(), translation: content.into(), ..Default::default() }).unwrap();
+        assert!(load(&path).is_none(), "英文譯文不算命中");
+        let f = fake_seq(&app, vec![content.to_string(), content.to_string()]);
+        let err = translate(&app, "m_bad_cache", content).await.unwrap_err();
+        assert!(is_quality_rejection(&err));
+        assert_eq!(load_rejection(&path).map(|(r, _)| r).as_deref(), Some("untranslated"), "無效舊譯文被負面標記取代");
+        let _ = translate(&app, "m_bad_cache", content).await.unwrap_err();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "第二次開啟命中負面標記，不再打 API");
+    }
+
+    /// 原文本身有假名時，帶假名的譯文仍算命中，不會每次開啟都重打 API。
+    #[test]
+    fn kana_in_source_keeps_kana_translation_cached() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-kana-{}", crate::db::ulid())));
+        let path = cache_path(&dir, "k");
+        let entry = |head: &str| CacheEntry { prompt_version: PROMPT_VERSION.into(), translation: "使用者引用了「ありがとう」這句話，意思是謝謝。".into(), source_head: Some(head.into()), ..Default::default() };
+        save(&path, &entry("The user quoted 「ありがとう」, meaning thanks.")).unwrap();
+        assert!(load(&path).is_some(), "原文有假名：譯文保留假名仍是命中");
+        save(&path, &entry("The user said thanks.")).unwrap();
+        assert!(load(&path).is_none(), "原文沒有假名：譯文出現假名不算命中");
     }
 
     /// 2026-11-20 截圖：英文段＋中文表格，整則中文多（不算「主要是英文」），前後英文段原樣留下。
