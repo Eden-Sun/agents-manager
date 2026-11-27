@@ -9,10 +9,12 @@ import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
 import { OutboxFiles } from './OutboxFiles'
+import { useOutboxFiles } from './useOutboxFiles'
 import { MobilePreviewButton } from './MobilePreview'
 import './imageShelf.css'
 
 const OPEN_KEY = 'am.shelf.open'
+const WIDE_QUERY = '(min-width: 1367px)'
 
 const PEEK_W = 300
 
@@ -34,28 +36,12 @@ interface PeekAt {
   boundLeft: number
 }
 
-function readOpen(fallback: boolean): boolean {
+function readStoredOpen(): boolean | null {
   try {
     const v = localStorage.getItem(OPEN_KEY)
-    return v === null ? fallback : v !== '0'
+    return v === null ? null : v !== '0'
   } catch {
-    return fallback
-  }
-}
-
-function hasStoredOpen(): boolean {
-  try {
-    return localStorage.getItem(OPEN_KEY) !== null
-  } catch {
-    return false
-  }
-}
-
-function matchesTablet(): boolean {
-  try {
-    return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(TABLET_QUERY).matches
-  } catch {
-    return false
+    return null
   }
 }
 
@@ -99,21 +85,22 @@ export function ImageShelf() {
   const addToShelf = useShelf((s) => s.add)
   const clear = useShelf((s) => s.clear)
   const notify = useStore((s) => s.notify)
-  const [open, setOpen] = useState(() => readOpen(!matchesTablet() || items.length > 0))
+  const [stored, setStored] = useState(readStoredOpen)
+  const [outboxCount, setOutboxCount] = useState(0)
   const atBottom = useMediaQuery(DRAWER_QUERY)
   const isTablet = useMediaQuery(TABLET_QUERY)
+  const isWide = useMediaQuery(WIDE_QUERY)
   const fileDrag = useFileDragActive()
+  const autoOpen = isWide ? items.length > 0 || outboxCount > 0 : !isTablet || items.length > 0
+  const layout = isWide ? 'wide' : isTablet ? 'tablet' : 'narrow'
+  const [latched, setLatched] = useState<string | null>(null)
+  if (autoOpen && latched !== layout) setLatched(layout)
+  const pinned = stored ?? (autoOpen || latched === layout)
+  const open = pinned || (isWide && fileDrag)
   const picker = useRef<HTMLInputElement>(null)
   const shelfRef = useRef<HTMLElement>(null)
   const [peek, setPeek] = useState<PeekAt | null>(null)
   const peekTimer = useRef<number | null>(null)
-
-  const prevTablet = useRef(isTablet)
-  useEffect(() => {
-    if (prevTablet.current === isTablet) return
-    prevTablet.current = isTablet
-    if (!hasStoredOpen()) setOpen(!isTablet || items.length > 0)
-  }, [isTablet, items.length])
 
   const endPeek = useCallback(() => {
     if (peekTimer.current !== null) {
@@ -173,7 +160,7 @@ export function ImageShelf() {
   }, [peek])
 
   const setOpenPersisted = (next: boolean) => {
-    setOpen(next)
+    setStored(next)
     try {
       localStorage.setItem(OPEN_KEY, next ? '1' : '0')
     } catch {
@@ -191,7 +178,7 @@ export function ImageShelf() {
     const r = addToShelf(files)
     for (const name of r.tooBig) notify('error', t('「{name}」超過 {max} 上限，沒有放進暫存區。', { name, max: formatSize(MAX_BYTES) }))
     if (r.overflow > 0) notify('error', t('暫存區最多 {max} 張，有 {overflow} 張沒放進去。', { max: SHELF_MAX, overflow: r.overflow }))
-    if (r.added > 0 && !open) setOpenPersisted(true)
+    if (r.added > 0 && !pinned) setOpenPersisted(true)
   }
 
   const drop = useDropTarget(take)
@@ -291,7 +278,7 @@ export function ImageShelf() {
             )}
           </div>
           {}
-          <OutboxFiles />
+          <OutboxFiles onCount={setOutboxCount} />
           {drop.over ? (
             <div className="shelf-veil" aria-hidden="true">
               {t("放開以暫存")}
@@ -313,6 +300,7 @@ export function ImageShelf() {
             {count > 0 ? <span className="shelf-count">{count}</span> : null}
             <span className="shelf-handle-label">{t("檔案暫存")}</span>
           </button>
+          {isWide && stored === null ? <OutboxProbe onCount={setOutboxCount} /> : null}
           {fileDrag ? (
             <div className={`shelf-pad${drop.over ? ' over' : ''}`} {...drop.props}>
               {t('放到這裡先暫存')}
@@ -322,6 +310,15 @@ export function ImageShelf() {
       )}
     </aside>
   )
+}
+
+function OutboxProbe({ onCount }: { onCount: (n: number) => void }) {
+  const { botId, files, loadedFor } = useOutboxFiles()
+  const settled = !botId || loadedFor === botId
+  useEffect(() => {
+    if (settled) onCount(files.length)
+  }, [settled, files.length, onCount])
+  return null
 }
 
 function ShelfCard({

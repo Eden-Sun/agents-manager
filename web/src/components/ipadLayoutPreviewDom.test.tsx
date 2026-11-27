@@ -57,7 +57,7 @@ after(async () => {
   await teardownDom()
 })
 
-test('平板寬度（834px／1194px）下 File shelf 預設收合；桌面（1600px）預設展開', async () => {
+test('平板寬度（834px／1194px）與空的桌面（1600px）File shelf 都預設收合', async () => {
   installMatchMedia(834)
   await mount(<ImageShelf />)
   assert.equal(document.querySelector('.shelf.open'), null, 'iPad 直向預設收合')
@@ -71,7 +71,7 @@ test('平板寬度（834px／1194px）下 File shelf 預設收合；桌面（160
   await unmountAll()
   installMatchMedia(1600)
   await mount(<ImageShelf />)
-  assert.ok(document.querySelector('.shelf.open'), '桌面預設展開')
+  assert.equal(document.querySelector('.shelf.open'), null, '空的桌面預設收合')
 })
 
 test('右側預覽可切換 iPad 直向／橫向並記住於 localStorage，縮放比例依寬度自動算', async () => {
