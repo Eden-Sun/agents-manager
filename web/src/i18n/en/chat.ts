@@ -446,7 +446,7 @@ export default {
   '{host}：{a} 個進行中、{w} 個排隊': '{host}: {a} running, {w} queued',
   '人工': 'manual',
   '建置 {a}＋{w} 排隊': 'Builds {a} + {w} queued',
-  '建置 {a}': 'Builds {a}',
+  '建置': 'build',
   '錨點：${usd}（{at}）': 'Anchor: ${usd} ({at})',
   '已確定花費：${spent}': 'Confirmed spend: ${spent}',
   '另有結果不明的請求最多 ${unk}（以預留上限計）': 'Plus up to ${unk} from requests with unknown results (at the reserved cap)',

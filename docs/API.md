@@ -1684,7 +1684,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 `remote.hosts`（#1956）是每台一格、照設定順序：`[{target, local, remote_reachable, checked_at, reason}]`（`target`＝`local` 或 `user@host:port`，`local`＝是不是本機執行器），
 沒開時是空陣列；頂層的 `target`／`remote_reachable`／`checked_at`／`reason` 維持是第一台的那格，舊的讀法不用改。
 
-即時人數（狀態列「建置 N」晶片）：
+即時人數（側欄左上主機數據區的「建置 N」徽章）：
 - `remote.hosts[].active`／`waiting`：那台建置主機上守門 flock 住的 `<remote_root>/.slots/<n>`（正在跑）與 `.queue/<token>`（排隊）數，只試鎖、不建不刪。本機執行器在本機跑，其他一次 ssh，最多 2 秒，結果快取 5 秒；連不上、逾時或讀不懂是 `null`，不擋回應。指到 daemon 這台自己的熱池（`local`／`127.0.0.1`／`localhost`）時，本機原生 cargo 也拿同一組 `.slots`，所以扣掉本機 `held` 數（不小於 0）才不重算；本機 cargo 拿到 daemon 名額、還在等熱池那一下會少算一個。
 - `remote_runs`：`[{call_id, bot_id, purpose, since, target}]`，這台的 `remote-cargo` helper 每次呼叫在資料目錄 `remote-cargo-runs/<call_id>.json` 的登錄（`purpose`＝cargo 參數，最多 200 字；`target`＝排到的那台，`null`＝還在挑主機或排名額）。helper 整段持有該檔的 flock，鎖沒人持有的殘檔讀的時候刪掉。
 - `total_active`＝本機 `held` 數＋各台 `active`（`null` 不算）；`total_waiting`＝本機 `waiting` 數＋各台 `waiting`。

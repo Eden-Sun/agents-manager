@@ -2,6 +2,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { t, useT } from '../lib/i18n'
 import { projectHostName, useStore } from '../store/store'
 import { LOCAL_HOST } from '../api/types'
+import { BuildSlotsChip } from './BuildSlotsChip'
 import { MemBadge } from './MemBadge'
 
 export function HeadMemBadges() {
@@ -21,6 +22,7 @@ export function HeadMemBadges() {
     return (
       <div className="head-ram">
         <MemBadge />
+        <BuildSlotsChip />
       </div>
     )
   }
@@ -39,6 +41,7 @@ export function HeadMemBadges() {
           </div>
         )
       })}
+      <BuildSlotsChip />
     </div>
   )
 }

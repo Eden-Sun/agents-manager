@@ -1,11 +1,12 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { handleFrame, resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
 import type { BuildSlots } from '../api/buildSlots'
 import { resetBuildSlotsForTest } from '../store/buildSlots'
 import { BuildSlotsChip } from './BuildSlotsChip'
+import { HeadMemBadges } from './HeadMemBadges'
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
@@ -54,13 +55,18 @@ async function serving<T>(snap: BuildSlots, fn: () => Promise<T>): Promise<{ res
 }
 
 const chip = () => document.querySelector<HTMLElement>('[data-k="build-slots-chip"]')
+const shown = () => {
+  const c = chip()!
+  return `${c.querySelector('.mem-k')?.textContent} ${c.querySelector('.mem-v')?.textContent}`
+}
 
-it('0 個建置：淡色「建置 0」', async () => {
+it('0 個建置：淡色「建置 0」，與 RAM 徽章同一套 mem-badge 外觀', async () => {
   resetStoreForTest()
   await serving(idle, async () => {
     await mount(<BuildSlotsChip />)
     await until(() => chip() !== null, '晶片畫出來')
-    assert.match(chip()!.textContent ?? '', /建置 0/)
+    assert.equal(shown(), '建置 0')
+    assert.ok(chip()!.classList.contains('mem-badge'))
     assert.ok(chip()!.classList.contains('idle'))
   })
 })
@@ -72,7 +78,7 @@ it('有建置：數字是本機＋遠端合計，tooltip 列出每格與每台',
     await mount(<BuildSlotsChip />)
     await until(() => chip() !== null, '晶片畫出來')
     const c = chip()!
-    assert.match(c.textContent ?? '', /建置 3/)
+    assert.equal(shown(), '建置 3')
     assert.ok(!c.classList.contains('idle'))
     const tip = c.title
     assert.match(tip, /本機 · test -p agents-managerd · reviewer · 1m1\d/)
@@ -82,15 +88,16 @@ it('有建置：數字是本機＋遠端合計，tooltip 列出每格與每台',
   })
 })
 
-it('有排隊：顯示「建置 N＋M 排隊」，推送會即時換數字', async () => {
+it('有排隊：顯示「建置 N＋M」，推送會即時換數字', async () => {
   resetStoreForTest()
   await serving(queued, async () => {
     await mount(<BuildSlotsChip />)
     await until(() => chip() !== null, '晶片畫出來')
-    assert.match(chip()!.textContent ?? '', /建置 3＋2 排隊/)
+    assert.equal(shown(), '建置 3＋2')
+    assert.equal(chip()!.getAttribute('aria-label'), '建置 3＋2 排隊')
     assert.ok(chip()!.classList.contains('queued'))
     handleFrame(useStore.setState, useStore.getState, { type: 'build_slots_updated', data: { ...idle, total_active: 1, slots: [{ ...busy.slots[0] }] } })
-    await until(() => /建置 1/.test(chip()!.textContent ?? ''), '推送後換成 1')
+    await until(() => shown() === '建置 1', '推送後換成 1')
     assert.ok(!chip()!.classList.contains('queued'))
   })
 })
@@ -108,4 +115,19 @@ it('讀不到 /api/build-slots：不畫晶片', async () => {
   } finally {
     rawTransport.request = orig
   }
+})
+
+it('左上主機數據區：只有本機與有遠端主機時，晶片都跟 RAM 徽章放在同一區', async () => {
+  resetStoreForTest()
+  const row = (host: string) => ({ host, total_bytes: 1 << 30, herdr_bytes: 1 << 20, agents_bytes: 1 << 29, processes: 3, browsers: [], machine: null, error: null })
+  await serving(busy, async () => {
+    useStore.setState({ mem: { hosts: [row('local')] } } as never)
+    await mount(<HeadMemBadges />)
+    await until(() => chip() !== null, '單機時畫出來')
+    assert.ok(chip()!.parentElement!.classList.contains('head-ram'))
+    await act(() => useStore.setState({ mem: { hosts: [row('local'), row('m4p')] } } as never))
+    await until(() => document.querySelector('.head-ram.multi') !== null, '換成多主機')
+    assert.equal(document.querySelectorAll('[data-k="build-slots-chip"]').length, 1)
+    assert.ok(chip()!.parentElement!.classList.contains('multi'))
+  })
 })

@@ -5,7 +5,7 @@ import { CodexResetHint } from './CodexResetHint'
 import { leftPct } from '../lib/quotaLeft'
 import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout'
 import type { QuotaFitState } from '../lib/quotaLayout'
-import { measureQuotaAvail, measureQuotaRow, shownChildren } from '../lib/quotaMeasure'
+import { measureQuotaAvail, measureQuotaRow } from '../lib/quotaMeasure'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
@@ -17,7 +17,6 @@ import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
 import { ApiBalanceGroup } from './ApiBalanceGroup'
-import { BuildSlotsChip } from './BuildSlotsChip'
 import { BalanceQuotaChip } from './BalanceQuotaChip'
 import { useClaudeBalanceVisible, useOpenAiBalanceVisible } from './balanceHooks'
 import { OpenAiBalanceChip } from './OpenAiBalanceChip'
@@ -1034,13 +1033,12 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
+      const groupEl = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
       const groupGap = parseFloat(getComputedStyle(strip).columnGap) || 0
-      const besideRow = shownChildren(strip).filter((el) => el !== row && !el.classList.contains('quota-pop'))
-      const besideWidth = besideRow.reduce((sum, el) => {
-        const cs = getComputedStyle(el)
-        return sum + el.getBoundingClientRect().width + groupGap + (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0)
-      }, 0)
-      const avail = Math.max(0, measureQuotaAvail(head, strip) - besideWidth)
+      const groupMargin = groupEl
+        ? (parseFloat(getComputedStyle(groupEl).marginLeft) || 0) + (parseFloat(getComputedStyle(groupEl).marginRight) || 0)
+        : 0
+      const avail = Math.max(0, measureQuotaAvail(head, strip) - (groupEl ? groupEl.getBoundingClientRect().width + groupGap + groupMargin : 0))
       const wasCollapsed = row.classList.contains('collapsed')
       row.classList.remove('collapsed')
       let full
@@ -1062,7 +1060,8 @@ export function QuotaStrip({
     remeasure()
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(remeasure)
     for (const el of [head, ...head.children, ...row.children]) ro?.observe(el)
-    for (const el of strip.children) ro?.observe(el)
+    const apiGroup = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
+    if (apiGroup) ro?.observe(apiGroup)
     const fonts = document.fonts
     fonts?.addEventListener('loadingdone', remeasure)
     return () => {
@@ -1143,7 +1142,6 @@ export function QuotaStrip({
         })}
       </div>
       <ApiBalanceGroup />
-      <BuildSlotsChip />
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host, t)}</div>
