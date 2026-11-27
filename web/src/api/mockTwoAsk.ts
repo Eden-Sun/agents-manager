@@ -4,6 +4,7 @@ export interface TwoAskState {
   cursor: number
   picked: number | null
   checked: boolean[]
+  questions?: typeof TWO_ASK_QUESTIONS
 }
 
 export const TWO_ASK_QUESTIONS = [
@@ -31,7 +32,7 @@ export const TWO_ASK_QUESTIONS = [
   },
 ]
 
-export const twoAskStart = (): TwoAskState => ({ stage: 0, cursor: 0, picked: null, checked: [false, false] })
+export const twoAskStart = (questions?: typeof TWO_ASK_QUESTIONS): TwoAskState => ({ stage: 0, cursor: 0, picked: null, checked: [false, false], ...(questions ? { questions } : {}) })
 
 const DIVIDER = '─'.repeat(40)
 const mark = (on: boolean) => (on ? '❯' : ' ')
@@ -39,9 +40,10 @@ const mark = (on: boolean) => (on ? '❯' : ' ')
 const rowCount = (s: TwoAskState) => (s.stage === 0 ? 3 : s.stage === 1 ? 3 : 2)
 
 export function twoAskScreen(s: TwoAskState): string[] {
+  const QS = s.questions ?? TWO_ASK_QUESTIONS
   if (s.stage === 0) {
-    const [a, b] = TWO_ASK_QUESTIONS[0].options
-    const q = TWO_ASK_QUESTIONS[0].question
+    const [a, b] = QS[0].options
+    const q = QS[0].question
     return [
       DIVIDER,
       '',
@@ -60,7 +62,7 @@ export function twoAskScreen(s: TwoAskState): string[] {
     ]
   }
   if (s.stage === 1) {
-    const [a, b] = TWO_ASK_QUESTIONS[1].options
+    const [a, b] = QS[1].options
     const box = (i: number) => (s.checked[i] ? '[✔]' : '[ ]')
     return [
       DIVIDER,
@@ -76,13 +78,13 @@ export function twoAskScreen(s: TwoAskState): string[] {
       'Enter to select · ↑/↓ to navigate · Esc to cancel',
     ]
   }
-  const q2 = TWO_ASK_QUESTIONS[1].options.filter((_, i) => s.checked[i]).map((o) => o.label)
+  const q2 = QS[1].options.filter((_, i) => s.checked[i]).map((o) => o.label)
   return [
     'Review your answers',
     '',
-    ` ● ${TWO_ASK_QUESTIONS[0].question}`,
-    `   → ${s.picked === null ? '' : TWO_ASK_QUESTIONS[0].options[s.picked]?.label ?? ''}`,
-    ` ● ${TWO_ASK_QUESTIONS[1].question}`,
+    ` ● ${QS[0].question}`,
+    `   → ${s.picked === null ? '' : QS[0].options[s.picked]?.label ?? ''}`,
+    ` ● ${QS[1].question}`,
     `   → ${q2.join(', ')}`,
     '',
     'Ready to submit your answers?',

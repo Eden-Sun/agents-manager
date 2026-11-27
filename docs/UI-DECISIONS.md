@@ -1452,7 +1452,7 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **繁中是原文、英文是補充**：缺英文就退回繁中，不顯示 key 名或空白，所以逐區抽字串的中途畫面是中英混合、不會壞。
 - **daemon 回傳的錯誤與系統訊息、使用者內容、模型名、指令不翻**：那些是別人產生的資料，不是介面。規則與譯名表在 FRONTEND.md〈多語系〉。
 - **英文字比中文寬，版面為英文留餘地**：手機標題列的分頁（Chat／Terminal／Preview）在英文時收窄左右內距與字級，bot 名才排得下（390px）；更新檢查表的狀態欄在英文放寬到 124px（「Update available」）。這些只在 `:lang(en)` 生效，繁中版面不動。
-- **README 截圖兩套**：英文放 `docs/screenshots/readme/en/`、繁中放 `zh-TW/`，各自給對應語言的 README 引用；用 mock 的 `?lang=` 拍，示範資料（訊息、任務、Issue）跟著語言。
+- **README 截圖兩套**：英文放 `docs/screenshots/readme/en/`、繁中放 `zh-TW/`，各自給對應語言的 README 引用；用 mock 的 `?lang=` 拍，示範資料（訊息、任務、Issue）跟著語言。主圖是 `desktop-light.png`（1440×960）＋`mobile-light.png`（390×844 @2x），同為淺色、README 以 75/25 表格並排；拍法：關掉暫存區、`__amMock.readme()` 建好場景（三種狀態的 bot、選擇題卡片、像真實工作的對話、額度都有讀數）、Esc 關掉自動彈出的回應框、隱藏 `.mock-badge`。
 
 ## 專家模式專案的新增 Bot（2026-11-01）
 

@@ -21,6 +21,7 @@ import { MockIntegrationUpdates } from './mockIntegrationUpdates'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
 import { L } from './mockText'
+import { readmeAsk, readmeChat, readmeDone } from './mockReadmeScene'
 import { DEFAULT_USER_TIME_ZONE, isValidTimeZone, utcOffsetLabel } from '../lib/timeZone'
 import { hasCodeIn } from '../lib/charCodes'
 
@@ -3765,7 +3766,7 @@ export class MockTransport implements Transport {
 
   private pendingQuestion(botId: string) {
     const run = this.activeRun(botId)
-    if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: TWO_ASK_QUESTIONS, jev_options: MOCK_TWO_ASK_JEV }
+    if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: this.twoAsk.get(botId)?.questions ?? TWO_ASK_QUESTIONS, jev_options: this.twoAsk.get(botId)?.questions ? null : MOCK_TWO_ASK_JEV }
     const asyncAsk = this.codexAsync.get(botId)
     if (run?.agent_status === 'blocked' && asyncAsk) return { questions: CODEX_ASYNC_QUESTIONS, jev_options: null, async_screen: { expanded: asyncAsk.expanded, count: 1 } }
     if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
@@ -4311,6 +4312,38 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
+  readmeScene() {
+    const NAMES = ['am-claude', 'am-claude-2', 'am-codex', 'am-grok']
+    const byName = (n: string) => this.botIdByName(n) ?? ''
+    for (const n of NAMES) if (byName(n) && !this.activeRun(byName(n))) this.start(byName(n))
+    this.quota.grok = { five_hour: { used_pct: 22, resets_at: inHours(1.5) }, seven_day: { used_pct: 41, resets_at: inHours(70) }, plan: 'SuperGrok', updated_at: now(), host: 'local' }
+    this.quota['claude:ccdev'] = { five_hour: { used_pct: 9, resets_at: inHours(4.2) }, seven_day: { used_pct: 34, resets_at: inHours(96) }, plan: 'Max 5x', updated_at: now(), host: 'local' }
+    later(() => {
+      const lead = byName('am-claude')
+      const done = byName('am-grok')
+      const convs = new Set([lead, done].filter(Boolean).map((id) => this.conv(id)))
+      this.messages = this.messages.filter((m) => !convs.has(m.conversation_id))
+      let turn: string | null = null
+      for (const [role, content] of readmeChat()) {
+        if (role === 'user') turn = ulid('turn')
+        this.addMessage({ conversation_id: this.conv(lead), bot_id: lead, turn_id: turn, role, content, source: role === 'user' ? 'web' : 'hook', incomplete: 0 })
+      }
+      this.addMessage({ conversation_id: this.conv(done), bot_id: done, turn_id: ulid('turn'), role: 'assistant', content: readmeDone(), source: 'hook', incomplete: 0 })
+      for (const n of NAMES) {
+        const run = this.activeRun(byName(n))
+        if (!run) continue
+        run.turn_error = null
+        run.update_notice = null
+        run.prompt_suggestion = null
+        setAgentStatus(run, n === 'am-claude-2' || n === 'am-codex' ? 'working' : 'idle')
+      }
+      this.twoAsk.set(lead, twoAskStart(readmeAsk()))
+      this.enterBlocked(lead)
+      for (const n of NAMES) this.emitBotStatus(byName(n))
+      this.forceResync()
+    }, 2500)
+  }
+
   botIdByName(name: string): string | undefined {
     return this.bots.find((b) => b.name === name)?.id
   }
@@ -4374,6 +4407,7 @@ function installDevHelpers(mock: MockTransport) {
     codexAsync: (botIdOrName?: string) =>
       mock.enterCodexAsync(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     surveyEn: (botIdOrName?: string) => mock.enterSurveyEn(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
+    readme: () => mock.readmeScene(),
     twoAsk: (botIdOrName?: string) => mock.enterTwoAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     bulletAsk: (botIdOrName?: string) =>
       mock.enterBulletAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
