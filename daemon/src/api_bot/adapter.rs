@@ -536,6 +536,7 @@ impl Model for ApiBotAdapter {
                         let mut resp = resp;
                         if let Some(obj) = resp.usage.as_object_mut() {
                             obj.insert("effort".to_string(), Value::String(effective_effort));
+                            obj.insert(super::pricing::COMPLETED_AT_KEY.to_string(), Value::from(super::pricing::now_ms()));
                             if effort_auto_lowered {
                                 obj.insert("auto_lowered_effort".to_string(), Value::Bool(true));
                             }

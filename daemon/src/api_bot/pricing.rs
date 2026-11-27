@@ -143,7 +143,27 @@ fn previous_usage_prefix(response: &Response) -> Option<u64> {
     input.checked_add(cache_creation)?.checked_add(cache_read)
 }
 
-/// 預留：無前次回覆用量時，整段輸入按「快取寫入」算；有前次回覆用量時，前次 prefix 按快取讀取、新 tail 按寫入＋20% 餘裕。輸出按 max_tokens。
+/// 存進 `Response.usage` 的回覆完成時間（Unix 毫秒），由 adapter 在用量結清後寫入；跟 `effort` 一起判斷 prompt cache 是否還活著。
+pub(super) const COMPLETED_AT_KEY: &str = "completed_at_ms";
+/// 判斷 cache 存活時預留的時間餘裕：請求從預留到抵達上游還要一段時間，貼著 TTL 的不算熱。
+const CACHE_TTL_MARGIN_MS: i64 = 30_000;
+
+/// 上一次回覆的 prefix 這次還會命中 prompt cache 嗎（#2231）：模型與 effort 都沒變，且回覆完成距今小於 cache TTL。
+/// 判斷不了（舊 checkpoint 沒有完成時間、時鐘倒退）一律當成失效，整段按寫入價預留，寧可多留不可少留。
+fn prefix_cache_warm(prev: &Response, options: &super::protocol::Options, now_ms: i64) -> bool {
+    let usage = prev.usage.as_object();
+    let effort = usage.and_then(|u| u.get("effort")).and_then(Value::as_str);
+    let Some(completed) = usage.and_then(|u| u.get(COMPLETED_AT_KEY)).and_then(Value::as_i64) else { return false };
+    let ttl_ms: i64 = if options.cache_ttl_1h { 3_600_000 } else { 300_000 };
+    let age = now_ms - completed;
+    prev.model == options.model && effort == Some(options.effort.as_str()) && (0..ttl_ms - CACHE_TTL_MARGIN_MS).contains(&age)
+}
+
+pub(super) fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// 預留：無前次回覆用量時，整段輸入按「快取寫入」算；有前次回覆用量且 cache 還活著（[`prefix_cache_warm`]）時，前次 prefix 按快取讀取、新 tail 按寫入＋20% 餘裕。輸出按 max_tokens。
 fn reserve_microusd(
     input_bound: u64,
     max_tokens: u32,
@@ -214,7 +234,10 @@ impl QuoteProvider for DirectGlobal {
             return Err(QuoteError::InvalidRequest);
         }
         let rates = rates(&request.options().model)?;
-        let prev_prefix = request.previous_response().and_then(previous_usage_prefix);
+        let prev_prefix = request
+            .previous_response()
+            .filter(|prev| prefix_cache_warm(prev, request.options(), now_ms()))
+            .and_then(previous_usage_prefix);
         Ok(ReservationQuote {
             reserved_microusd: reserve_microusd(
                 input_token_bound(request)?,
@@ -235,7 +258,7 @@ impl QuoteProvider for DirectGlobal {
         let rates = rates(&request.options().model)?;
         if response.model != request.options().model { return Err(QuoteError::UntrustedUsage); }
         let usage = response.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
-        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo" | "iterations" | "effort" | "auto_lowered_effort")) { return Err(QuoteError::UntrustedUsage); }
+        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo" | "iterations" | "effort" | "auto_lowered_effort" | "completed_at_ms")) { return Err(QuoteError::UntrustedUsage); }
         let input = usage.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let output = usage.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let speed = usage.get("speed").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
@@ -714,7 +737,9 @@ mod tests {
             "cache_read_input_tokens": 1000,
             "cache_creation_input_tokens": 500,
             "output_tokens": 200,
-            "speed": "standard"
+            "speed": "standard",
+            "effort": "high",
+            COMPLETED_AT_KEY: now_ms()
         }));
         req.set_previous_response(Some(prev));
 
@@ -745,6 +770,60 @@ mod tests {
         assert!(settled.estimated_microusd < quote.reserved_microusd);
     }
 
+    /// 上一次回覆的 usage（150k prefix），帶 adapter 會寫入的 effort 與完成時間。
+    fn prev_with_stamp(effort: &str, completed_at_ms: i64) -> Response {
+        response(json!({
+            "input_tokens": 10, "cache_read_input_tokens": 149_990, "cache_creation_input_tokens": 0,
+            "output_tokens": 100, "speed": "standard", "effort": effort, COMPLETED_AT_KEY: completed_at_ms
+        }))
+    }
+
+    /// #2231：bot 閒置超過 cache TTL 後的第一個請求、換 effort／模型、舊 checkpoint 沒有完成時間，
+    /// prefix 都不會命中 cache，實際按寫入價計費；預留不能低於整段寫入價。
+    #[test]
+    fn cold_prefix_cache_reserves_full_write_price() {
+        let messages = vec![
+            Message { role: "user".into(), content: json!("x".repeat(150_000)) },
+            Message { role: "assistant".into(), content: json!("reply") },
+            Message { role: "user".into(), content: json!("next question") },
+        ];
+        let build = |ttl_1h: bool, prev: Response| {
+            RequestEnvelope::new(opt(crate::config::API_BOT_MODEL, false, 1024, 0, ttl_1h), json!("system"), messages.clone())
+                .unwrap()
+                .with_previous_response(Some(prev))
+        };
+        let full_write = |req: &RequestEnvelope, write: i64| {
+            let bound = input_token_bound(req).unwrap() as i64;
+            assert!(bound > 150_000);
+            (bound * write + 1024 * 200 + 9) / 10
+        };
+        let now = now_ms();
+
+        let warm = build(false, prev_with_stamp("high", now - 60_000));
+        assert!(DirectGlobal.reserve(&warm).unwrap().reserved_microusd < full_write(&warm, 50) / 5, "一分鐘前的回覆：prefix 按讀取價");
+
+        let idle = build(false, prev_with_stamp("high", now - 6 * 60_000));
+        assert!(DirectGlobal.reserve(&idle).unwrap().reserved_microusd >= full_write(&idle, 50), "閒置 6 分鐘，5 分鐘 TTL 已過");
+
+        let idle_1h_ok = build(true, prev_with_stamp("high", now - 6 * 60_000));
+        assert!(DirectGlobal.reserve(&idle_1h_ok).unwrap().reserved_microusd < full_write(&idle_1h_ok, 80) / 5, "1 小時 TTL 下 6 分鐘仍算熱");
+        let idle_1h = build(true, prev_with_stamp("high", now - 61 * 60_000));
+        assert!(DirectGlobal.reserve(&idle_1h).unwrap().reserved_microusd >= full_write(&idle_1h, 80), "閒置超過 1 小時");
+
+        let effort_changed = build(false, prev_with_stamp("low", now - 60_000));
+        assert!(DirectGlobal.reserve(&effort_changed).unwrap().reserved_microusd >= full_write(&effort_changed, 50), "換 effort");
+
+        let mut model_changed = prev_with_stamp("high", now - 60_000);
+        model_changed.model = "claude-fable-5-2".into();
+        let model_changed = build(false, model_changed);
+        assert!(DirectGlobal.reserve(&model_changed).unwrap().reserved_microusd >= full_write(&model_changed, 50), "換模型");
+
+        let mut unstamped = prev_with_stamp("high", 0);
+        unstamped.usage.as_object_mut().unwrap().remove(COMPLETED_AT_KEY);
+        let unstamped = build(false, unstamped);
+        assert!(DirectGlobal.reserve(&unstamped).unwrap().reserved_microusd >= full_write(&unstamped, 50), "舊 checkpoint 沒有完成時間");
+    }
+
     #[test]
     fn long_session_reserve_is_much_lower_than_legacy_formula() {
         let long_messages = vec![
@@ -763,7 +842,9 @@ mod tests {
             "cache_read_input_tokens": 59_000,
             "cache_creation_input_tokens": 0,
             "output_tokens": 100,
-            "speed": "standard"
+            "speed": "standard",
+            "effort": "high",
+            COMPLETED_AT_KEY: now_ms()
         }));
         req.set_previous_response(Some(prev));
 
