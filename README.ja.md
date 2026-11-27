@@ -27,29 +27,29 @@ AG Man は IDE ではなく、CLI agent を直接起動することもありま�
 - **スーパーバイザー（AGM）**：任意で使えるコーディネーター bot です。全体を巡回し、作業を振り分け、アイドル bot をスリープさせ、デプロイを担当します。詳しくは [SPEC §18](docs/SPEC.md) を参照してください。
 
 **スケジュールとプッシュ通知**
-- プロジェクトのスケジュール：単発、固定間隔、毎日、毎週、複数時間帯での実行に対応します。スケジュールされたプロンプトは専用の scheduler bot（`role=scheduler`）に送られ、スナップショット／クリーン再起動をサポートし、実行記録が残ります。
-- Web Push：ターンの完了、応答が必要なターン、スケジュールの結果、アップストリームの新モデルリリース、クォータのリセットを通知します。それぞれ設定で個別にオン／オフできます。いずれかのデバイスでメッセージを既読にしていれば、プッシュは送られません。
+- プロジェクトのスケジュール：単発、固定間隔、毎日、毎週、複数時間帯での実行に対応します。スケジュールされたプロンプトは専用の scheduler bot（`role=scheduler`）に送られ、スナップショット／クリーン再起動（`agy` を含む）をサポートし、実行記録が残ります。
+- Web Push：ターンの完了、応答が必要なターン、スケジュールの結果、アップストリームの新モデルリリース、クォータのリセットを通知します。それぞれ設定で個別にオン／オフできます。いずれかのデバイスで既読になっている場合や、スマートフォンで AG Man をフォアグラウンド表示中の場合はプッシュを抑止します。
 - 長文ターンの完了時には「メッセージが長いため、クリックして全文を表示」という簡潔なプレビューが届き、会話を直接開くことができます。
 - Codex のリセットクレジット通知は 1 時間、1 日、または 3 日間スヌーズ（「次回から通知しない」）できます。
 
 **リモートホストとアカウントのクォータ**
 - プロジェクトは SSH ホスト上に置くことができ、そのホストの herdr を通じて動作します。リモート bot、ホストの shell、CLI へのログイン、クォータに対応し、プロジェクトを別の daemon に引き継ぐこともできます。
-- **Identities（アカウント）ページ**：ホストタブと各 CLI カード（Claude、Codex、Grok、agy）でホストを跨いだ identity を一覧表示します。「アカウント追加」ダイアログで設定ディレクトリの分離を案内し、共有リスクを警告した上でバックグラウンドでログインします。既定のアカウントは非表示やログアウトが可能です。
-- **グローバルな API 残高表示**：上部のクォータバーとドロップダウンメニューに、全ホストの Anthropic API および OpenAI API 残高がリアルタイム表示され、デスクトップでは 2 行カプセルと推定支出額が表示されます。
+- **Identities（アカウント）ページ**：ホストタブと各 CLI カード（Claude、Codex、Grok、agy）でホストを跨いだ identity を一覧表示します。「アカウント追加」ダイアログで設定ディレクトリの分離を案内し、共有リスクを警告し、接続済みホスト間での identity のコピー／同期やバックグラウンドログイン（`agy` の Google 認証 URL 自動抽出を含む）を支援します。既定のアカウントは非表示やログアウトが可能です。
+- **グローバルな API 残高表示**：上部のクォータバーとドロップダウンメニューに、全ホストの Anthropic API および OpenAI API 残高（OpenAI は platform の `credit_grants` 実残高を読み取り）がリアルタイム表示され、デスクトップでは 2 行カプセルで表示されます。
 - **モデル命名と順序の統一**：Codex と OpenAI API のモデル命名を統一し、ファミリーごとの価格順（安価から高価：Luna < Terra < Sol < Astra、Flash < Hydrogen < Argon < Neon）で並べ、レガシー版は明確に表記されます。
 - クォータとリセット時刻はホストと identity ごとに表示され、残量が少ないと警告されます。
 - CLI が対応している場合、モデル、effort、fast mode を Web UI からその場で切り替えられます。
 
 **更新と保守**
 - 「Update check」ページには、各ホストの herdr、各 agent CLI、各 hook 連携のバージョンが一覧表示され、ワンクリックで更新できます。
-- アップデートチップはいつでもクリック可能で、実行中の忙しい bot もアイドル時に自動で再起動するようにスケジュールできます。
+- CLI アップグレードはクリック可能な単一チップに集約され、インストール→再起動→スケジュール連携はブラウザを閉じても daemon 側で継続実行されます。
 - アイドル状態の bot は設定した時間が経つとスリープし、再開に必要な情報だけを残します。
 
 **作業領域とガードレール**
-- bot のローカル開発サーバーをチャットの横でプレビューできます。
-- outbox HTML プレビュー：bot が生成した `.html` ファイルを新しいタブで完全な Web ページとして直接プレビューできます。
-- bot 間で共有する一時ファイル置き場（file shelf）と、bot が生成したダウンロード可能なファイルのための outbox があります。
-- herdr のプロセスツリーを表示するメモリビューがあります。
+- bot のローカル開発サーバーをチャットの横でプレビューでき、スマートフォンおよび iPad のビューポート切り替えに対応します。
+- outbox HTML プレビューと `agy` 生成画像：bot が生成した `.html` ファイルを新しいタブで完全な Web ページとして直接プレビューでき、`agy` が生成した画像はチャット内に自動表示され outbox にも一覧表示されます（1 時間保持）。
+- bot 間で共有する一時ファイル置き場（file shelf）と、bot が生成したダウンロード可能なファイルのための outbox があります（マウスおよび iPad の Apple Pencil ホバーでの画像プレビューに対応）。
+- ホスト全体の CPU 使用率と herdr プロセスツリーを確認できるメモリ／CPU ビューがあります。
 - 組み込みの hook が、他の agent を巻き添えにする広範囲の `pkill`／`kill` コマンドを遮断します。
 
 **中国語と英語の UI**：既定ではブラウザの言語に従います。Settings → Display で切り替えられます。
@@ -66,7 +66,7 @@ AG Man は IDE ではなく、CLI agent を直接起動することもありま�
 | Linux（x86_64、arm64） | daemon と Web UI に対応 |
 | Windows | ネイティブ Windows の daemon は非対応です。**WSL2**（Linux ディストリビューション）の中にインストールして実行し、Web UI は Windows のブラウザから開いてください |
 
-Web UI は最新のブラウザならどれでも動作し、デスクトップでもスマートフォンでも使えます。
+Web UI は最新のブラウザならどれでも動作し、デスクトップ、iPad（縦／横）、スマートフォンのいずれでも使えます。
 
 ## 必要なもの とインストール
 
@@ -154,14 +154,14 @@ AG Man は 2 つのカテゴリの bot をサポートしています：
 - **CLI bot**（`claude`、`codex`、`grok`、`agy`）：[herdr](https://herdr.dev) の端末 pane 内で hook を注入して動作します。シェルコマンドの実行、ファイルの編集、完全な agent ループを実行できます。
 - **API bot**（`claude-api`、`openai-api`）：CLI や端末 pane を介さず、API キーを使って daemon から直接プロバイダー API を呼び出します。厳密に**顧問（Advisor）**として動作し（相談やセカンドオピニオン）、ターンごとのコスト上限設定（または無制限）をサポートします。
 
-> **注意**：daemon は各 CLI および API プロバイダーから最新のモデル一覧を動的に取得します。以下の表はリリース／執筆時点（2026-11-21）のスナップショットです。
+> **注意**：daemon は各 CLI および API プロバイダーから最新のモデル一覧を動的に取得します。以下の表はリリース／執筆時点（2026-11-27）のスナップショットです。
 
 | kind | 種類 | 説明 | 現在のモデル（ファミリー／価格順） | effort の範囲 |
 |---|---|---|---|---|
 | `claude` | CLI | herdr pane で動作する Anthropic Claude Code | `opus`、`sonnet`（既定）、`haiku`、`fable` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `codex` | CLI | herdr pane で動作する OpenAI Codex CLI | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol`（既定） < `gpt-6-astra` < `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max`、`ultra`（luna は `max` まで） |
 | `grok` | CLI | herdr pane で動作する xAI Grok CLI | `grok-4.7`（既定） | `low`、`medium`、`high`、`xhigh` |
-| `agy` | CLI | herdr pane で動作する Google Antigravity | アカウント別：既定アカウント ag0、その他 identity ag1…；アカウントごとに利用可能なモデルが異なる（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：3.8 Flash のみ）、ホスト＋アカウント別にモデルメニューを表示；context ウィンドウ 1,048,576；12 分 cache カウントダウン、保温なし | モデル名にあらかじめプリセット |
+| `agy` | CLI | herdr pane で動作する Google Antigravity | アカウント別：既定アカウント ag0、その他 identity ag1…；アカウントごとに利用可能なモデルが異なる（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：3.8 Flash のみ）、ホスト＋アカウント別にモデルメニューを表示；context ウィンドウ 1,048,576；1 時間 cache カウントダウン、保温なし | モデル名にあらかじめプリセット；アイドル時に `/model` と `/effort` をその場で切り替え可能 |
 | `claude-api` | API | Anthropic API 直接通信（Advisor 専用） | `claude-opus-5-5`（既定）、`claude-fable-5-2` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `openai-api` | API | OpenAI API 直接通信（Advisor 専用） | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra`（既定） | `none`（luna）、`low`、`medium`、`high`、`xhigh`、`max` |
 
@@ -182,7 +182,7 @@ AG Man は 2 つのカテゴリの bot をサポートしています：
 | `claude` | `--settings` の hook（`SessionStart`／`Stop`／`StopFailure`） | 複数 identity に対応。モデルと effort はその場で切り替えられます |
 | `codex` | 標準入力の `Stop` hook および `notify` hook | モデル、effort、Fast をその場で切り替えられます |
 | `grok` | `GROK_HOME` 内の hook ファイル | モデルはその場で切り替えられます。effort は再起動が必要です。[SPEC §12](docs/SPEC.md) を参照 |
-| `agy` | Antigravity CLI 設定の名前付き hook | ヘッダーに更新通知を表示。複数 identity（既定アカウント ag0、その他 identity ag1…）；context ウィンドウ 1,048,576；12 分 cache カウントダウン、保温なし；[SPEC §12a](docs/SPEC.md) を参照 |
+| `agy` | Antigravity CLI 設定の名前付き hook | ヘッダーに更新通知を表示。複数 identity（ag0、ag1…）；アイドル時の `/model`・`/effort` 即時切り替え；生成画像をチャット＆outbox に自動収集；context ウィンドウ 1,048,576；1 時間 cache カウントダウン、保温なし；[SPEC §12a](docs/SPEC.md) を参照 |
 | `claude-api` | Anthropic API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、prompt cache カウントダウン |
 | `openai-api` | OpenAI Responses API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、reasoning tokens 表示 |
 

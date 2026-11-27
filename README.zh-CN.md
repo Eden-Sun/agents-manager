@@ -27,29 +27,29 @@ AG Man 不是 IDE，也不自己直接启动 CLI agent。终端 pane 由 herdr �
 - **总管（AGM）**：可选的协调者 bot，负责巡检、派工、收起闲置 bot 与部署。见 [SPEC §18](docs/SPEC.md)。
 
 **排程与推送**
-- 项目排程：单次、固定间隔、每日、每周，以及多时段；排程 prompt 会送进专属排程 bot（`role=scheduler`），支持快照／干净重启，并保留执行记录。
-- 网页推送（Web Push）：回合完成、需要回应、排程结束、上游新模型上线与额度重置时通知。可在设置中分别开关；若用户已在任一设备上读过该消息，就不再推送。
+- 项目排程：单次、固定间隔、每日、每周，以及多时段；排程 prompt 会送进专属排程 bot（`role=scheduler`），支持快照／干净重启（含 `agy`），并保留执行记录。
+- 网页推送（Web Push）：回合完成、需要回应、排程结束、上游新模型上线与额度重置时通知。可在设置中分别开关；若用户已在任一设备上读过该消息、或正在手机前台使用 AG Man，就不再推送。
 - 长消息完成时推送简明预览“消息较长，点击查看完整内容”，点击直接打开对话。
 - Codex 重置券提示可延后 1 小时、1 天或 3 天（“不再提醒”）。
 
 **远程主机与账号额度**
 - 项目可以放在 SSH 主机上，通过该主机的 herdr 运行：远程 bot、主机 shell、CLI 登录、额度，也能把项目移交到另一台 daemon。
-- **身份页（Identities）**：浏览各主机上的身份，具备主机分页与各 CLI 卡片（Claude、Codex、Grok、agy）。“添加账号”对话框引导建立隔离设置目录、提示共享风险，并在后台完成登录。默认账号可隐藏或登出。
-- **全局 API 余额显示**：顶部额度栏与下拉菜单即时显示各主机的 Anthropic API 与 OpenAI API 余额，桌面版具备双行胶囊与预估支出。
+- **身份页（Identities）**：浏览各主机上的身份，具备主机分页与各 CLI 卡片（Claude、Codex、Grok、agy）。“添加账号”对话框引导建立隔离设置目录、提示共享风险、支持跨主机复制与同步身份，并在后台辅助完成登录（含自动提取 `agy` 的 Google 授权网址）。默认账号可隐藏或登出。
+- **全局 API 余额显示**：顶部额度栏与下拉菜单即时显示各主机的 Anthropic API 与 OpenAI API 余额（OpenAI 直接读取 platform `credit_grants` 实际值），桌面版具备双行胶囊。
 - **模型命名统一与排序**：Codex 与 OpenAI API 统一模型命名，模型按家族价格由便宜到贵排序（Luna < Terra < Sol < Astra；Flash < Hydrogen < Argon < Neon），旧版本明确标注。
 - 额度与重置时间按主机与身份显示；额度偏低时会警示。
 - 模型、effort、fast mode 在 CLI 支持时可直接在网页切换。
 
 **更新与维运**
 - “更新检查”页列出每台主机的 herdr、各 agent CLI 与 hook 集成版本，可一键更新。
-- 更新芯片随时可点击；忙碌中的 bot 可排程在闲置后自动重启。
+- 一次 CLI 升级收敛为单一可点击芯片；安装→重启→排程串接由 daemon 在后台执行，关掉网页也照跑。
 - 闲置 bot 在设定的时间后会被收起，只保留恢复所需的信息。
 
 **工作区与防护**
-- 可在对话旁预览 bot 的本机 dev server。
-- outbox HTML 预览：直接在新标签页完整预览 bot 产出的 `.html` 文件。
-- 文件架（跨 bot 暂存）与 outbox（bot 产出的可下载文件）。
-- 内存视图：查看 herdr 进程树。
+- 可在对话旁预览 bot 的本机 dev server，支持切换手机与 iPad 视口尺寸。
+- outbox HTML 预览与 `agy` 产图：直接在新标签页完整预览 bot 产出的 `.html` 文件；`agy` 产生的图片自动内嵌进聊天并同步列进 outbox（保留 1 小时）。
+- 文件架（跨 bot 暂存）与 outbox（bot 产出的可下载文件，支持鼠标与 iPad Apple Pencil 悬停预览图片）。
+- 内存与 CPU 视图：查看各主机整机 CPU% 与 herdr 进程树。
 - 内置 hook 会拦截会杀掉其他 agent 的广域 `pkill`／`kill` 命令。
 
 **中英文界面**：默认跟随浏览器语言，可在“设置 → Display”切换。
@@ -66,7 +66,7 @@ AG Man 不是 IDE，也不自己直接启动 CLI agent。终端 pane 由 herdr �
 | Linux（x86_64、arm64） | 支持 daemon 与网页界面 |
 | Windows | 不支持原生 Windows daemon。请在 **WSL2**（Linux 发行版）内安装与运行，网页从 Windows 浏览器打开即可 |
 
-网页界面可在任何现代浏览器使用，桌面与手机皆可。
+网页界面可在任何现代浏览器使用，桌面、iPad（竖／横屏）与手机皆可。
 
 ## 需求与安装
 
@@ -154,14 +154,14 @@ AG Man 支持两类 bot：
 - **CLI bot**（`claude`、`codex`、`grok`、`agy`）：运行在 [herdr](https://herdr.dev) 终端 pane 内并注入 hook。可执行 shell 命令、编辑文件并完整运行 agent 循环。
 - **API bot**（`claude-api`、`openai-api`）：由 daemon 通过 API key 直接调用模型提供商 API，不需要 CLI 或终端 pane。严格作为**顾问（Advisor）**运行（提供咨询与第二意见），支持每回合成本上限（或无上限）。
 
-> **注意**：daemon 会从各 CLI 与 API 提供商动态获取最新模型列表。下表为发布／撰写时的快照（2026-11-21）。
+> **注意**：daemon 会从各 CLI 与 API 提供商动态获取最新模型列表。下表为发布／撰写时的快照（2026-11-27）。
 
 | kind | 类型 | 说明 | 当前模型（按家族／等级） | effort 范围 |
 |---|---|---|---|---|
 | `claude` | CLI | 运行在 herdr pane 的 Anthropic Claude Code | `opus`、`sonnet`（默认）、`haiku`、`fable` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `codex` | CLI | 运行在 herdr pane 的 OpenAI Codex CLI | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol`（默认） < `gpt-6-astra` < `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max`、`ultra`（luna 上限为 `max`） |
 | `grok` | CLI | 运行在 herdr pane 的 xAI Grok CLI | `grok-4.7`（默认） | `low`、`medium`、`high`、`xhigh` |
-| `agy` | CLI | 运行在 herdr pane 的 Google Antigravity | 依账号：默认账号 ag0、其他身份 ag1…；各账号可用模型不同（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：只有 3.8 Flash），模型菜单依主机＋账号列出；context 视窗 1,048,576；有 12 分 cache 倒计时、不保温 | 预设嵌在模型名称内 |
+| `agy` | CLI | 运行在 herdr pane 的 Google Antigravity | 依账号：默认账号 ag0、其他身份 ag1…；各账号可用模型不同（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：只有 3.8 Flash），模型菜单依主机＋账号列出；context 视窗 1,048,576；有 1 小时 cache 倒计时、不保温 | 预设嵌在模型名称内；闲置时可即时切换 `/model` 与 `/effort` |
 | `claude-api` | API | 直连 Anthropic API（仅限 Advisor） | `claude-opus-5-5`（默认）、`claude-fable-5-2` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `openai-api` | API | 直连 OpenAI API（仅限 Advisor） | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra`（默认） | `none`（luna）、`low`、`medium`、`high`、`xhigh`、`max` |
 
@@ -182,7 +182,7 @@ AG Man 支持两类 bot：
 | `claude` | `--settings` 的 hook（`SessionStart`／`Stop`／`StopFailure`） | 多身份；模型与 effort 可即时切换 |
 | `codex` | Stdin `Stop` hook 与 `notify` hook | 模型、effort、Fast 可即时切换 |
 | `grok` | `GROK_HOME` 内的 hook 文件 | 模型可即时切换；effort 需重启；见 [SPEC §12](docs/SPEC.md) |
-| `agy` | Antigravity CLI 设置中的具名 hook | 标题栏显示更新提示；多身份（默认账号 ag0、其他身份 ag1…）；context 视窗 1,048,576；有 12 分 cache 倒计时、不保温；见 [SPEC §12a](docs/SPEC.md) |
+| `agy` | Antigravity CLI 设置中的具名 hook | 标题栏显示更新提示；多身份（ag0、ag1…）；闲置时即时切换 `/model` 与 `/effort`；产图自动收进聊天与 outbox；context 视窗 1,048,576；1 小时 cache 倒计时、不保温；见 [SPEC §12a](docs/SPEC.md) |
 | `claude-api` | 直连 Anthropic API 流（SSE） | 仅限 Advisor；每回合成本上限、prompt cache 倒计时 |
 | `openai-api` | 直连 OpenAI Responses API 流（SSE） | 仅限 Advisor；每回合成本上限、reasoning tokens 显示 |
 
