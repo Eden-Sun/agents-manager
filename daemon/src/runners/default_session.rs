@@ -1,6 +1,6 @@
 //! `default_session` 背景巡邏 runner。
 
-use crate::default_session::{sync, SESSION};
+use crate::default_session::{session_absent, sync, SESSION};
 use crate::state::App;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +23,10 @@ pub fn spawn_poller(app: Arc<App>) {
                 _ = tokio::time::sleep(POLL_INTERVAL) => {}
             }
             if let Err(e) = sync(&app).await {
+                if session_absent(&e) {
+                    tracing::debug!(session = SESSION, error = %format!("{e:#}"), "default session not running");
+                    continue;
+                }
                 let message = format!("{e:#}");
                 if last_error.as_deref() != Some(message.as_str()) {
                     tracing::warn!(session = SESSION, error = %message, "default session poll failed");

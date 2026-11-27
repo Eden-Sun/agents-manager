@@ -185,6 +185,15 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
     Ok(())
 }
 
+/// True when `e` only says the default session is not running: its socket file is missing or
+/// nothing listens on it. The user opening and closing that session is normal, so callers log
+/// this at debug instead of warning.
+pub fn session_absent(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<crate::herdr::HerdrUnreachable>())
+        .any(|u| matches!(u.source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))
+}
+
 async fn set_connected(app: &impl crate::events::ports::HostSidePort, connected: bool) {
     app.set_default_connected(connected).await;
 }
@@ -299,8 +308,27 @@ async fn ensure_imported_bot(
 
 #[cfg(test)]
 mod tests {
-    use super::{imported_name, same_workdir, sync, SESSION};
+    use super::{imported_name, same_workdir, session_absent, sync, SESSION};
+    use crate::herdr::{HerdrClient, HerdrUnreachable};
     use std::collections::HashSet;
+    use std::io::{Error, ErrorKind};
+    fn unreachable(kind: ErrorKind) -> anyhow::Error {
+        HerdrUnreachable { socket: "/x/herdr.sock".into(), source: Error::from(kind) }.into()
+    }
+    #[test]
+    fn a_missing_or_refused_socket_is_an_absent_session_and_other_errors_are_not() {
+        assert!(session_absent(&unreachable(ErrorKind::NotFound)));
+        assert!(session_absent(&unreachable(ErrorKind::ConnectionRefused)));
+        assert!(session_absent(&unreachable(ErrorKind::NotFound).context("ping")));
+        assert!(!session_absent(&unreachable(ErrorKind::PermissionDenied)));
+        assert!(!session_absent(&anyhow::anyhow!("No such file or directory (os error 2)")));
+        assert!(!session_absent(&anyhow::Error::from(Error::from(ErrorKind::NotFound))));
+    }
+    #[tokio::test]
+    async fn pinging_a_socket_that_does_not_exist_reads_as_an_absent_session() {
+        let err = HerdrClient::new(std::path::PathBuf::from("/nonexistent-am-default-session/herdr.sock")).ping().await.unwrap_err();
+        assert!(session_absent(&err), "{err:#}");
+    }
     #[test]
     fn matches_only_the_same_directory() {
         assert!(same_workdir("/tmp", "/tmp"));
