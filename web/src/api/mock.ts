@@ -1,3 +1,4 @@
+import { mockOpenAiBalance } from './mockOpenAiBalance'
 
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
@@ -1162,6 +1163,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg.length === 3 && seg[0] === 'messages' && seg[2] === 'translate') return mockTranslateMessage()
     if (method === 'GET' && seg.length === 3 && seg[0] === 'messages' && seg[2] === 'translate-record') return mockTranslateRecord(decodeURIComponent(seg[1]))
     if (method === 'GET' && rawPath === '/translate-records') return mockTranslateRecords(q)
+    if (method === 'GET' && rawPath === '/openai-api/balance') return mockOpenAiBalance()
 
     if (method === 'POST' && seg.length === 4 && seg[0] === 'bots' && seg[2] === 'base-snapshot' && seg[3] === 'build') {
       const id = decodeURIComponent(seg[1])

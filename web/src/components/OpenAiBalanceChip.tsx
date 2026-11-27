@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { putOpenAiApiBalanceAnchor } from '../api/openaiApiBalance'
+import { openAiBalanceView, putOpenAiApiBalanceAnchor } from '../api/openaiApiBalance'
 import { reloadOpenAiApiBalance, useOpenAiApiBalance } from '../hooks/useOpenAiApiBalance'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { Modal } from './Modal'
 import { KindGlyph } from './KindTag'
+import { openAiConsoleTooltipLines } from './balanceTooltip'
+import { useUserTimeZone } from '../lib/userTime'
 import './balanceQuotaChip.css'
 
 export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'row' } = {}) {
@@ -14,14 +16,21 @@ export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'ro
   const [open, setOpen] = useState(false)
   const [usdText, setUsdText] = useState('')
   const [saving, setSaving] = useState(false)
+  const tz = useUserTimeZone()
 
   if (!balance || !balance.enabled) return null
 
-  const configured = balance.configured
-  const usd = balance.remaining_usd ?? 0
-  const uncertain = balance.uncertain_usd ?? 0
-  const title = configured
+  const view = openAiBalanceView(balance, new Date(), tz)
+  const exact = view.source === 'console'
+  const configured = balance.configured || exact
+  const usd = view.usd ?? 0
+  const uncertain = exact ? 0 : balance.uncertain_usd ?? 0
+  const consoleLines = openAiConsoleTooltipLines(balance, view, t)
+  const title = exact
+    ? [t('OpenAI API 餘額（Console 實際值）'), ...consoleLines, t('點一下：用 OpenAI 目前餘額校正')].join('\n')
+    : configured
     ? [
+        ...consoleLines,
         t('OpenAI API 餘額（估算）'),
         t('錨點：${usd}（{at}）', { usd: (balance.anchor?.usd ?? 0).toFixed(2), at: balance.anchor?.at ?? '' }),
         t('已確定花費：${spent}', { spent: (balance.spent_usd ?? 0).toFixed(2) }),
@@ -30,9 +39,9 @@ export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'ro
       ]
         .filter(Boolean)
         .join('\n')
-    : t('OpenAI API 餘額：尚未設定。點一下輸入目前餘額當錨點')
-  const warn = configured && (usd < 0 || uncertain > 0)
-  const cls = variant === 'row' ? `quota-pop-balance${warn ? ' warn' : ''}` : `quota-balance estimate${warn ? ' warn' : ''}`
+    : [...consoleLines, t('OpenAI API 餘額：尚未設定。點一下輸入目前餘額當錨點')].join('\n')
+  const warn = view.loggedOut || view.expiringSoon || (configured && (usd < 0 || uncertain > 0))
+  const cls = variant === 'row' ? `quota-pop-balance${warn ? ' warn' : ''}` : `quota-balance${exact ? ' exact' : ' estimate'}${warn ? ' warn' : ''}`
 
   const usdVal = Number.parseFloat(usdText)
   const save = async () => {
@@ -61,12 +70,15 @@ export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'ro
       </button>
       <Modal open={open} title={t('OpenAI API 餘額')} width={420} onClose={() => setOpen(false)}>
         <div className="quota-balance-dialog" data-k="openai-balance-dialog">
+          {consoleLines.map((l) => (
+            <p key={l} className={`hint${view.loggedOut ? ' warn' : ''}`}>{l}</p>
+          ))}
           {configured ? (
             <p className="hint">{t('目前餘額：{usd}', { usd: `$${usd.toFixed(2)}` })}</p>
           ) : (
             <p className="hint">{t('還沒設定餘額錨點。輸入 OpenAI 帳戶目前的可用餘額，之後以本機花費往下扣。')}</p>
           )}
-          <p className="hint">{t('OpenAI 沒有餘額查詢端點，儲值與贈送額度只能靠校正。')}</p>
+          {exact ? null : <p className="hint">{t('OpenAI 沒有餘額查詢端點，儲值與贈送額度只能靠校正。')}</p>}
           <label className="field">
             <span>{t('以 OpenAI 目前餘額校正（美元）')}</span>
             <input

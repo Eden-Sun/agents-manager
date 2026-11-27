@@ -185,6 +185,7 @@ pub mod balance_utils;
 pub mod claude_api_balance;
 pub mod openai_api_balance;
 pub mod claude_console_balance;
+pub mod openai_console_balance;
 pub mod claude_api_cap;
 mod api_bot;
 mod api_bot_retire_route;

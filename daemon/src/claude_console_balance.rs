@@ -470,13 +470,13 @@ async fn save_state_back<R: BrowserRunner>(r: &R, state_path: &Path, deadline: I
     result
 }
 
-fn create_private_file(p: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_file(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::remove_file(p);
     std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(p).map(|_| ())
 }
 
-fn set_mode_600(p: &Path) -> std::io::Result<()> {
+pub(crate) fn set_mode_600(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
 }

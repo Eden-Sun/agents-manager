@@ -1,5 +1,6 @@
 import type { useT } from '../lib/i18n'
 import type { BalanceView, ClaudeApiBalance } from '../api/claudeApiBalance'
+import type { OpenAiApiBalance } from '../api/openaiApiBalance'
 import { userTimeZone, zonedParts } from '../lib/userTime'
 
 type Translate = ReturnType<typeof useT>
@@ -47,4 +48,18 @@ export function balanceTooltipLines(balance: ClaudeApiBalance | null | undefined
     if (balance.error) lines.push(t('警告：{err}', { err: balance.error }))
   }
   return lines
+}
+
+export function openAiConsoleTooltipLines(balance: OpenAiApiBalance | null | undefined, view: BalanceView, t: Translate): string[] {
+  const c = balance?.console
+  if (view.source === 'console' && c) {
+    const lines = [t('Console 實際（{time} 讀取）', { time: hhmm(c.fetched_at) })]
+    if (c.org_title) lines.push(t('組織：{org}', { org: c.org_title }))
+    for (const g of c.grants) {
+      lines.push(t('額度 ${rem} / ${total}，到期 {date}', { rem: g.remaining_usd.toFixed(2), total: g.total_usd.toFixed(2), date: g.expires_on ?? '—' }))
+    }
+    if (view.expiringSoon && view.nextExpiry) lines.push(t('⚠ 額度 {date} 到期', { date: view.nextExpiry.expires_on ?? '?' }))
+    return lines
+  }
+  return view.loggedOut ? [t('OpenAI 登入已過期，需重新匯出')] : []
 }

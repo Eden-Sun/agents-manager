@@ -26,8 +26,29 @@ pub struct OpenAiApiCfg {
     pub balance_anchor_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance_anchor_at: Option<String>,
+    /// 用 platform 登入 token 讀 billing credit_grants 的實際餘額（`openai_console_balance`）。
+    #[serde(default = "default_true")]
+    pub console_balance_enabled: bool,
+    #[serde(default = "default_console_balance_interval_minutes")]
+    pub console_balance_interval_minutes: u64,
+    /// platform localStorage `oai-auth:onboard` 匯出的 `{access_token, refresh_token, id_token}`（**是憑證**，0600）。
+    #[serde(default = "default_openai_console_state_file")]
+    pub console_state_file: String,
+    /// 指定要讀哪個 org；沒設就用唯一的非 personal org，否則第一個。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_org_id: Option<String>,
     #[serde(default, skip_serializing_if = "OpenAiApiBotCfg::is_default")]
     pub api_bot: OpenAiApiBotCfg,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_console_balance_interval_minutes() -> u64 {
+    30
+}
+pub fn default_openai_console_state_file() -> String {
+    "~/.config/agents-manager/openai-console-state.json".into()
 }
 
 impl Default for OpenAiApiCfg {
@@ -37,6 +58,10 @@ impl Default for OpenAiApiCfg {
             key_file: default_openai_api_key_file(),
             balance_anchor_usd: None,
             balance_anchor_at: None,
+            console_balance_enabled: true,
+            console_balance_interval_minutes: default_console_balance_interval_minutes(),
+            console_state_file: default_openai_console_state_file(),
+            console_org_id: None,
             api_bot: OpenAiApiBotCfg::default(),
         }
     }

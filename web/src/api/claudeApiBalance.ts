@@ -129,9 +129,13 @@ const parseDay = (iso: string): number => {
   return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : Number.NaN
 }
 
-export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = new Date(), zone: string = DEFAULT_USER_TIME_ZONE): BalanceView {
-  const c = b?.console
-  const estimate = b?.configured && b.remaining_usd !== undefined ? b.remaining_usd : undefined
+export interface ConsoleViewInput {
+  status?: ConsoleBalanceStatus
+  total_usd?: number
+  promotions: ConsolePromotion[]
+}
+
+export function consoleBalanceView(c: ConsoleViewInput | undefined, estimate: number | undefined, now: Date = new Date(), zone: string = DEFAULT_USER_TIME_ZONE): BalanceView {
   if (c?.status === 'ok' && c.total_usd !== undefined) {
     const upcoming = c.promotions
       .filter((p) => p.remaining_usd > 0 && p.expires_on && !Number.isNaN(parseDay(p.expires_on)))
@@ -143,4 +147,9 @@ export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = 
     return { usd: c.total_usd, source: 'console', loggedOut: false, nextExpiry, expiringSoon: days <= PROMO_WARN_DAYS }
   }
   return { usd: estimate, source: 'estimate', loggedOut: c?.status === 'logged_out', expiringSoon: false }
+}
+
+export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = new Date(), zone: string = DEFAULT_USER_TIME_ZONE): BalanceView {
+  const estimate = b?.configured && b.remaining_usd !== undefined ? b.remaining_usd : undefined
+  return consoleBalanceView(b?.console, estimate, now, zone)
 }

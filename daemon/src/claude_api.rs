@@ -601,6 +601,8 @@ pub struct ClaudeApi {
     pub balance_cache: Arc<crate::claude_api_balance::BalanceCache>,
     /// 最近一次讀 Console Billing 頁的結果（`claude_console_balance`）；沒在跑就是 `None`。
     pub console_balance: std::sync::Mutex<Option<crate::claude_console_balance::ConsoleSnapshot>>,
+    /// OpenAI credit_grants 實際餘額（`openai_console_balance`）。
+    pub openai_console: crate::openai_console_balance::OpenAiConsoleState,
 }
 
 impl ClaudeApi {
@@ -614,6 +616,7 @@ impl ClaudeApi {
             sent: Mutex::new(HashMap::new()),
             balance_cache: Arc::new(crate::claude_api_balance::BalanceCache::new()),
             console_balance: std::sync::Mutex::new(None),
+            openai_console: Default::default(),
         }
     }
 

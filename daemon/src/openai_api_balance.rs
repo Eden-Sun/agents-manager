@@ -39,14 +39,15 @@ pub async fn get_openai_api_balance(app: &Arc<App>) -> Result<Value, LcError> {
     let anchor_usd = cfg.openai_api.balance_anchor_usd;
     let anchor_at_str = cfg.openai_api.balance_anchor_at.clone();
     let as_of = am_base::db::iso_at(Utc::now());
+    let console = crate::openai_console_balance::current_json(app).await;
 
     if !enabled {
-        return Ok(json!({ "enabled": false, "configured": false, "as_of": as_of }));
+        return Ok(json!({ "enabled": false, "configured": false, "as_of": as_of, "console": console }));
     }
 
     let (anchor_usd, anchor_at_str) = match (anchor_usd, anchor_at_str) {
         (Some(usd), Some(at)) => (usd, at),
-        _ => return Ok(json!({ "enabled": true, "configured": false, "as_of": as_of })),
+        _ => return Ok(json!({ "enabled": true, "configured": false, "as_of": as_of, "console": console })),
     };
 
     let anchor_dt = match crate::claude_api_balance::parse_rfc3339(&anchor_at_str) {
@@ -57,6 +58,7 @@ pub async fn get_openai_api_balance(app: &Arc<App>) -> Result<Value, LcError> {
                 "configured": false,
                 "error": format!("invalid balance_anchor_at: {e}"),
                 "as_of": as_of,
+                "console": console,
             }));
         }
     };
@@ -90,6 +92,7 @@ pub async fn get_openai_api_balance(app: &Arc<App>) -> Result<Value, LcError> {
         "uncertain_usd": uncertain_usd,
         "remaining_floor_usd": remaining_usd - uncertain_usd,
         "as_of": as_of,
+        "console": console,
     }))
 }
 

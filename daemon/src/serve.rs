@@ -324,6 +324,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::runners::share_budget::spawn_ticker(&app);
     crate::runners::reset_credit_expiry::spawn_ticker(&app);
     crate::claude_console_balance::spawn_ticker(&app);
+    crate::openai_console_balance::spawn_ticker(&app);
     let _ = enable_shutdown.send(());
     {
         let app2 = app.clone();

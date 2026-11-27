@@ -120,3 +120,52 @@ test('點開校正：輸入金額送出 PUT balance-anchor，成功後關掉視�
     assert.deepEqual(puts, [{ usd: 25.5, at: undefined }])
   })
 })
+
+const dayFromNow = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10)
+const withConsole = (console: unknown) => ({ ...anchored, console })
+
+test('Console 實際值：畫 total_available，tooltip 有讀取時間、org、每筆 grant；7 天內到期加警示', async () => {
+  const soon = dayFromNow(3)
+  const c = {
+    status: 'ok',
+    total_available_usd: 82.5,
+    total_granted_usd: 120,
+    total_used_usd: 37.5,
+    grants: [{ remaining_usd: 70, total_usd: 100, expires_on: soon }, { remaining_usd: 12.5, total_usd: 20, expires_on: null }],
+    org_title: 'Biz',
+    fetched_at: '2026-11-27T02:05:00.000Z',
+  }
+  await withBalances(withConsole(c), async () => {
+    await mount(<OpenAiBalanceChip />)
+    await settle()
+    assert.equal(chip()!.querySelector('.quota-balance-v')?.textContent, '$82.5')
+    assert.match(chip()!.className, /\bexact\b/)
+    assert.match(chip()!.className, /\bwarn\b/, '3 天內到期要警示')
+    const tip = chip()!.getAttribute('title') ?? ''
+    assert.match(tip, /Console 實際（10:05 讀取）/)
+    assert.match(tip, /組織：Biz/)
+    assert.match(tip, new RegExp(`額度 \\$70\\.00 / \\$100\\.00，到期 ${soon}`))
+    assert.match(tip, /額度 \$12\.50 \/ \$20\.00，到期 —/)
+    assert.match(tip, new RegExp(`⚠ 額度 ${soon} 到期`))
+    assert.doesNotMatch(tip, /估算/)
+  })
+  await unmountAll()
+  resetOpenAiApiBalanceForTest()
+  await withBalances(withConsole({ ...c, grants: [{ remaining_usd: 70, total_usd: 100, expires_on: dayFromNow(30) }] }), async () => {
+    await mount(<OpenAiBalanceChip />)
+    await settle()
+    assert.doesNotMatch(chip()!.className, /\bwarn\b/, '30 天後到期不警示')
+  })
+})
+
+test('登入過期：退回推算值並提示重新匯出', async () => {
+  await withBalances(withConsole({ status: 'logged_out', fetched_at: '2026-11-27T02:05:00.000Z', error: 'login_rejected' }), async () => {
+    await mount(<OpenAiBalanceChip />)
+    await settle()
+    assert.equal(chip()!.querySelector('.quota-balance-v')?.textContent, '$18.0')
+    assert.match(chip()!.className, /\bestimate\b.*\bwarn\b/)
+    const tip = chip()!.getAttribute('title') ?? ''
+    assert.match(tip, /OpenAI 登入已過期，需重新匯出/)
+    assert.match(tip, /估算/)
+  })
+})

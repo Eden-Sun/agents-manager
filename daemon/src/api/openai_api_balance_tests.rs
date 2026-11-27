@@ -150,3 +150,25 @@ async fn http_routes_answer_and_a_bot_gets_403_user_only_and_changes_nothing() {
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!((v["enabled"].clone(), v["configured"].clone(), v["anchor"]["usd"].clone()), (json!(true), json!(true), json!(7.25)));
 }
+
+#[tokio::test]
+async fn console_is_not_configured_without_a_state_file_and_pending_once_one_exists() {
+    let e = env().await;
+    assert_eq!(get_openai_api_balance(&e.app).await.unwrap()["console"], json!({"status": "not_configured"}), "未啟用");
+    let dir = crate::testing::scratch_dir("am-oai-console-api");
+    let path = dir.join("openai-console-state.json");
+    let p = path.to_string_lossy().into_owned();
+    e.app.cfg.update(move |cfg| {
+        cfg.openai_api.enabled = true;
+        cfg.openai_api.console_state_file = p;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(get_openai_api_balance(&e.app).await.unwrap()["console"], json!({"status": "not_configured"}), "檔案不存在");
+    std::fs::write(&path, "{}").unwrap();
+    assert_eq!(get_openai_api_balance(&e.app).await.unwrap()["console"], json!({"status": "error", "error": "pending"}), "有檔但還沒讀");
+    e.app.cfg.update(|cfg| {
+        cfg.openai_api.console_balance_enabled = false;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(get_openai_api_balance(&e.app).await.unwrap()["console"], json!({"status": "not_configured"}), "關閉");
+}
