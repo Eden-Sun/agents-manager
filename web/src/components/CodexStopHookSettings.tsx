@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchStopHook, trustStopHook, type StopHookEntry, type StopHookReport } from '../api/codexStopHook'
+import { fetchStopHook, trustStopHook, type StopHookEntry, type StopHookReport, type StopHookStatus } from '../api/codexStopHook'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
@@ -15,8 +15,8 @@ export function CodexStopHookSettings() {
   }, [])
 
   const label = (e: StopHookEntry) => `${e.host} / ${e.identity ?? t('預設帳號')}`
-  const statusText = (e: StopHookEntry) => {
-    switch (e.status) {
+  const statusText = (status: StopHookStatus | undefined) => {
+    switch (status) {
       case 'trusted':
         return t('已信任')
       case 'untrusted':
@@ -29,6 +29,8 @@ export function CodexStopHookSettings() {
         return t('無法讀取')
     }
   }
+
+  const needsTrust = (status: StopHookStatus | undefined) => status === 'not_installed' || status === 'untrusted' || status === 'hash_mismatch'
 
   const confirmTrust = async () => {
     if (!pending) return
@@ -53,13 +55,16 @@ export function CodexStopHookSettings() {
       <p className="codex-stop-hook-note">
         {report.enabled
           ? t('信任後，AG Man 會停用會爆 argv 上限的舊通知，改用 stdin Stop hook。')
-          : t('尚未開啟（設定檔 [codex] stop_hook = false），目前不會安裝或使用。')}
+          : t('尚未開啟（設定檔 [codex] stop_hook = false），目前不會安裝或使用。')}{' '}
+        {t('同一次信任也會寫入廣域 kill 守門（PreToolUse）；未信任的帳號，codex bot 只剩 PATH 上的 pkill／killall shim，擋不到 kill -1、xargs kill。')}
       </p>
       <ul className="codex-stop-hook-list">
         {report.entries.map((e) => (
           <li key={`${e.host}/${e.identity ?? ''}`}>
-            <span>{label(e)}</span> <span>{statusText(e)}</span>{' '}
-            {e.status === 'not_installed' || e.status === 'untrusted' || e.status === 'hash_mismatch' ? (
+            <span>{label(e)}</span> <span>{t('Stop：{status}', { status: statusText(e.status) })}</span>{' '}
+            <span>{t('kill 守門：{status}', { status: statusText(e.kill_guard) })}</span>{' '}
+            {e.kill_guard !== 'trusted' ? <strong className="codex-kill-guard-off">{t('codex kill 守門未生效')}</strong> : null}{' '}
+            {needsTrust(e.status) || needsTrust(e.kill_guard) ? (
               <button type="button" disabled={busy} onClick={() => setPending(e)}>
                 {t('信任此 hook')}
               </button>
@@ -71,7 +76,7 @@ export function CodexStopHookSettings() {
       <ConfirmDialog
         open={pending !== null}
         title={t('信任 AG Man 的 Codex Stop hook？')}
-        body={pending ? t('這會讓 {target} 的 codex 在每個回合結束時執行 AG Man 的 stop hook，並在該帳號目錄的 config.toml 寫入一筆 trusted_hash（寫入前會備份）。', { target: label(pending) }) : ''}
+        body={pending ? t('這會讓 {target} 的 codex 在每個回合結束時執行 AG Man 的 stop hook、在每條 shell 指令前過廣域 kill 守門，並在該帳號目錄的 config.toml 寫入對應的 trusted_hash（寫入前會備份）。', { target: label(pending) }) : ''}
         confirmLabel={t('信任此 hook')}
         onConfirm={() => void confirmTrust()}
         onCancel={() => setPending(null)}

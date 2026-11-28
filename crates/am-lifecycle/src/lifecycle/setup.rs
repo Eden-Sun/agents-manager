@@ -850,6 +850,9 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                     Ok(r) => r,
                     Err(_) => Err(anyhow::anyhow!("remote Codex home lookup timed out")),
                 };
+                if let Ok((home, _)) = &paths {
+                    am_base::codex_kill_guard::observe_remote(&conn, &project.host, home, &root, REMOTE_STOP_HOOK_BUDGET).await;
+                }
                 if stop_hook_enabled {
                     let ready = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, async {
                         let (home, _) = paths.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
@@ -919,6 +922,9 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
+            if let Ok(h) = &home {
+                am_base::codex_kill_guard::observe_local(LOCAL_HOST, h, app.data_dir());
+            }
             if stop_hook_enabled {
                 let ready = match &home {
                     Ok(h) => am_base::codex_hook::install_local(std::path::Path::new(h), app.data_dir(), app.instance().as_deref()),

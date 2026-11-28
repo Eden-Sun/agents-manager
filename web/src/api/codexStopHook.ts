@@ -5,6 +5,7 @@ export interface StopHookEntry {
   identity: string | null
   codex_home: string
   status: StopHookStatus
+  kill_guard?: StopHookStatus
 }
 
 export interface StopHookReport {

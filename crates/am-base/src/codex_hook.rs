@@ -197,7 +197,7 @@ fn write_local_dispatcher(path: &Path, content: &str) -> Result<()> {
 }
 
 /// Shell script snippet to write the remote dispatcher script atomically (0700).
-fn write_remote_dispatcher_script(path: &str, text: &str) -> String {
+pub(crate) fn write_remote_dispatcher_script(path: &str, text: &str) -> String {
     let mut delim = String::from("AM_CODEX_DISPATCH_EOF");
     while text.contains(&delim) {
         delim.push('_');
@@ -353,7 +353,7 @@ pub fn stop_hook_state_key(hooks_path: &str, group_index: usize) -> String {
 }
 
 /// `[hooks.state."<key>"].trusted_hash` as written by the user's own review; unparseable config reads as absent.
-fn recorded_trusted_hash(config_text: &str, key: &str) -> Option<String> {
+pub(crate) fn recorded_trusted_hash(config_text: &str, key: &str) -> Option<String> {
     let doc = config_text.parse::<toml::Table>().ok()?;
     doc.get("hooks")?.get("state")?.get(key)?.get("trusted_hash")?.as_str().map(str::to_owned)
 }
@@ -645,6 +645,7 @@ pub fn install_and_trust_local(codex_home: &Path, data_dir: &Path, instance: Opt
             std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
         }
     }
+    crate::codex_kill_guard::install_and_trust_local(codex_home, data_dir)?;
     crate::trust::update_file(&config, |existing| trust_edit(existing, &key, &hash))?;
     crate::trust::update_file(&hooks, |existing| Ok(merge_hooks_json(existing, &command)?.merged_json))?;
     #[cfg(unix)]
@@ -702,6 +703,7 @@ pub async fn install_and_trust_remote(conn: &HostConn, codex_home: &str, remote_
     let hash = stop_hook_trust_hash(&command);
     let q = sh_quote(&config);
     conn.ssh_exec(&format!("[ -f {q} ] && cp -p {q} {q}.am-bak-$(date +%s) || true")).await?;
+    crate::codex_kill_guard::install_and_trust_remote(conn, codex_home, &format!("{home}/{root}/{}", crate::kill_guard::REMOTE_KILL_GUARD_SH)).await?;
     crate::trust::update_remote_file(conn, &config, |existing| trust_edit(existing, &key, &hash)).await?;
     crate::trust::update_remote_file(conn, &hooks, |existing| Ok(merge_hooks_json(existing, &command)?.merged_json)).await?;
     conn.ssh_exec(&format!("chmod 600 {}", sh_quote(&hooks))).await?;

@@ -12,6 +12,7 @@ pub mod identity_fence;
 pub mod ledger;
 pub mod codex_async_question;
 pub mod codex_hook;
+pub mod codex_kill_guard;
 pub mod codex_status;
 pub mod compacting;
 pub mod agent_relay;

@@ -3244,7 +3244,8 @@ async fn only_a_fleet_operator_may_read_and_trust_the_codex_stop_hook_for_the_us
 
     assert!(user_only(&as_bot(&f.e, &f.operator, "GET", "/api/codex/stop-hook", "").await));
     assert!(user_only(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await));
-    assert!(!codex_home.join("hooks.json").exists(), "nothing was installed");
+    let ours = f.e.app.data_dir.to_string_lossy().into_owned();
+    assert!(!std::fs::read_to_string(codex_home.join("hooks.json")).unwrap_or_default().contains(&ours), "nothing of ours was installed");
 
     set_fleet_operators(&f.e, &[&f.operator.id, &child.id]).await;
     for who in [&plain, &child] {
@@ -3253,7 +3254,7 @@ async fn only_a_fleet_operator_may_read_and_trust_the_codex_stop_hook_for_the_us
         let r = as_bot(&f.e, who, "POST", "/api/codex/stop-hook/trust", trust).await;
         assert!(user_only(&r), "{} POST: {r}", who.name);
     }
-    assert!(!codex_home.join("hooks.json").exists(), "a refused caller wrote nothing");
+    assert!(!std::fs::read_to_string(codex_home.join("hooks.json")).unwrap_or_default().contains(&ours), "a refused caller wrote nothing");
 
     let r = as_bot(&f.e, &f.operator, "GET", "/api/codex/stop-hook", "").await;
     assert!(r.starts_with("HTTP/1.1 200") && r.contains(r#""host":"local""#), "{r}");

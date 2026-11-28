@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use am_base::codex_hook::{self, StopHookStatus};
+use am_base::codex_kill_guard;
 use am_base::hosts::sh_quote;
 use axum::{extract::State, Extension, Json};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub struct Entry {
     pub codex_home: String,
     /// `not_installed` | `untrusted` | `hash_mismatch` | `trusted` | `unavailable`
     pub status: String,
+    /// 廣域 kill 守門（`PreToolUse`）的信任狀態，值同 `status`；同一次「信任」一起寫入。
+    pub kill_guard: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +48,8 @@ struct Target {
     identity: Option<String>,
     codex_home: String,
     command: String,
+    /// 本機：`None`（用 data dir）；遠端：`kill-guard.sh` 的絕對路徑。
+    kill_guard_sh: Option<String>,
 }
 
 fn status_str(s: StopHookStatus) -> &'static str {
@@ -77,14 +82,15 @@ async fn resolve(app: &Arc<App>, host: &str, identity: Option<&str>) -> Result<T
         let home = crate::home::dir().ok_or_else(|| LcError::Upstream("local home unavailable".into()))?.to_string_lossy().into_owned();
         let codex_home = env_home.map(|v| am_config::expand_home(&v, &home)).unwrap_or_else(|| format!("{}/.codex", home.trim_end_matches('/')));
         let command = sh_quote(&app.data_dir.join(codex_hook::CODEX_HOOK_SH).to_string_lossy());
-        return Ok(Target { host: host.into(), identity: identity.map(str::to_owned), codex_home, command });
+        return Ok(Target { host: host.into(), identity: identity.map(str::to_owned), codex_home, command, kill_guard_sh: None });
     }
     let conn = app.hosts.get(host).await.ok_or_else(|| LcError::NotFound(format!("host `{host}`")))?;
     let home = conn.home().await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     let codex_home = env_home.map(|v| am_config::expand_home(&v, &home)).unwrap_or_else(|| format!("{}/.codex", home.trim_end_matches('/')));
     let root = crate::hosts::remote_root_for(instance.as_deref());
     let command = sh_quote(&format!("{home}/{root}/{}", codex_hook::CODEX_HOOK_SH));
-    Ok(Target { host: host.into(), identity: identity.map(str::to_owned), codex_home, command })
+    let kill_guard_sh = Some(format!("{home}/{root}/{}", am_base::kill_guard::REMOTE_KILL_GUARD_SH));
+    Ok(Target { host: host.into(), identity: identity.map(str::to_owned), codex_home, command, kill_guard_sh })
 }
 
 async fn probe(app: &Arc<App>, t: &Target) -> anyhow::Result<StopHookStatus> {
@@ -93,6 +99,22 @@ async fn probe(app: &Arc<App>, t: &Target) -> anyhow::Result<StopHookStatus> {
     }
     let conn = app.hosts.get(&t.host).await.ok_or_else(|| anyhow::anyhow!("unknown host"))?;
     codex_hook::remote_stop_hook_status(&conn, &t.codex_home, &t.command).await
+}
+
+async fn probe_kill_guard(app: &Arc<App>, t: &Target) -> &'static str {
+    let status = match &t.kill_guard_sh {
+        None => codex_kill_guard::local_status(std::path::Path::new(&t.codex_home), &app.data_dir),
+        Some(guard) => match app.hosts.get(&t.host).await {
+            Some(conn) => match tokio::time::timeout(PROBE_BUDGET, codex_kill_guard::remote_status(&conn, &t.codex_home, guard)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("timed out")),
+            },
+            None => Err(anyhow::anyhow!("unknown host")),
+        },
+    };
+    let label = status.map(codex_kill_guard::status_label).unwrap_or("unavailable");
+    codex_kill_guard::record(&t.host, &t.codex_home, label);
+    label
 }
 
 /// 使用者，或 `[agents] fleet_operators` 列名的頂層 bot（使用者授權它代為確認信任）。回傳 fleet operator 的 bot id（使用者＝`None`）。
@@ -116,7 +138,7 @@ pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Exten
             let t = match resolve(&app, &host, identity.as_deref()).await {
                 Ok(t) => t,
                 Err(_) => {
-                    entries.push(Entry { host: host.clone(), identity, codex_home: String::new(), status: "unavailable".into() });
+                    entries.push(Entry { host: host.clone(), identity, codex_home: String::new(), status: "unavailable".into(), kill_guard: "unavailable".into() });
                     continue;
                 }
             };
@@ -124,7 +146,8 @@ pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Exten
                 Ok(Ok(s)) => status_str(s),
                 _ => "unavailable",
             };
-            entries.push(Entry { host: t.host, identity: t.identity, codex_home: t.codex_home, status: status.into() });
+            let kill_guard = probe_kill_guard(&app, &t).await;
+            entries.push(Entry { host: t.host, identity: t.identity, codex_home: t.codex_home, status: status.into(), kill_guard: kill_guard.into() });
         }
     }
     Ok(Json(Report { enabled: app.cfg.get().await.codex.stop_hook, entries }))
@@ -166,7 +189,8 @@ pub(crate) async fn post_trust(
     };
     wrote.map_err(|e| LcError::Conflict(json!({"error": "stop_hook_not_trustable", "detail": format!("{e:#}")})))?;
     let status = probe(&app, &t).await.map(status_str).unwrap_or("unavailable");
-    Ok(Json(Entry { host: t.host, identity: t.identity, codex_home: t.codex_home, status: status.into() }))
+    let kill_guard = probe_kill_guard(&app, &t).await;
+    Ok(Json(Entry { host: t.host, identity: t.identity, codex_home: t.codex_home, status: status.into(), kill_guard: kill_guard.into() }))
 }
 
 #[cfg(test)]
@@ -186,11 +210,19 @@ mod tests {
         let before = "# keep me\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n";
         std::fs::write(codex_home.join("config.toml"), before).unwrap();
         assert_eq!(status_str(probe(&app, &t).await.unwrap()), "not_installed");
+        assert_eq!(probe_kill_guard(&app, &t).await, "not_installed");
+        let untrusted = codex_kill_guard::health_json();
+        assert_eq!(untrusted["status"], "not_effective");
+        assert!(untrusted["not_effective"].as_array().unwrap().iter().any(|r| r["codex_home"] == t.codex_home.as_str() && r["message"] == codex_kill_guard::NOT_EFFECTIVE));
         let Json(e) = post_trust(State(app.clone()), Extension(RequestPrincipal::User), Json(TrustBody { host: "local".into(), identity: None })).await.unwrap();
         assert_eq!(e.status, "trusted");
+        assert_eq!(e.kill_guard, "trusted", "one trust writes both the Stop and the kill-guard hash");
         let after = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
         assert!(after.starts_with(before), "everything the user wrote stays byte-identical");
         assert!(after.contains("trusted_hash"));
+        assert!(after.contains(&codex_kill_guard::trust_hash(&codex_kill_guard::local_command(&app.data_dir))));
+        assert!(after.contains(&codex_hook::stop_hook_trust_hash(&t.command)));
+        assert_eq!(codex_kill_guard::health_json()["not_effective"].as_array().unwrap().iter().filter(|r| r["codex_home"] == t.codex_home.as_str()).count(), 0);
         let backups: Vec<_> = std::fs::read_dir(&codex_home).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("config.toml.am-bak-")).collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(std::fs::read_to_string(backups[0].path()).unwrap(), before);

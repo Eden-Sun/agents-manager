@@ -25,7 +25,9 @@ pub async fn get_supervisor(State(app): State<Arc<App>>) -> Result<Json<Value>, 
 }
 
 pub async fn get_health(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(health_core::snapshot(app.as_ref()).await?))
+    let mut health = health_core::snapshot(app.as_ref()).await?;
+    health["codex_kill_guard"] = am_base::codex_kill_guard::health_json();
+    Ok(Json(health))
 }
 
 /// Build the environment. Idempotent, and deliberately does **not** start anything: a manager

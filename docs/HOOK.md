@@ -61,4 +61,6 @@ Claude Code 2.1.296+ 的 `--debug` log 會在每個 command hook 結束時留一
 - **限制**：量的是 Claude 眼中 hook 本身的耗時，**不能區分 MCP 或模型慢**；跟 `hook_events.received_at`／`processed_at` 的差值（送端戳到 daemon 處理完的延遲，含排隊與重試）是兩回事，不要互相替代。
 - 測試：`scripts/claude-hook-debug_test.sh`（包 `claude-hook-debug_test.py`，自造文字，不碰真實 log）。
 
+Codex 的 `PreToolUse`（廣域 kill 守門）：使用者在設定頁信任後，`hooks.json` 的 `PreToolUse`（matcher `Bash`）呼叫 `agents-managerd hook codex --bot "$AM_BOT_ID" --data-dir …`（遠端是 `kill-guard.sh codex`），stdin 是 codex 的 PreToolUse payload（`tool_input.command` 字串）；只判斷、不送 daemon、不 spool，要擋時 stdout 印 `hookSpecificOutput` deny JSON，hook 起不來就 exit 2＋stderr。細節見 SPEC §4.4c。
+
 Codex 第二階段（#1989）：`[codex] stop_hook=true` 且 Stop handler 已被使用者 trusted（本機）時，daemon 以 `-c notify=[]` 停用 legacy notify，只剩 stdin Stop；否則兩路並存、按 native turn 去重。細節見 SPEC §4.1。

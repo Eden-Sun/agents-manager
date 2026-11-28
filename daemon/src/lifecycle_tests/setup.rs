@@ -1165,7 +1165,10 @@ mod codex_stop_args_tests {
         env.app.cfg.update(|cfg| { cfg.codex.stop_hook = false; Ok(()) }).await.unwrap();
         assert!(!injected_args(&env.app, &bot, &project, &pane_env).await.unwrap().contains(&"notify=[]".into()));
         assert!(stop_commands(&hooks_path).is_empty(), "disabled: our handler is unregistered");
-        assert!(!std::fs::read_to_string(home.join("config.toml")).unwrap().contains("trusted_hash"), "and so is its trust entry");
+        let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let stop_cmd = am_base::hosts::sh_quote(&env.app.data_dir.join(am_base::codex_hook::CODEX_HOOK_SH).to_string_lossy());
+        assert!(!cfg.contains(&am_base::codex_hook::stop_hook_trust_hash(&stop_cmd)), "and so is its trust entry");
+        assert!(cfg.contains(&am_base::codex_kill_guard::trust_hash(&am_base::codex_kill_guard::local_command(&env.app.data_dir))), "the kill guard is not tied to `[codex] stop_hook`");
         assert_eq!(backups(&home, "hooks.json.am-bak-"), 1);
     }
     async fn fake_remote(env: &tt::Env, home: &std::path::Path) -> (std::sync::Arc<HostConn>, String) {
@@ -1213,6 +1216,12 @@ mod codex_stop_args_tests {
         for event in ["SessionStart", "UserPromptSubmit"] {
             assert_eq!(registered["hooks"][event][0]["hooks"][0]["command"], command);
         }
+        let guard_sh = format!("{}/{root}/{}", remote_home.display(), am_base::kill_guard::REMOTE_KILL_GUARD_SH);
+        let guard_cmd = am_base::codex_kill_guard::remote_command(&guard_sh);
+        assert_eq!(registered["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+        assert_eq!(registered["hooks"]["PreToolUse"][0]["hooks"][0]["command"], guard_cmd);
+        assert!(std::fs::read_to_string(&guard_sh).unwrap().starts_with("#!/bin/sh"), "the trust also installs kill-guard.sh");
+        assert_eq!(am_base::codex_kill_guard::remote_status(&conn, &codex_home, &guard_sh).await.unwrap(), am_base::codex_hook::StopHookStatus::Trusted);
         let trusted = std::fs::read(&hooks_path).unwrap();
         assert!(reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, true).await, "trusted: kept");
         assert_eq!(std::fs::read(&hooks_path).unwrap(), trusted);
@@ -1226,5 +1235,6 @@ mod codex_stop_args_tests {
         let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         assert!(cfg.contains("sha256:user-last") && cfg.starts_with("model = \"x\"\n"), "{cfg:?}");
         assert!(!cfg.contains(&am_base::codex_hook::stop_hook_trust_hash(&command)), "{cfg:?}");
+        assert!(after.contains("kill-guard.sh") && cfg.contains(&am_base::codex_kill_guard::trust_hash(&guard_cmd)), "turning the Stop hook off keeps the kill guard");
     }
 }
