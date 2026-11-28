@@ -211,6 +211,7 @@ mod grok_live;
 mod role_policy;
 mod fork;
 mod remote_perms;
+mod remote_guard;
 mod promote;
 mod gh_auth;
 mod git_quick;

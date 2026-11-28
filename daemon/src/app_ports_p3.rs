@@ -67,6 +67,7 @@ impl HostHooks for App {
             crate::runners::remote_purge::spawn_sweep(app.clone(), host.clone());
             crate::runners::shim_refresh::spawn_remote_refresh(app.clone(), host.clone());
             crate::remote_perms::spawn_tighten(app.clone(), host.clone());
+            crate::remote_guard::spawn_refresh(app.clone(), host.clone());
             app.wait_until_startup_ready().await;
             crate::runners::reconcile::autostart_after_reconcile(&app, &host, reconciled).await;
         }
@@ -98,6 +99,7 @@ async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + cr
     app.tools().lock().await.remove(name);
     app.host_baseline().lock().await.remove(name);
     app.remote_shim_stale().lock().await.remove(name);
+    am_base::remote_guard_pending::set_host(name, Vec::new());
     let removed: Vec<String> = {
         let mut quotas = app.quotas().lock().await;
         let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();

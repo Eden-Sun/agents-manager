@@ -501,8 +501,33 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
+    for (host, p) in am_base::remote_guard_pending::snapshot() {
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&p.run_id).fetch_optional(app.db()).await.unwrap_or(Some("running".into()));
+        if state.as_deref() != Some("running") {
+            continue;
+        }
+        out.push(Observation {
+            kind: REMOTE_GUARD_PENDING_KIND.into(),
+            resource: format!("{host}/{}", p.bot_id),
+            severity: "degraded".into(),
+            detail: json!({
+                "host": host,
+                "bot_id": p.bot_id,
+                "bot": p.bot_name,
+                "kind": p.kind,
+                "run_id": p.run_id,
+                "message": "守門設定待重啟套用",
+                "action": "kill-guard.sh 已即時更新，但這顆 bot 的 CLI 啟動時載入的 hook 設定是舊版（執行中不會重載）；方便時重啟這顆 bot",
+            })
+            .to_string(),
+        });
+    }
+
     probed
 }
+
+/// 遠端 bot 的守門 hook 設定跟它啟動時載入的不同（使用者 2026-11-28）。`resource` 是 `<host>/<bot_id>`；重啟或停掉就自己關。
+pub const REMOTE_GUARD_PENDING_KIND: &str = "remote_guard_pending_restart";
 
 /// 角色 bot 自己不能用（issue #420／#427）。`resource` 是角色名（`responder`／`patrol`），兩顆各自一筆。
 ///

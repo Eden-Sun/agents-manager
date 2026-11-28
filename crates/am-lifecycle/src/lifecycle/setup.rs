@@ -590,7 +590,8 @@ fn install_local_grok_hook(app: &(impl crate::capabilities::DataDir + crate::cap
 }
 
 /// Remote grok bot: the same two files, written over ssh after `install_remote_hook`.
-async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> {
+/// 回傳 hooks 檔有沒有真的改寫（內容相同只換 dispatcher、不動 hooks 檔）。
+async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<bool> {
     let home = conn.home().await?;
     let root = crate::hosts::remote_root_for(instance);
     let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
@@ -600,6 +601,7 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     let guard = remote_kill_guard_cmd(&format!("{home}/{root}/{}", am_base::kill_guard::REMOTE_KILL_GUARD_SH), "grok");
     let merged = super::grok_hook::hooks_json_merged_remote(existing.as_ref().map(|(text, _)| text.as_str()), &dispatcher, &guard);
     let expected = existing.as_ref().map(|(_, hash)| hash.as_str());
+    let same = existing.as_ref().is_some_and(|(text, _)| text.trim_end() == merged.trim_end());
     let script = format!(
         "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\nWT=$(mktemp \"$W.tmp.XXXXXX\")\ncat > \"$WT\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$WT\"\nmv -f \"$WT\" \"$W\"\nG={g}\nmkdir -p \"$G\"\n[ ! -L \"$G\" ] && [ -d \"$G\" ] || {{ printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }}\nchmod 700 \"$G\"\ncd \"$G\"\nF={file}\n{guard}\nT=$(mktemp .agents-manager.XXXXXX)\ntrap 'rm -f \"$T\"' EXIT HUP INT TERM\ncat > \"$T\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$T\"\n{guard}\n{publish}\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
@@ -607,7 +609,9 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
         g = sh_quote(&hooks_dir),
         file = sh_quote(&grok_hooks_file(instance)),
         guard = remote_grok_expect_script(&grok_hooks_file(instance), expected),
-        publish = if expected.is_some() {
+        publish = if same {
+            "rm -f \"$T\"".to_string()
+        } else if expected.is_some() {
             format!("mv -f \"$T\" \"$F\"")
         } else {
             "ln \"$T\" \"$F\" && rm -f \"$T\" || { printf 'AM_GROK_CHANGED\\n'; exit 0; }".into()
@@ -618,8 +622,8 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     if !out.contains("AM_GROK_INSTALLED") {
         anyhow::bail!("remote grok hook install did not confirm:\n{}", out.trim());
     }
-    tracing::info!(host = %conn.name, hooks_dir, "remote grok hook installed");
-    Ok(())
+    tracing::info!(host = %conn.name, hooks_dir, changed = !same, "remote grok hook installed");
+    Ok(!same)
 }
 
 fn remote_grok_read_script(hooks_dir: &str, file: &str) -> String {
@@ -687,6 +691,9 @@ fn remote_grok_expect_script(file: &str, expected: Option<&str>) -> String {
     }
 }
 
+#[path = "guard_refresh.rs"]
+pub mod guard_refresh;
+
 pub struct RemoteHookPaths {
     pub dir: String,
     pub hook_sh: String,
@@ -726,8 +733,10 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let p = remote_bot_dir_for(conn, &bot.id, instance).await?;
     let settings = remote_claude_settings(&p, bot, time_zone);
     let settings_text = serde_json::to_string_pretty(&settings)?;
+    let sig = if bot.kind == "claude" { guard_refresh::guard_sig_for("claude", &p, bot, time_zone, instance) } else { None };
+    let sig_line = sig.map(|s| format!("printf '%s' {} > \"$D/{}\"\n", sh_quote(&s), guard_refresh::GUARD_SIG_FILE)).unwrap_or_default();
     let script = format!(
-        "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nKG={kg}\nKT=$(mktemp \"$KG.tmp.XXXXXX\")\ncat > \"$KT\" <<'AM_KILL_GUARD_EOF'\n{guard}AM_KILL_GUARD_EOF\nchmod 700 \"$KT\"\nmv -f \"$KT\" \"$KG\"\nprintf 'AM_INSTALLED\\n'\n",
+        "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\n{sig_line}KG={kg}\nKT=$(mktemp \"$KG.tmp.XXXXXX\")\ncat > \"$KT\" <<'AM_KILL_GUARD_EOF'\n{guard}AM_KILL_GUARD_EOF\nchmod 700 \"$KT\"\nmv -f \"$KT\" \"$KG\"\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
         kg = sh_quote(&p.kill_guard),
         guard = am_base::kill_guard::remote_kill_guard_sh(),
@@ -876,11 +885,13 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
             }
             "grok" => {
                 install_remote_grok_hook(&conn, env, app.instance().as_deref()).await?;
+                guard_refresh::note_started(&conn, &paths, bot, &time_zone, app.instance().as_deref()).await;
                 vec![]
             }
             "agy" => {
-                if let Err(e) = crate::agy_remote::install_remote(&conn, app.instance().as_deref(), env.get("HOME").and_then(|v| v.as_str())).await {
-                    tracing::warn!(bot = %bot.name, host = %project.host, error = %format!("{e:#}"), "could not install the remote agy hooks; the bot starts without them");
+                match crate::agy_remote::install_remote(&conn, app.instance().as_deref(), env.get("HOME").and_then(|v| v.as_str())).await {
+                    Ok(_) => guard_refresh::note_started(&conn, &paths, bot, &time_zone, app.instance().as_deref()).await,
+                    Err(e) => tracing::warn!(bot = %bot.name, host = %project.host, error = %format!("{e:#}"), "could not install the remote agy hooks; the bot starts without them"),
                 }
                 vec![]
             }
@@ -3399,7 +3410,7 @@ pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
     pub fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String { super::local_grok_dispatch_sh(exe, data_dir, instance) }
     use super::*;
-    pub async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> { super::install_remote_grok_hook(conn, env, instance).await }
+    pub async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<bool> { super::install_remote_grok_hook(conn, env, instance).await }
     pub fn hook_cmd_parts(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::capabilities::ListenPort), bot: &db::Bot, provider: &str) -> Vec<String> { super::hook_cmd_parts(app, bot, provider) }
     pub async fn remote_codex_paths(env: &Value, conn: &HostConn, root: &str) -> anyhow::Result<(String, String)> { super::remote_codex_paths(env, conn, root).await }
     pub async fn reconcile_remote_stop_hook(conn: &HostConn, host: &str, codex_home: &str, command: &str, keep_trusted: bool) -> bool { super::reconcile_remote_stop_hook(conn, host, codex_home, command, keep_trusted).await }

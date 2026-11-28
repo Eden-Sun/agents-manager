@@ -109,6 +109,29 @@ mod tests {
         assert!(notifiable(REMOTE_SHIM_STALE_KIND, "mac2", false));
     }
 
+    /// 守門設定待重啟套用：那次 run 還在跑就開票（`agm health` 看得到），停掉或重啟（run 不再是 running）就丟掉、票自己關。
+    #[tokio::test]
+    async fn a_remote_bot_waiting_for_a_restart_to_load_the_guard_opens_an_incident_until_its_run_ends() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let t = thresholds();
+        let host = format!("guard-pending-{}", crate::db::ulid());
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "pending-guard").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let resource = format!("{host}/{}", bot.id);
+        let of = |p: &Probed| -> Vec<String> {
+            p.seen.iter().filter(|o| o.kind == REMOTE_GUARD_PENDING_KIND).map(|o| o.resource.clone()).collect()
+        };
+        am_base::remote_guard_pending::set_host(&host, vec![am_base::remote_guard_pending::PendingRestart { bot_id: bot.id.clone(), bot_name: bot.name.clone(), kind: "claude".into(), run_id: run_id.clone() }]);
+        let probed = observe(&app, &t).await;
+        assert!(of(&probed).contains(&resource));
+        let o = probed.seen.iter().find(|o| o.resource == resource).unwrap();
+        assert!(o.detail.contains("守門設定待重啟套用"), "{}", o.detail);
+
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        assert!(!of(&observe(&app, &t).await).contains(&resource), "run 結束就不算待重啟");
+    }
+
     /// incident 開起來與叫醒 AGM 的 `incident_opened` 同一個交易：通知寫不進去，incident 就不開（下一輪再來）。
     /// 以前先 `open_incident`、再 `let _` 推事件；寫不進去時 incident 已是 open，之後每輪 `opened=false` 不再通知，
     /// 一個真的系統故障就永遠沒人被告知。
