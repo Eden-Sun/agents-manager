@@ -9,6 +9,7 @@ async fn seed(e: &crate::testing::Env, md: Vec<String>) {
         cfg.agents.projects.insert("proj".into(), crate::config::AgentMdFiles::Many(md));
         Ok(())
     }).await.unwrap();
+    sqlx::query("UPDATE projects SET path=? WHERE id=?").bind(repo_path(e)).bind(&e.project_id).execute(&e.app.db).await.unwrap();
 }
 
 async fn add(e: &crate::testing::Env, name: &str) -> db::Bot {
