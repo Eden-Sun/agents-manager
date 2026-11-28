@@ -71,10 +71,10 @@ test('設定頁：支援且已訂閱時顯示「已啟用」，可送測試通�
   }
 })
 
-test('設定頁：主力 bot、其他 bot、更新、重置券、被登出與撞額度推播開關', async () => {
+test('設定頁：主力 bot、Jev 過濾、其他 bot、更新、重置券、被登出與撞額度推播開關', async () => {
   const puts: unknown[] = []
   fakeApi((req) => {
-    if (req.method === 'GET' && req.path.endsWith('/push/settings')) return { main_bots: true, other_bots: true, updates: true, reset_credits: true, auth: true, quota: true, hosts: true, schedules: true, ops: true, new_models: true }
+    if (req.method === 'GET' && req.path.endsWith('/push/settings')) return { main_bots: true, jev_filter: true, other_bots: true, updates: true, reset_credits: true, auth: true, quota: true, hosts: true, schedules: true, ops: true, new_models: true }
     if (req.method === 'PUT' && req.path.endsWith('/push/settings')) {
       puts.push(req.body)
       return req.body
@@ -84,28 +84,23 @@ test('設定頁：主力 bot、其他 bot、更新、重置券、被登出與撞
   await mount(<PushSettings />)
   await settle()
   const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
-  assert.equal(checkboxes.length, 10, '應有十個推播開關')
-  assert.equal(checkboxes[0].checked, true)
-  assert.equal(checkboxes[1].checked, true)
-  assert.equal(checkboxes[2].checked, true)
-  assert.equal(checkboxes[3].checked, true)
-  assert.equal(checkboxes[4].checked, true)
-  assert.equal(checkboxes[5].checked, true)
-  assert.equal(checkboxes[6].checked, true)
-  assert.equal(checkboxes[7].checked, true)
-  assert.equal(checkboxes[8].checked, true)
-  assert.equal(checkboxes[9].checked, true)
+  assert.equal(checkboxes.length, 11, '應有十一個推播開關')
+  for (const cb of checkboxes) assert.equal(cb.checked, true)
   await click(checkboxes[1])
   await settle()
-  assert.deepEqual(puts, [{ other_bots: false }])
+  assert.deepEqual(puts, [{ jev_filter: false }])
   assert.equal(checkboxes[1].checked, false)
-  await click(checkboxes[4])
+  await click(checkboxes[2])
   await settle()
-  assert.deepEqual(puts[1], { auth: false })
-  assert.equal(checkboxes[4].checked, false)
-  await click(checkboxes[9])
+  assert.deepEqual(puts[1], { other_bots: false })
+  assert.equal(checkboxes[2].checked, false)
+  await click(checkboxes[5])
   await settle()
-  assert.deepEqual(puts[2], { new_models: false })
-  assert.equal(checkboxes[9].checked, false)
+  assert.deepEqual(puts[2], { auth: false })
+  assert.equal(checkboxes[5].checked, false)
+  await click(checkboxes[10])
+  await settle()
+  assert.deepEqual(puts[3], { new_models: false })
+  assert.equal(checkboxes[10].checked, false)
   await unmountAll()
 })

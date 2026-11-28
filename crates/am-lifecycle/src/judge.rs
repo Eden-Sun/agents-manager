@@ -20,6 +20,8 @@ use crate::config::JudgeCfg;
 pub mod ask_option;
 #[path = "judge/collision.rs"]
 pub mod collision;
+#[path = "judge/push_worth.rs"]
+pub mod push_worth;
 #[path = "judge/report.rs"]
 pub mod report;
 #[path = "judge/stuck.rs"]

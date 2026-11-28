@@ -75,9 +75,9 @@ test('錯誤筆數與最後一次時間：空字串不算錯誤；最後一次�
   assert.equal(same!.last, ago(1), '最後一次是 1 小時前那列')
 })
 
-test('沒有紀錄：總數為 0，最後一次是 null，五個場景都有一列', () => {
+test('沒有紀錄：總數為 0，最後一次是 null，六個場景都有一列', () => {
   const stats = sceneStats([], NOW)
-  assert.equal(stats.length, 5)
+  assert.equal(stats.length, 6)
   assert.ok(stats.every((s) => s.last === null && s.windows.all.total === 0))
 })
 
@@ -154,4 +154,11 @@ test('ask_option：場景計數與機率欄', () => {
   assert.equal(probabilityText(rows[0]), '建議 0.91')
   assert.equal(probabilityText(rows[1]), '無建議（最高 0.60）')
   assert.equal(probabilityText(rows[2]), '—')
+})
+
+test('push_worth：機率 <0.35（被壓掉不推）算超過門檻；機率欄顯示分數', () => {
+  assert.equal(overThreshold(row({ regex_verdict: 'push_worth', at: ago(1), jev_is_live_ui: 0.12 })), true)
+  assert.equal(overThreshold(row({ regex_verdict: 'push_worth', at: ago(1), jev_is_live_ui: 0.35 })), false)
+  assert.equal(overThreshold(row({ regex_verdict: 'push_worth', at: ago(1), jev_is_live_ui: null })), false)
+  assert.equal(probabilityText(row({ regex_verdict: 'push_worth', at: ago(1), jev_is_live_ui: 0.12 })), '0.12')
 })

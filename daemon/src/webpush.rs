@@ -423,6 +423,7 @@ pub(crate) fn hosts_enabled(dir: &Path) -> bool {
 fn settings_json(dir: &Path) -> Value {
     json!({
         "main_bots": setting_enabled(dir, "main_bots"),
+        "jev_filter": setting_enabled(dir, "jev_filter"),
         "hosts": setting_enabled(dir, "hosts"),
         "other_bots": setting_enabled(dir, "other_bots"),
         "updates": setting_enabled(dir, "updates"),
@@ -549,6 +550,10 @@ impl MainNotifier {
         sent.insert(id, std::time::Instant::now());
         true
     }
+
+    fn release_throttle(&self, bot_id: &str, kind: MainKind) {
+        self.last_sent.lock().unwrap_or_else(|e| e.into_inner()).remove(&(bot_id.to_string(), kind));
+    }
 }
 
 /// 第一個非空行，截 80 字（以字元計）。
@@ -570,13 +575,35 @@ fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Val
     json!({"title": bot_name, "body": body, "tag": format!("bot:{bot_id}:{k}"), "url": format!("/bots/{bot_id}")})
 }
 
-async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, read: ReadTarget, line: impl std::future::Future<Output = String>) {
+async fn send_main(
+    app: &Arc<App>,
+    n: &MainNotifier,
+    bot: &crate::db::Bot,
+    kind: MainKind,
+    key: &str,
+    read: ReadTarget,
+    jev_check: Option<crate::judge::push_worth::Sample>,
+    line: impl std::future::Future<Output = String>,
+) {
     if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id) || phone_in_foreground()) {
         return;
     }
     tokio::time::sleep(Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed))).await;
     if is_read(app, &bot.id, &read).await || phone_in_foreground() {
         return;
+    }
+    if let Some(sample) = jev_check {
+        match crate::judge::push_worth::evaluate(app.as_ref(), &sample).await {
+            Ok(Some(prob)) if !crate::judge::push_worth::should_notify_prob(prob) => {
+                tracing::info!(bot = %bot.name, turn = %key, prob, "web push: suppressed by Jev (low-priority reply)");
+                n.release_throttle(&bot.id, kind);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(bot = %bot.name, turn = %key, error = %e, "web push: Jev filter failed, falling back to notify");
+            }
+        }
     }
     let payload = main_payload(&bot.id, &bot.name, kind, &line.await);
     if is_read(app, &bot.id, &read).await || phone_in_foreground() {
@@ -737,7 +764,7 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
     }
     if failed {
         let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
-        send_main(app, n, &bot, MainKind::Done, turn_id, read, async { "回合失敗".to_string() }).await;
+        send_main(app, n, &bot, MainKind::Done, turn_id, read, None, async { "回合失敗".to_string() }).await;
         return;
     }
     if !user_triggered(app, turn_id).await {
@@ -750,8 +777,27 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
         .ok()
         .flatten();
     let (mid, text) = reply.unwrap_or_default();
+    let jev_check = if !text.trim().is_empty() && setting_enabled(&app.data_dir, "jev_filter") {
+        let user_prompt: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NULL ORDER BY rowid DESC LIMIT 1")
+            .bind(turn_id)
+            .fetch_optional(&app.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        Some(crate::judge::push_worth::Sample {
+            bot_id: bot.id.clone(),
+            project_id: bot.project_id.clone(),
+            kind: bot.kind.clone(),
+            turn_id: turn_id.to_string(),
+            user_prompt,
+            reply: text.clone(),
+        })
+    } else {
+        None
+    };
     let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
-    send_main(app, n, &bot, MainKind::Done, turn_id, read, async { push_line(app, &mid, &text).await }).await;
+    send_main(app, n, &bot, MainKind::Done, turn_id, read, jev_check, async { push_line(app, &mid, &text).await }).await;
 }
 
 fn is_other_top_level_bot(b: &crate::db::Bot) -> bool {
@@ -799,7 +845,7 @@ async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode
     if run.agent_status != "blocked" {
         return;
     }
-    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), ReadTarget::Since(opened), blocked_line(&app, &bot_id, &run.id)).await;
+    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), ReadTarget::Since(opened), None, blocked_line(&app, &bot_id, &run.id)).await;
 }
 
 pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &crate::state::WsEvent) {
@@ -1762,6 +1808,8 @@ pub(crate) struct SettingsInput {
     #[serde(default)]
     pub main_bots: Option<bool>,
     #[serde(default)]
+    pub jev_filter: Option<bool>,
+    #[serde(default)]
     pub hosts: Option<bool>,
     #[serde(default)]
     pub other_bots: Option<bool>,
@@ -1787,6 +1835,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
     let mut cur = settings_json(&app.data_dir);
     for (k, v) in [
         ("main_bots", input.main_bots),
+        ("jev_filter", input.jev_filter),
         ("hosts", input.hosts),
         ("other_bots", input.other_bots),
         ("updates", input.updates),
@@ -2962,18 +3011,105 @@ pub(crate) mod tests {
         let res = get_settings(State(app.clone()), user()).await.unwrap().0;
         assert_eq!(res["auth"], true);
         assert_eq!(res["quota"], true);
+        assert_eq!(res["jev_filter"], true);
 
         let updated = put_settings(State(app.clone()), user(), Json(SettingsInput {
             auth: Some(false),
+            jev_filter: Some(false),
             ..Default::default()
         })).await.unwrap().0;
         assert_eq!(updated["auth"], false);
+        assert_eq!(updated["jev_filter"], false);
         assert_eq!(updated["quota"], true);
         assert_eq!(auth_enabled(&app.data_dir), false);
+        assert_eq!(setting_enabled(&app.data_dir, "jev_filter"), false);
         assert_eq!(quota_enabled(&app.data_dir), true);
 
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
         assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { auth: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn jev_filter_suppresses_low_priority_reply_and_releases_throttle() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+
+        let scores = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            Some(0.08_f64),
+            Some(0.91_f64),
+            None,
+        ])));
+        let scores_srv = scores.clone();
+        let router = axum::Router::new().route(
+            "/judge",
+            axum::routing::post(move || {
+                let s = scores_srv.lock().unwrap().pop_front().flatten();
+                async move {
+                    match s {
+                        Some(prob) => (
+                            axum::http::StatusCode::OK,
+                            Json(json!({
+                                "model": "jev-test",
+                                "answers": { "should_notify": { "noul": prob } },
+                                "usage": { "input_tokens": 42 }
+                            })),
+                        ),
+                        None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "boom"}))),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+
+        let key_path = app.data_dir.join("jev.key");
+        write_private(&key_path, b"test-jev-key").unwrap();
+        let endpoint = format!("http://{addr}/judge");
+        let key_file = key_path.to_string_lossy().to_string();
+        let pid = env.project_id.clone();
+        app.cfg
+            .update(move |c| {
+                c.judge.enabled = true;
+                c.judge.projects = vec![pid];
+                c.judge.endpoint = endpoint;
+                c.judge.key_file = key_file;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        add_reply(&env, &bot_id, "t-ack", "已分配任務給 cc0-op-1，完成後回報").await;
+        add_reply(&env, &bot_id, "t-real", "已修好並推上 main，測試全綠").await;
+        add_reply(&env, &bot_id, "t-err", "這是 Jev 500 時的回覆").await;
+        add_reply(&env, &bot_id, "t-off", "關閉過濾後直接推").await;
+
+        handle_event(&app, &n, &turn_ev(&bot_id, "t-ack", "completed")).await;
+        assert!(rx.try_recv().is_err(), "低分（0.08 < 0.35）應壓掉推播");
+        let recorded: Option<f64> = sqlx::query_scalar("SELECT jev_is_live_ui FROM judge_shadow WHERE run_id = 't-ack' AND regex_verdict = 'push_worth'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap()
+            .flatten();
+        assert_eq!(recorded, Some(0.08), "帳本應記下 push_worth 分數");
+
+        handle_event(&app, &n, &turn_ev(&bot_id, "t-real", "completed")).await;
+        let got = rx.try_recv().expect("前次被壓掉不應佔用節流，高分回覆應立即推播");
+        assert!(got["body"].as_str().unwrap().contains("已修好並推上 main"));
+
+        let n2 = Arc::new(MainNotifier::default());
+        handle_event(&app, &n2, &turn_ev(&bot_id, "t-err", "completed")).await;
+        assert!(rx.try_recv().is_ok(), "Jev 500 應 fail-open 照常推播");
+
+        let n3 = Arc::new(MainNotifier::default());
+        write_private(&settings_path(&app.data_dir), br#"{"main_bots":true,"jev_filter":false}"#).unwrap();
+        handle_event(&app, &n3, &turn_ev(&bot_id, "t-off", "completed")).await;
+        assert!(rx.try_recv().is_ok(), "jev_filter 關閉時直接推播");
+
+        srv.abort();
+        set_test_sender(None);
     }
 
     #[tokio::test]

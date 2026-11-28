@@ -52,6 +52,8 @@ export default {
   '交辦從在途收成，且回報是 hook 的完成回覆（不含從終端機刮下來的）時，問回報有沒有宣稱已驗證，以及要不要收件者動手。': 'When an assignment moves from in-flight to done and the report is the hook completion reply (not scraped from the terminal), ask whether the report claims verification and whether the recipient needs to act.',
   '選項建議': 'Option suggestion',
   'claude 用 AskUserQuestion 問單選題時，問使用者最可能選哪一項；最高分 ≥0.7 且比第二名高 ≥0.15 才在選項旁標「Jev 建議」。只提示，不代答。': 'When claude asks a single-choice question with AskUserQuestion, ask which option the user is most likely to pick. Only when the top score is ≥0.7 and at least 0.15 above the second does the option get a "Jev suggestion" mark. Hint only, never answers for the user.',
+  '推播過濾': 'Push filter',
+  '主力 bot 完成回覆即將推播給使用者時，問這則回覆是否值得通知；機率 <0.35（例如僅回「已分配任務」）才跳過推播。': 'Before pushing a primary Bot completion reply, ask whether it warrants a notification; skip pushing only when the score is <0.35 (e.g., brief task-dispatch acknowledgments).',
   '近 24 小時': 'Last 24 hours',
   '近 7 天': 'Last 7 days',
   '全部': 'All',

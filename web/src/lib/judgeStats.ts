@@ -1,7 +1,7 @@
 import type { JudgeShadowRow } from '../api/judge'
 import { msg, t } from './i18n'
 
-export type JudgeScene = 'limit_hit' | 'stuck_queued' | 'same_work' | 'report_evidence' | 'ask_option'
+export type JudgeScene = 'limit_hit' | 'stuck_queued' | 'same_work' | 'report_evidence' | 'ask_option' | 'push_worth'
 
 export const JUDGE_SCENES: readonly { id: JudgeScene; name: string; when: string }[] = [
   {
@@ -28,6 +28,11 @@ export const JUDGE_SCENES: readonly { id: JudgeScene; name: string; when: string
     id: 'ask_option',
     name: msg('選項建議'),
     when: msg('claude 用 AskUserQuestion 問單選題時，問使用者最可能選哪一項；最高分 ≥0.7 且比第二名高 ≥0.15 才在選項旁標「Jev 建議」。只提示，不代答。'),
+  },
+  {
+    id: 'push_worth',
+    name: msg('推播過濾'),
+    when: msg('主力 bot 完成回覆即將推播給使用者時，問這則回覆是否值得通知；機率 <0.35（例如僅回「已分配任務」）才跳過推播。'),
   },
 ]
 
@@ -85,6 +90,8 @@ export function overThreshold(row: JudgeShadowRow): boolean | null {
       return (row.claims_verified !== null && row.claims_verified < 0.8) || (row.asks_parent_action !== null && row.asks_parent_action >= 0.8)
     case 'ask_option':
       return askOptionQuestions(row)?.some((q) => q.suggested !== null) === true
+    case 'push_worth':
+      return row.jev_is_live_ui !== null && row.jev_is_live_ui < 0.35
     default:
       return null
   }
@@ -143,6 +150,7 @@ export function probabilityText(row: JudgeShadowRow): string {
   switch (row.regex_verdict) {
     case 'stuck_queued':
     case 'limit_hit':
+    case 'push_worth':
       return fmt(row.jev_is_live_ui)
     case 'same_work':
       return fmt(row.jev_same_work)

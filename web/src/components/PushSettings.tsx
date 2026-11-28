@@ -10,7 +10,7 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true, schedules: true, ops: true, new_models: true })
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, jev_filter: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true, schedules: true, ops: true, new_models: true })
   useEffect(() => {
     getPushSettings().then((s) => setOpts((prev) => ({ ...prev, ...s })), () => {})
   }, [])
@@ -88,6 +88,7 @@ export function PushSettings() {
       </div>
       {([
         ['main_bots', t('主力 bot 回覆完成／需要回應時推播')],
+        ['jev_filter', t('由 Jev 過濾不需通知的回覆（例如「已分配任務」；需啟用 Jev）')],
         ['other_bots', t('其他 bot 需要回應時推播')],
         ['updates', t('偵測到更新（AG Man／CLI）時推播')],
         ['reset_credits', t('codex 額度用完且有重置券時推播（只通知，不自動使用）')],

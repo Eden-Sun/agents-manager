@@ -214,6 +214,7 @@ const dict: Dict = {
 
   '沒有送出：推送服務拒絕': 'Not sent: Push service rejected',
   '主力 bot 回覆完成／需要回應時推播': 'Push when primary Bot finishes reply or needs response',
+  '由 Jev 過濾不需通知的回覆（例如「已分配任務」；需啟用 Jev）': 'Use Jev to skip low-priority replies (e.g. "task assigned"; requires Jev enabled)',
   '其他 bot 需要回應時推播': 'Push when other Bots need response',
   '偵測到更新（AG Man／CLI）時推播': 'Push when updates are detected (AG Man / CLI)',
   'codex 額度用完且有重置券時推播（只通知，不自動使用）': 'Push when Codex quota is exhausted and reset credits are available (notify only, not auto-used)',
