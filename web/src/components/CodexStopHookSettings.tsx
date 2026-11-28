@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { fetchStopHook, trustStopHook, type StopHookEntry, type StopHookReport, type StopHookStatus } from '../api/codexStopHook'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -9,10 +9,17 @@ export function CodexStopHookSettings() {
   const [pending, setPending] = useState<StopHookEntry | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [loadErr, setLoadErr] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetchStopHook().then((r) => setReport(Array.isArray(r?.entries) ? r : null), () => {})
-  }, [])
+  const load = useCallback(() => {
+    setLoadErr(null)
+    fetchStopHook().then(
+      (r) => (Array.isArray(r?.entries) ? setReport(r) : setLoadErr(t('回應格式不對'))),
+      (e: unknown) => setLoadErr(e instanceof Error ? e.message : String(e)),
+    )
+  }, [t])
+
+  useEffect(load, [load])
 
   const label = (e: StopHookEntry) => `${e.host} / ${e.identity ?? t('預設帳號')}`
   const statusText = (status: StopHookStatus | undefined) => {
@@ -48,10 +55,25 @@ export function CodexStopHookSettings() {
     }
   }
 
-  if (!report) return null
+  const title = <h4 className="codex-stop-hook-title">{t('Codex Stop hook 信任')}</h4>
+  if (!report) {
+    return (
+      <section className="codex-stop-hook-settings" aria-label={t('Codex Stop hook 信任')}>
+        {title}
+        {loadErr ? (
+          <p className="codex-stop-hook-error" role="alert">
+            {t('讀取 Stop hook 狀態失敗：{reason}', { reason: loadErr })}{' '}
+            <button type="button" onClick={load}>{t('重試')}</button>
+          </p>
+        ) : (
+          <p className="codex-stop-hook-note">{t('讀取中…')}</p>
+        )}
+      </section>
+    )
+  }
   return (
     <section className="codex-stop-hook-settings" aria-label={t('Codex Stop hook 信任')}>
-      <h4 className="codex-stop-hook-title">{t('Codex Stop hook 信任')}</h4>
+      {title}
       <p className="codex-stop-hook-note">
         {report.enabled
           ? t('信任後，AG Man 會停用會爆 argv 上限的舊通知，改用 stdin Stop hook。')

@@ -149,6 +149,8 @@ export default {
   'Stop：{status}': 'Stop: {status}',
   'kill 守門：{status}': 'Kill guard: {status}',
   'codex kill 守門未生效': 'Codex kill guard not in effect',
+  '讀取 Stop hook 狀態失敗：{reason}': 'Could not read Stop hook status: {reason}',
+  '回應格式不對': 'Unexpected response format',
   '同一次信任也會寫入廣域 kill 守門（PreToolUse）；未信任的帳號，codex bot 只剩 PATH 上的 pkill／killall shim，擋不到 kill -1、xargs kill。': 'The same trust also installs the broad-kill guard (PreToolUse); on an untrusted account codex bots only have the pkill/killall shim on PATH, which cannot stop kill -1 or xargs kill.',
   '自動更新（不通知）': 'Auto-update (no notifications)',
   '有新版自動安裝，不跳通知；跑著的 bot 重啟後才換版（codex 會重啟閒置的 codex bot）。失敗時仍會通知。': 'Automatically install new versions without notifications; running bots will only switch versions after restarting (codex will restart idle codex bots). You will still be notified upon failure.',

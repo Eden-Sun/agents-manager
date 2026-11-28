@@ -640,6 +640,10 @@ export class MockTransport implements Transport {
   readonly remoteCargo = new MockRemoteCargo()
   buildScene: MockBuildScene = 'idle'
   readonly integrationUpdates = new MockIntegrationUpdates()
+  stopHooks: { host: string; identity: string | null; codex_home: string; status: string; kill_guard: string }[] = [
+    { host: 'local', identity: null, codex_home: '/home/me/.codex', status: 'trusted', kill_guard: 'trusted' },
+    { host: 'm4p', identity: null, codex_home: '/Users/me/.codex', status: 'untrusted', kill_guard: 'not_installed' },
+  ]
   readonly herdrUpdate = new MockHerdrUpdate({
     emit: (type, data) => this.emit(type, data),
     liveBots: (host) =>
@@ -1238,6 +1242,14 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'update-chain' && seg.length === 1) return this.updateChain(Array.isArray(b.installs) ? (b.installs as Rec[]) : [])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
+    if (method === 'GET' && rawPath === '/codex/stop-hook') return { enabled: true, entries: this.stopHooks }
+    if (method === 'POST' && rawPath === '/codex/stop-hook/trust') {
+      const row = this.stopHooks.find((e) => e.host === b.host && e.identity === (b.identity ?? null))
+      if (!row) throw new ApiError(404, { error: 'not_found' }, 'codex identity not found')
+      row.status = 'trusted'
+      row.kill_guard = 'trusted'
+      return row
+    }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'GET' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[3] === 'sync-plan' && seg.length === 4) return this.identitySyncPlan(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[3] === 'sync' && seg.length === 4) {

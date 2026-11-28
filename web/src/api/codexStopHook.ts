@@ -1,3 +1,5 @@
+import { rawTransport } from './index'
+
 export type StopHookStatus = 'not_installed' | 'untrusted' | 'hash_mismatch' | 'trusted' | 'unavailable'
 
 export interface StopHookEntry {
@@ -13,18 +15,10 @@ export interface StopHookReport {
   entries: StopHookEntry[]
 }
 
-export async function fetchStopHook(): Promise<StopHookReport> {
-  const res = await fetch('/api/codex/stop-hook')
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+export function fetchStopHook(): Promise<StopHookReport> {
+  return rawTransport.request('GET', '/codex/stop-hook') as Promise<StopHookReport>
 }
 
-export async function trustStopHook(host: string, identity: string | null): Promise<StopHookEntry> {
-  const res = await fetch('/api/codex/stop-hook/trust', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host, identity }),
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+export function trustStopHook(host: string, identity: string | null): Promise<StopHookEntry> {
+  return rawTransport.request('POST', '/codex/stop-hook/trust', { host, identity }) as Promise<StopHookEntry>
 }
