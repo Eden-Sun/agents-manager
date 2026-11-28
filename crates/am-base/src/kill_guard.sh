@@ -37,7 +37,8 @@ function junesc(p,    m, U, j, v, out) {
 }
 function jstring(s, i,    n, P, k, e, raw, buf, mid, nb, nq, Q, out) {
   JOK = 0
-  n = split(substr(s, i), P, /"/)
+  raw = substr(s, i)
+  n = split(raw, P, /"/)
   e = 0
   for (k = 1; k < n; k++) if (!match(P[k], /\\+$/) || RLENGTH % 2 == 0) { e = k; break }
   if (e == 0) return ""
@@ -129,11 +130,35 @@ function hdelim(n, j,    c) {
   HNEXT = (j > n + 1) ? n + 1 : j
   return HD != ""
 }
+function nextch(s, i, n, c,    w, k, t) {
+  for (w = i; w <= n; w += 8192) { t = substr(s, w, 8192); k = index(t, c); if (k) return w + k - 1 }
+  return n + 1
+}
+function nextdq(s, i, n,    w, t) {
+  for (w = i; w <= n; w += 8192) { t = substr(s, w, 8192); if (match(t, /["\\$`]/)) return w + RSTART - 1 }
+  return n + 1
+}
+function nextline(s, pos, n, d,    nd, L, w, k, t) {
+  nd = "\n" d "\n"; L = length(nd)
+  for (w = pos - 1; w <= n; w += 65536) { t = substr(s, w, 65536 + L); k = index(t, nd); if (k) return w + k - 1 }
+  t = substr(s, n - L + 2)
+  if (n - L + 2 >= pos - 1 && t == "\n" d) return n - L + 2
+  return 0
+}
+function nokill(t) {
+  gsub(/["\\]/, "", t); gsub(SQ, "", t)
+  return index(t, "kill") == 0
+}
 function docs(D, s, n, pos,    p, st, e, t, found, body, k, m) {
   for (p = 1; p <= PN; p++) {
     st = pos; body = ""
     found = 0
-    while (pos <= n) {
+    if (!PS[p] && pos <= n) {
+      e = nextline(s, pos, n, PD[p])
+      if (e) { body = substr(s, st, e + 1 - st); pos = e + length(PD[p]) + 2; found = 1 }
+      else pos = n + 1
+    }
+    while (!found && pos <= n) {
       t = pos
       if (PS[p]) while (t <= n && CH[t] == "\t") t++
       e = t
@@ -188,8 +213,7 @@ function parse(s, D,    n, i, j, c, sq, dq, lc, ls, failed) {
       CUR = CUR "$(..)"; HAS = 1; i = PEND; continue
     }
     if (sq) {
-      j = i
-      while (j <= n && CH[j] != SQ) j++
+      j = nextch(s, i, n, SQ)
       CUR = CUR substr(s, i, j - i)
       if (j <= n) sq = 0
       i = j + 1; continue
@@ -198,8 +222,7 @@ function parse(s, D,    n, i, j, c, sq, dq, lc, ls, failed) {
       if (c == "\"") dq = 0
       else if (c == "\\" && i < n) { i++; CUR = CUR CH[i] }
       else {
-        j = i
-        while (j <= n && CH[j] != "\"" && CH[j] != "\\" && CH[j] != "$" && CH[j] != "`") j++
+        j = nextdq(s, i, n)
         if (j == i) j++
         CUR = CUR substr(s, i, j - i)
         i = j; continue
@@ -423,6 +446,7 @@ function shopts(d,    len, i, a, on, lg, consumed, p, ch, v, nx, c, unsure, canc
   ONX = noexec && !unsure && !cancel
 }
 function doc_subs_check(body, dep,    n, i, r, c, txt) {
+  if (nokill(body)) return ""
   n = split(body, CH, "")
   NDS = 0
   i = 1
@@ -474,6 +498,7 @@ function simple(D, k, dep,    j, nm, r, sh, m, as, nargs, x) {
 }
 function check(cmd, dep,    m, k, r) {
   if (dep > 4) { note("指令巢狀（$()／bash -c／eval）超過上限，放行"); return "" }
+  if (nokill(cmd)) return ""
   parse(cmd, dep)
   for (m = 1; m <= SN[dep]; m++) { r = check(SB[dep, m], dep + 1); if (r != "") return r }
   r = xargs_check(dep)

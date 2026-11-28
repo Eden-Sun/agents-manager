@@ -5,6 +5,14 @@
     use std::process::{Command, Stdio};
 
     const CASES: &[&str] = &[
+        "ki''ll 0",
+        "k\\ill -1",
+        "\"ki\"ll -9 -1",
+        "env -S 'ki\\ll 0'",
+        "eval ki\"ll\" 0",
+        "ki\"$(x)\"ll 0",
+        "ki\\\nll 0",
+        "cat <<EOF\nnothing here\nEOF\necho $(ki''ll 0)",
         "pkill -P 1",
         "pkill -u eddie",
         "pkill -U 501",
@@ -370,27 +378,43 @@
         }
     }
 
+    /// 守門的快速路徑：去掉 `"`、`'`、`\` 之後沒有 `kill` 的指令一律放行。
+    /// 這只在 Rust 也必定放行時成立；共用案例表逐條驗。
+    #[test]
+    fn a_command_without_kill_after_quote_removal_is_always_allowed_by_rust() {
+        for cmd in CASES {
+            let t: String = cmd.chars().filter(|c| !matches!(c, '"' | '\'' | '\\')).collect();
+            if !t.contains("kill") {
+                assert_eq!(rust_reason(cmd), None, "{cmd:?}");
+            }
+        }
+    }
+
     /// 判斷要線性：同一台機器上 4 倍大的指令最多慢 8 倍（線性約 4 倍、O(n²) 約 16 倍）。
     /// 用相對比例，不用絕對秒數：GH macOS runner 比 m4p 慢約 10 倍，絕對門檻在慢機器上會誤判。
+    /// 前兩條含 `kill`，走完整解析；第三條沒有，走快速路徑，要比完整解析的 heredoc 快。
     #[test]
     fn the_remote_sh_guard_is_fast_on_big_commands() {
         let script = remote_kill_guard_sh();
         let heredoc = |k: usize| format!("cat > f <<'EOF'\n{}\nEOF\nkill 4242", "line of text with $(x) and `y`\n".repeat(1000 * k));
-        let quoted = |k: usize| format!("git commit -m '{}'", "x".repeat(50_000 * k));
-        for (name, make) in [("heredoc", &heredoc as &dyn Fn(usize) -> String), ("quoted", &quoted)] {
-            let best = |k: usize| {
-                let cmd = make(k);
-                (0..3)
-                    .map(|_| {
-                        let t = std::time::Instant::now();
-                        assert_eq!(sh_reason(&script, None, &cmd), None, "{name}");
-                        t.elapsed()
-                    })
-                    .min()
-                    .unwrap()
-            };
-            let (small, big) = (best(1), best(4));
+        let quoted = |k: usize| format!("git commit -m '{}' && kill 4242", "x \"y\" $(z)\n".repeat(5000 * k));
+        let plain = |k: usize| format!("cat > f <<'EOF'\n{}\nEOF\necho done", "line of text with $(x) and `y`\n".repeat(1000 * k));
+        let best = |cmd: &str| {
+            (0..3)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    assert_eq!(sh_reason(&script, None, cmd), None, "{}", &cmd[..40]);
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let mut full = std::time::Duration::ZERO;
+        for (name, make) in [("heredoc", &heredoc as &dyn Fn(usize) -> String), ("quoted", &quoted), ("plain", &plain)] {
+            let (small, big) = (best(&make(1)), best(&make(4)));
             assert!(big < small * 8 + std::time::Duration::from_millis(50), "{name}：1× {small:?}、4× {big:?}，不是線性");
+            if name == "heredoc" { full = big; }
+            if name == "plain" { assert!(big <= full, "沒有 kill 的指令要走快速路徑：plain {big:?}、heredoc {full:?}"); }
         }
     }
 
