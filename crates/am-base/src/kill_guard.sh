@@ -24,34 +24,31 @@ function hexval(h,    k, v, d) {
   }
   return v
 }
-function jstring(s, i,    L, c, st, buf, nb, k, v, out) {
-  L = length(s); st = i; buf = ""; nb = 0; JOK = 0
+function jstring(s, i,    L, c, buf, nb, mid, nm, k, v, out, JC) {
+  L = split(s, JC, ""); buf = ""; mid = ""; nb = 0; nm = 0; JOK = 0
   while (i <= L) {
-    c = substr(s, i, 1)
-    if (c == "\"") { buf = buf substr(s, st, i - st); JOK = 1; break }
+    c = JC[i]
+    if (c == "\"") { JOK = 1; break }
     if (c == "\\") {
-      buf = buf substr(s, st, i - st)
-      i++; c = substr(s, i, 1)
-      if (c == "n") buf = buf "\n"
-      else if (c == "t") buf = buf "\t"
-      else if (c == "r") buf = buf "\r"
-      else if (c == "b") buf = buf "\b"
-      else if (c == "f") buf = buf "\f"
+      i++; c = JC[i]
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "r") c = "\r"
+      else if (c == "b") c = "\b"
+      else if (c == "f") c = "\f"
       else if (c == "u") {
-        v = hexval(tolower(substr(s, i + 1, 4))); i += 4
-        buf = buf ((v > 0 && v < 128) ? sprintf("%c", v) : "?")
+        v = hexval(tolower(JC[i + 1] JC[i + 2] JC[i + 3] JC[i + 4])); i += 4
+        c = (v > 0 && v < 128) ? sprintf("%c", v) : "?"
       }
-      else buf = buf c
-      i++; st = i
-      if (length(buf) > 4096) { nb++; JB[nb] = buf; buf = "" }
-      continue
     }
-    i++
+    buf = buf c; i++
+    if (++nb >= 256) { mid = mid buf; buf = ""; nb = 0; if (++nm >= 64) { JN++; JB[JN] = mid; mid = ""; nm = 0 } }
   }
   if (!JOK) return ""
   out = ""
-  for (k = 1; k <= nb; k++) out = out JB[k]
-  return out buf
+  for (k = 1; k <= JN; k++) out = out JB[k]
+  JN = 0
+  return out mid buf
 }
 function payload_command(s,    r) {
   if (!match(s, /"([cC][oO][mM][mM][aA][nN][dD]([lL][iI][nN][eE])?|[cC][mM][dD])"[ \t\r\n]*:[ \t\r\n]*"/)) return ""
@@ -122,20 +119,20 @@ function hdelim(n, j,    c) {
   HNEXT = (j > n + 1) ? n + 1 : j
   return HD != ""
 }
-function docs(D, s, n, pos,    p, st, e, line, cmp, body, k, m) {
+function docs(D, s, n, pos,    p, st, e, t, found, body, k, m) {
   for (p = 1; p <= PN; p++) {
     st = pos; body = ""
+    found = 0
     while (pos <= n) {
-      e = pos
+      t = pos
+      if (PS[p]) while (t <= n && CH[t] == "\t") t++
+      e = t
       while (e <= n && CH[e] != "\n") e++
-      line = substr(s, pos, e - pos)
-      cmp = line
-      if (PS[p]) sub(/^\t+/, "", cmp)
-      if (cmp == PD[p]) { body = substr(s, st, pos - st); pos = e + 1; break }
+      if (e - t == length(PD[p]) && substr(s, t, e - t) == PD[p]) { body = substr(s, st, pos - st); pos = e + 1; found = 1; break }
       pos = e + 1
-      body = substr(s, st, pos - st)
     }
     if (pos > n + 1) pos = n + 1
+    if (!found) body = substr(s, st, pos - st)
     k = PO[p]
     if (k <= RN[D]) { RDN[D, k]++; m = RDN[D, k]; RDB[D, k, m] = body; RDX[D, k, m] = PX[p] }
   }

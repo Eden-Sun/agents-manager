@@ -8,7 +8,11 @@ import { resetOpenAiApiBalanceForTest } from '../hooks/useOpenAiApiBalance'
 import { BalanceQuotaChip } from './BalanceQuotaChip'
 import { OpenAiBalanceChip } from './OpenAiBalanceChip'
 
-before(setupDom)
+before(() => {
+  resetClaudeApiBalanceForTest()
+  resetOpenAiApiBalanceForTest()
+  return setupDom()
+})
 afterEach(async () => {
   await unmountAll()
   resetClaudeApiBalanceForTest()

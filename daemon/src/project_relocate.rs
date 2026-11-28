@@ -118,6 +118,8 @@ async fn probe_dir(app: &Arc<App>, host: &str, path: &str) -> Result<(bool, Stri
 }
 
 /// 驗證並鎖住專案內的 bot。新路徑等於目前路徑回 `None`（什麼都不用改）。
+/// 本機路徑先 canonicalize（同 `create_project` 與投影對 config 的處理）：不然 macOS 的 `/var`→`/private/var`
+/// 會讓 config／DB 的專案路徑被投影改成 canonical，而 bot cwd 等前綴改寫仍是原字面，兩邊對不上。
 pub(crate) async fn prepare(app: &Arc<App>, id: &str, raw: &str) -> Result<Option<Relocate>, LcError> {
     let new = normalize_path(raw)?;
     let project = db::project(&app.db, id)
@@ -128,6 +130,14 @@ pub(crate) async fn prepare(app: &Arc<App>, id: &str, raw: &str) -> Result<Optio
     if let Some(h) = &project.handed_off_to {
         return Err(LcError::conflict("handed_off", json!({"project_id": id, "handed_off_to": h})));
     }
+    let new = if project.host == LOCAL_HOST {
+        match std::fs::canonicalize(&new) {
+            Ok(c) => c.to_string_lossy().trim_end_matches('/').to_string(),
+            Err(_) => return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "path_not_found", "host": project.host, "path": new}))),
+        }
+    } else {
+        new
+    };
     let old = project.path.trim_end_matches('/').to_string();
     if new == old {
         return Ok(None);

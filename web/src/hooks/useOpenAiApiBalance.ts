@@ -3,6 +3,7 @@ import type { OpenAiApiBalance } from '../api/openaiApiBalance'
 import { fetchOpenAiApiBalance } from '../api/openaiApiBalance'
 
 let balance: OpenAiApiBalance | null = null
+let generation = 0
 const listeners = new Set<() => void>()
 
 export function useOpenAiApiBalance() {
@@ -19,15 +20,20 @@ export function useOpenAiApiBalance() {
 }
 
 export async function reloadOpenAiApiBalance() {
+  const gen = generation
+  let next: OpenAiApiBalance | null
   try {
-    balance = await fetchOpenAiApiBalance()
+    next = await fetchOpenAiApiBalance()
   } catch {
-    balance = null
+    next = null
   }
+  if (gen !== generation) return
+  balance = next
   for (const l of listeners) l()
 }
 
 export function resetOpenAiApiBalanceForTest() {
+  generation++
   balance = null
   listeners.clear()
 }

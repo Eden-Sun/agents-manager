@@ -3,7 +3,7 @@ use super::*;
 use crate::project_relocate::{normalize_path, rewrite_alias_key, rewrite_md_path, swap_prefix};
 
 async fn seed(e: &crate::testing::Env, md: Vec<String>) {
-    let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+    let (pid, repo) = (e.project_id.clone(), repo_path(e));
     e.app.cfg.update(move |cfg| {
         cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
         cfg.agents.projects.insert("proj".into(), crate::config::AgentMdFiles::Many(md));
@@ -28,7 +28,12 @@ async fn relocate(e: &crate::testing::Env, who: RequestPrincipal, path: &str) ->
 fn moved(e: &crate::testing::Env) -> String {
     let p = e.dir.join("moved-here");
     std::fs::create_dir_all(&p).unwrap();
-    p.to_string_lossy().to_string()
+    p.canonicalize().unwrap().to_string_lossy().to_string()
+}
+
+/// 投影把本機專案路徑存成 canonical（macOS 的 TMPDIR 在 `/var` → `/private/var`），測試的舊路徑要跟著比。
+fn repo_path(e: &crate::testing::Env) -> String {
+    e.repo.canonicalize().unwrap().to_string_lossy().to_string()
 }
 
 async fn project_path(e: &crate::testing::Env) -> (String, String) {
@@ -74,7 +79,7 @@ fn alias_keys_and_paths_are_normalized() {
 #[tokio::test]
 async fn the_user_relocates_config_and_db_together() {
     let e = crate::testing::env().await;
-    let old = e.repo.to_string_lossy().to_string();
+    let old = repo_path(&e);
     seed(&e, vec![format!("{old}/AGENTS.md"), format!("{old}2/AGENTS.md"), "~/other.md".into()]).await;
     let new = moved(&e);
     let a = add(&e, "reloc-a").await;
@@ -119,7 +124,7 @@ async fn only_the_user_or_a_fleet_operator_may_relocate() {
     let other = add(&e, "reloc-plain").await;
     let err = relocate(&e, RequestPrincipal::Bot(other.id.clone()), &new).await.err().unwrap();
     assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
-    assert_eq!(project_path(&e).await.0, e.repo.to_string_lossy());
+    assert_eq!(project_path(&e).await.0, repo_path(&e));
     let op = other.id.clone();
     e.app.cfg.update(move |cfg| { cfg.agents.fleet_operators = vec![op]; Ok(()) }).await.unwrap();
     let label: PatchProject = serde_json::from_value(json!({"label": "hijack"})).unwrap();
@@ -133,7 +138,7 @@ async fn only_the_user_or_a_fleet_operator_may_relocate() {
 async fn a_running_bot_a_taken_path_or_a_missing_dir_refuses() {
     let e = crate::testing::env().await;
     seed(&e, vec![]).await;
-    let old = e.repo.to_string_lossy().to_string();
+    let old = repo_path(&e);
     let new = moved(&e);
     let bot = add(&e, "reloc-running").await;
     crate::testing::fake_run(&e.app, &bot.id).await;
@@ -158,12 +163,30 @@ async fn a_running_bot_a_taken_path_or_a_missing_dir_refuses() {
 #[tokio::test]
 async fn a_soft_deleted_bot_moves_with_the_project() {
     let e = crate::testing::env().await;
-    let old = e.repo.to_string_lossy().to_string();
+    let old = repo_path(&e);
     seed(&e, vec![]).await;
     let new = moved(&e);
     let gone = crate::testing::claude_bot(&e.app, &e.project_id, "reloc-gone").await;
     sqlx::query("UPDATE bots SET cwd=?, deleted_at=? WHERE id=?").bind(format!("{old}/sub")).bind(db::now()).bind(&gone.id).execute(&e.app.db).await.unwrap();
     relocate(&e, RequestPrincipal::User, &new).await.map_err(|e| format!("{e:?}")).unwrap();
     let cwd: Option<String> = sqlx::query_scalar("SELECT cwd FROM bots WHERE id=?").bind(&gone.id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(cwd.as_deref(), Some(format!("{new}/sub").as_str()));
+}
+
+/// 經由 symlink 指定的新路徑存成 canonical：config、DB 專案路徑與 bot cwd 用同一個前綴。
+#[tokio::test]
+async fn a_symlinked_target_is_stored_canonical() {
+    let e = crate::testing::env().await;
+    let old = repo_path(&e);
+    seed(&e, vec![]).await;
+    let new = moved(&e);
+    let link = e.dir.join("link-to-moved");
+    std::os::unix::fs::symlink(&new, &link).unwrap();
+    let bot = add(&e, "reloc-link").await;
+    sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(format!("{old}/sub")).bind(&bot.id).execute(&e.app.db).await.unwrap();
+    let v = relocate(&e, RequestPrincipal::User, &link.to_string_lossy()).await.map_err(|e| format!("{e:?}")).unwrap();
+    assert_eq!(v["path"].as_str(), Some(new.as_str()));
+    assert_eq!(project_path(&e).await, (new.clone(), new.clone()));
+    let cwd = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap().cwd;
     assert_eq!(cwd.as_deref(), Some(format!("{new}/sub").as_str()));
 }
