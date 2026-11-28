@@ -1081,8 +1081,14 @@ mod tests {
         assert!(!super::super::auto::all_applied(&ran));
     }
 
+    /// `INSTALL_SH` 固定把 `/opt/homebrew/bin`、`/usr/local/bin` 加進 PATH，裝了 brew 的主機（GH macOS runner、m4p）
+    /// 觀察不到 `no_brew`，而且會真的跑 `brew install`；只在沒有 brew 的主機驗。
     #[test]
     fn a_brew_install_without_brew_is_skipped_without_running_anything() {
+        if ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].iter().any(|p| std::path::Path::new(p).exists()) {
+            eprintln!("這台有 brew，no_brew 分支觀察不到，略過");
+            return;
+        }
         let home = Home::new();
         let run = home.apply(ID1, &install_plan("amfakea", "brew install jq"));
         assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("no_brew")));
