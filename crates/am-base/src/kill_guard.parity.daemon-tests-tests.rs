@@ -370,15 +370,28 @@
         }
     }
 
+    /// 判斷要線性：同一台機器上 4 倍大的指令最多慢 8 倍（線性約 4 倍、O(n²) 約 16 倍）。
+    /// 用相對比例，不用絕對秒數：GH macOS runner 比 m4p 慢約 10 倍，絕對門檻在慢機器上會誤判。
     #[test]
     fn the_remote_sh_guard_is_fast_on_big_commands() {
         let script = remote_kill_guard_sh();
-        let started = std::time::Instant::now();
-        let big = format!("cat > f <<'EOF'\n{}\nEOF\nkill 4242", "line of text with $(x) and `y`\n".repeat(4000));
-        assert_eq!(sh_reason(&script, None, &big), None);
-        let quoted = format!("git commit -m '{}'", "x".repeat(200_000));
-        assert_eq!(sh_reason(&script, None, &quoted), None);
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        let heredoc = |k: usize| format!("cat > f <<'EOF'\n{}\nEOF\nkill 4242", "line of text with $(x) and `y`\n".repeat(1000 * k));
+        let quoted = |k: usize| format!("git commit -m '{}'", "x".repeat(50_000 * k));
+        for (name, make) in [("heredoc", &heredoc as &dyn Fn(usize) -> String), ("quoted", &quoted)] {
+            let best = |k: usize| {
+                let cmd = make(k);
+                (0..3)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        assert_eq!(sh_reason(&script, None, &cmd), None, "{name}");
+                        t.elapsed()
+                    })
+                    .min()
+                    .unwrap()
+            };
+            let (small, big) = (best(1), best(4));
+            assert!(big < small * 8 + std::time::Duration::from_millis(50), "{name}：1× {small:?}、4× {big:?}，不是線性");
+        }
     }
 
     #[test]

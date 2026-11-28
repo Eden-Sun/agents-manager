@@ -24,30 +24,40 @@ function hexval(h,    k, v, d) {
   }
   return v
 }
-function jstring(s, i,    L, c, buf, nb, mid, nm, k, v, out, JC) {
-  L = split(s, JC, ""); buf = ""; mid = ""; nb = 0; nm = 0; JOK = 0
-  while (i <= L) {
-    c = JC[i]
-    if (c == "\"") { JOK = 1; break }
-    if (c == "\\") {
-      i++; c = JC[i]
-      if (c == "n") c = "\n"
-      else if (c == "t") c = "\t"
-      else if (c == "r") c = "\r"
-      else if (c == "b") c = "\b"
-      else if (c == "f") c = "\f"
-      else if (c == "u") {
-        v = hexval(tolower(JC[i + 1] JC[i + 2] JC[i + 3] JC[i + 4])); i += 4
-        c = (v > 0 && v < 128) ? sprintf("%c", v) : "?"
-      }
-    }
-    buf = buf c; i++
-    if (++nb >= 256) { mid = mid buf; buf = ""; nb = 0; if (++nm >= 64) { JN++; JB[JN] = mid; mid = ""; nm = 0 } }
+function junesc(p,    m, U, j, v, out) {
+  gsub(/\\n/, "\n", p); gsub(/\\t/, "\t", p); gsub(/\\r/, "\r", p); gsub(/\\b/, "\b", p); gsub(/\\f/, "\f", p)
+  gsub(/\\"/, "\"", p); gsub(/\\\//, "/", p)
+  if (index(p, "\\u") == 0) return p
+  m = split(p, U, /\\u/); out = U[1]
+  for (j = 2; j <= m; j++) {
+    v = hexval(tolower(substr(U[j], 1, 4)))
+    out = out ((v > 0 && v < 128) ? sprintf("%c", v) : "?") substr(U[j], 5)
   }
-  if (!JOK) return ""
+  return out
+}
+function jstring(s, i,    n, P, k, e, raw, buf, mid, nb, nq, Q, out) {
+  JOK = 0
+  n = split(substr(s, i), P, /"/)
+  e = 0
+  for (k = 1; k < n; k++) if (!match(P[k], /\\+$/) || RLENGTH % 2 == 0) { e = k; break }
+  if (e == 0) return ""
+  JOK = 1
+  buf = ""; mid = ""; nb = 0
+  for (k = 1; k <= e; k++) {
+    buf = buf (k > 1 ? "\"" : "") P[k]
+    if (length(buf) > 4096) { mid = mid buf; buf = ""; if (length(mid) > 262144) { nb++; JB[nb] = mid; mid = "" } }
+  }
+  raw = ""
+  for (k = 1; k <= nb; k++) raw = raw JB[k]
+  raw = raw mid buf
+  nq = split(raw, Q, /\\\\/)
+  buf = ""; mid = ""; nb = 0
+  for (k = 1; k <= nq; k++) {
+    buf = buf (k > 1 ? "\\" : "") junesc(Q[k])
+    if (length(buf) > 4096) { mid = mid buf; buf = ""; if (length(mid) > 262144) { nb++; JB[nb] = mid; mid = "" } }
+  }
   out = ""
-  for (k = 1; k <= JN; k++) out = out JB[k]
-  JN = 0
+  for (k = 1; k <= nb; k++) out = out JB[k]
   return out mid buf
 }
 function payload_command(s,    r) {
