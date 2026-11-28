@@ -47,28 +47,29 @@ async function flush() {
   for (let i = 0; i < 5; i++) await act(async () => new Promise<void>((r) => setImmediate(r)))
 }
 
-test('單主機：本機列直接顯示完整 RAM／剩餘／CPU 膠囊', async () => {
+test('單主機：顯示單格精簡 RAM／剩餘／CPU 膠囊', async () => {
   useStore.setState({ mem: { hosts: [row('local', 55, 40)] } } as never)
   await mount(<HeadMemBadges />)
   const head = document.querySelector('.head-ram')!
   assert.ok(!head.classList.contains('multi'))
-  assert.equal(head.querySelectorAll('.head-host-row').length, 1)
-  const badge = head.querySelector('.mem-badge')!
-  assert.match(badge.textContent ?? '', /RAM4\.0G剩 55G/)
-  assert.match(badge.textContent ?? '', /40%/)
+  const badges = head.querySelectorAll('.mem-badge.compact')
+  assert.equal(badges.length, 1)
+  assert.match(badges[0].textContent ?? '', /本機4\.0G\/55G · 40%/)
 })
 
-test('多主機：每台主機各一列直接看得到 RAM／剩餘／CPU，且點任一台都能在彈窗切換主機分頁', async () => {
+test('多主機：雙欄並排顯示每台主機精簡膠囊，點任一台都能在彈窗切換主機分頁', async () => {
   useStore.setState({ mem: { hosts: [row('local', 55, 40), row('m4p', 40, 9), row('r7', 48, 92)] } } as never)
   await mount(<HeadMemBadges />)
-  const rows = [...document.querySelectorAll('.head-host-row')]
-  assert.equal(rows.length, 3)
-  assert.match(rows[0].textContent ?? '', /RAM4\.0G剩 55G/)
-  assert.match(rows[1].textContent ?? '', /@m4p4\.0G剩 40G/)
-  assert.match(rows[2].textContent ?? '', /@r74\.0G剩 48G/)
-  assert.ok(rows[2].querySelector('.mem-badge.cpu-hot'), '告警主機直接亮紅框')
+  const head = document.querySelector('.head-ram')!
+  assert.ok(head.classList.contains('multi'))
+  const badges = [...head.querySelectorAll('.mem-badge.compact')]
+  assert.equal(badges.length, 3)
+  assert.match(badges[0].textContent ?? '', /本機4\.0G\/55G · 40%/)
+  assert.match(badges[1].textContent ?? '', /@m4p4\.0G\/40G · 9%/)
+  assert.match(badges[2].textContent ?? '', /@r74\.0G\/48G · 92%/)
+  assert.ok(badges[2].classList.contains('cpu-hot'), '告警主機直接亮紅框')
 
-  await click(rows[2].querySelector('.mem-open')!)
+  await click(head.querySelectorAll('.mem-open')[2]!)
   await flush()
   assert.deepEqual(requested, ['r7'])
   const tabs = [...document.querySelectorAll<HTMLButtonElement>('.mem-pop-host')]
@@ -80,7 +81,7 @@ test('多主機：每台主機各一列直接看得到 RAM／剩餘／CPU，且�
   assert.match(document.querySelector('.mem-pop-title')?.textContent ?? '', /^m4p RAM/)
 })
 
-test('側欄頂部結構：第一列固定單行，本機列與建置晶片並排不換行', () => {
+test('側欄頂部結構（方案 3）：第一列固定單行，多主機第二列雙欄並排', () => {
   const css = readFileSync(new URL('./sidebar.css', import.meta.url), 'utf8')
   const rule = (sel: string) => {
     const m = css.match(new RegExp(`^${sel.replace(/[.*+?^${}()|[\]\\>]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'm'))
@@ -89,9 +90,7 @@ test('側欄頂部結構：第一列固定單行，本機列與建置晶片並�
   }
   assert.match(rule('.sidebar-head'), /flex-direction:\s*column/)
   assert.match(rule('.head-brand'), /height:\s*22px/)
-  assert.match(rule('.head-ram'), /flex-direction:\s*column/)
-  assert.match(rule('.head-host-row'), /flex-wrap:\s*nowrap/)
-  assert.match(rule('.head-host-row'), /height:\s*20px/)
-  assert.match(rule('.head-host-row > .build-slots-chip'), /margin-left:\s*auto/)
+  assert.match(rule('.head-ram'), /display:\s*grid/)
+  assert.match(rule('.head-ram.multi'), /repeat\(2,\s*minmax\(0,\s*1fr\)\)/)
   assert.match(rule('.sidebar-head .head-ram .mem-badge'), /overflow:\s*hidden/)
 })

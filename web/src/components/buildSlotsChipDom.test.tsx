@@ -1,6 +1,6 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { handleFrame, resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
 import type { BuildSlots } from '../api/buildSlots'
@@ -117,19 +117,12 @@ it('讀不到 /api/build-slots：不畫晶片', async () => {
   }
 })
 
-it('左上主機數據區：只有本機與有遠端主機時，晶片都跟本機 RAM 徽章並排在同一列', async () => {
+it('多主機時 HeadMemBadges 採雙欄並排，不包含 BuildSlotsChip（晶片移至第一列 .head-brand-meta）', async () => {
   resetStoreForTest()
   const row = (host: string) => ({ host, total_bytes: 1 << 30, herdr_bytes: 1 << 20, agents_bytes: 1 << 29, processes: 3, browsers: [], machine: null, error: null })
-  await serving(busy, async () => {
-    useStore.setState({ mem: { hosts: [row('local')] } } as never)
-    await mount(<HeadMemBadges />)
-    await until(() => chip() !== null, '單機時畫出來')
-    assert.ok(chip()!.parentElement!.classList.contains('head-host-row'))
-    assert.ok(chip()!.parentElement!.classList.contains('local'))
-    await act(() => useStore.setState({ mem: { hosts: [row('local'), row('m4p')] } } as never))
-    await until(() => document.querySelector('.head-ram.multi') !== null, '換成多主機')
-    assert.equal(document.querySelectorAll('[data-k="build-slots-chip"]').length, 1)
-    assert.equal(document.querySelectorAll('.head-host-row').length, 2, '每台主機一列，建置晶片不另佔一列')
-    assert.ok(chip()!.parentElement!.classList.contains('local'))
-  })
+  useStore.setState({ mem: { hosts: [row('local'), row('m4p')] } } as never)
+  await mount(<HeadMemBadges />)
+  await until(() => document.querySelector('.head-ram.multi') !== null, '換成多主機')
+  assert.equal(document.querySelectorAll('.head-ram .mem-badge.compact').length, 2)
+  assert.equal(chip(), null)
 })

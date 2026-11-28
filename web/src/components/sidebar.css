@@ -46,41 +46,64 @@
 }
 
 .head-ram {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
   min-width: 0;
 }
 
-.head-host-row {
+.head-ram.multi {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.head-ram > .mem-wrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.head-ram > .mem-wrap > .mem-open {
   display: flex;
-  flex-wrap: nowrap;
   align-items: center;
-  gap: 4px;
+  width: 100%;
   min-width: 0;
-  height: 20px;
 }
 
-.head-host-row > .mem-wrap {
+.head-ram > .mem-wrap > .mem-open > .mem-badge {
+  width: 100%;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.head-ram .mem-badge.compact .mem-k {
   flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 650;
+  color: var(--text-dim);
 }
 
-.head-host-row > .mem-wrap > .mem-open {
-  display: flex;
-  align-items: center;
-  max-width: 100%;
-  min-width: 0;
+.head-ram .mem-badge.compact.remote .mem-k {
+  color: var(--accent-ink);
 }
 
-.head-host-row > .build-slots-chip {
+.head-ram .mem-badge.compact .mem-metrics {
   flex: none;
-  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+.head-brand-meta > .build-slots-chip {
+  flex: none;
+  padding: 1px 5px;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 @media (width <= 640px) {
-  .head-host-row > .mem-wrap > .mem-open {
-    margin-block: -10px;
+  .head-ram > .mem-wrap > .mem-open {
+    margin-block: -8px;
   }
 }
 
@@ -716,28 +739,20 @@ p.project-quota-hidden {
   .sidebar-head {
     justify-content: unset;
     gap: 6px;
-    padding: 8px 12px;
+    padding: 7px 12px;
   }
 
   .sidebar-head .head-brand {
     height: auto;
-    min-height: 26px;
-  }
-
-  .sidebar-head .head-ram {
-    gap: 5px;
-  }
-
-  .sidebar-head .head-host-row {
-    height: auto;
-    min-height: 22px;
+    min-height: 24px;
   }
 
   .sidebar-head .pane-badge,
+  .sidebar-head .build-slots-chip,
   .sidebar-head .head-ram .mem-badge {
-    padding: 1px 6px;
-    font-size: 11px;
-    line-height: 1.5;
+    padding: 2px 6px;
+    font-size: 10.5px;
+    line-height: 1.45;
     gap: 4px;
   }
 }

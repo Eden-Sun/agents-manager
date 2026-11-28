@@ -64,6 +64,7 @@ import { useBotOfflineHost } from '../hooks/useHostOffline'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { HeadMemBadges } from './HeadMemBadges'
+import { BuildSlotsChip } from './BuildSlotsChip'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
@@ -1351,6 +1352,7 @@ export function Sidebar() {
           </div>
           <div className="head-brand-meta">
             <PaneBadge />
+            <BuildSlotsChip />
             <TabsBadge />
             <ThemeToggle />
             <ConnBadge socket={socket} connected={connected} />
