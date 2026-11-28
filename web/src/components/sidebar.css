@@ -684,23 +684,6 @@ p.project-quota-hidden {
 }
 
 @media (width <= 640px) {
-
-  .sidebar-head h1 {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
-  .sidebar-head {
-    justify-content: unset;
-  }
-}
-
-@media (width <= 640px) {
   .bot-quota-chip {
     font-size: 12px;
     min-height: 22px;
@@ -727,6 +710,36 @@ p.project-quota-hidden {
   font-size: 10px;
   line-height: 1.45;
   gap: 3px;
+}
+
+@media (width <= 640px) {
+  .sidebar-head {
+    justify-content: unset;
+    gap: 6px;
+    padding: 8px 12px;
+  }
+
+  .sidebar-head .head-brand {
+    height: auto;
+    min-height: 26px;
+  }
+
+  .sidebar-head .head-ram {
+    gap: 5px;
+  }
+
+  .sidebar-head .head-host-row {
+    height: auto;
+    min-height: 22px;
+  }
+
+  .sidebar-head .pane-badge,
+  .sidebar-head .head-ram .mem-badge {
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 1.5;
+    gap: 4px;
+  }
 }
 
 .sidebar-head .head-ram .mem-free {

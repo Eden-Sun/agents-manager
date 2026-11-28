@@ -3492,7 +3492,6 @@ button.model-tag:hover:not(:disabled) {
 
 @media (width <= 640px) {
 
-  .sidebar-head .pane-k,
   .sidebar-head .tabs-bytes {
     display: none;
   }
