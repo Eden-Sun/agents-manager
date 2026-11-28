@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   fetchAutoUpdateSettings,
   updateAutoUpdateSettings,
@@ -19,13 +19,21 @@ export function AutoUpdateSettings() {
   })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [loadErr, setLoadErr] = useState<string | null>(null)
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoadErr(null)
     fetchAutoUpdateSettings().then(
-      (data) => setSettings(data),
-      () => {},
+      (data) => {
+        setSettings(data)
+        setLoaded(true)
+      },
+      (e: unknown) => setLoadErr(e instanceof Error ? e.message : String(e)),
     )
   }, [])
+
+  useEffect(load, [load])
 
   const toggle = async (kind: Kind, value: boolean) => {
     setSettings((prev) => ({ ...prev, [kind]: value }))
@@ -55,13 +63,19 @@ export function AutoUpdateSettings() {
               type="checkbox"
               aria-label={t('{kind} 自動更新', { kind: k })}
               checked={settings[k]}
-              disabled={busy}
+              disabled={busy || !loaded}
               onChange={(e) => void toggle(k, e.target.checked)}
             />
             <span>{k}</span>
           </label>
         ))}
       </div>
+      {loadErr ? (
+        <p className="auto-update-settings-error" role="alert" style={{ color: 'var(--danger)' }}>
+          {t('讀取自動更新設定失敗：{reason}', { reason: loadErr })}{' '}
+          <button type="button" onClick={load}>{t('重試')}</button>
+        </p>
+      ) : null}
       {msg ? <p className="auto-update-settings-error" role="alert" style={{ color: 'var(--danger)' }}>{msg}</p> : null}
     </section>
   )

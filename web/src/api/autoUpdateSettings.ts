@@ -1,3 +1,5 @@
+import { rawTransport } from './index'
+
 export interface AutoUpdateSettings {
   claude: boolean
   codex: boolean
@@ -5,18 +7,10 @@ export interface AutoUpdateSettings {
   grok: boolean
 }
 
-export async function fetchAutoUpdateSettings(): Promise<AutoUpdateSettings> {
-  const res = await fetch('/api/settings/auto-update')
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+export function fetchAutoUpdateSettings(): Promise<AutoUpdateSettings> {
+  return rawTransport.request('GET', '/settings/auto-update') as Promise<AutoUpdateSettings>
 }
 
-export async function updateAutoUpdateSettings(partial: Partial<AutoUpdateSettings>): Promise<AutoUpdateSettings> {
-  const res = await fetch('/api/settings/auto-update', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(partial),
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+export function updateAutoUpdateSettings(partial: Partial<AutoUpdateSettings>): Promise<AutoUpdateSettings> {
+  return rawTransport.request('PUT', '/settings/auto-update', partial) as Promise<AutoUpdateSettings>
 }

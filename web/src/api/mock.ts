@@ -640,6 +640,7 @@ export class MockTransport implements Transport {
   readonly remoteCargo = new MockRemoteCargo()
   buildScene: MockBuildScene = 'idle'
   readonly integrationUpdates = new MockIntegrationUpdates()
+  autoUpdate = { claude: false, codex: true, agy: false, grok: false }
   stopHooks: { host: string; identity: string | null; codex_home: string; status: string; kill_guard: string }[] = [
     { host: 'local', identity: null, codex_home: '/home/me/.codex', status: 'trusted', kill_guard: 'trusted' },
     { host: 'm4p', identity: null, codex_home: '/Users/me/.codex', status: 'untrusted', kill_guard: 'not_installed' },
@@ -1242,6 +1243,11 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'update-chain' && seg.length === 1) return this.updateChain(Array.isArray(b.installs) ? (b.installs as Rec[]) : [])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
+    if (method === 'GET' && rawPath === '/settings/auto-update') return { ...this.autoUpdate }
+    if (method === 'PUT' && rawPath === '/settings/auto-update') {
+      for (const k of ['claude', 'codex', 'agy', 'grok'] as const) if (typeof b[k] === 'boolean') this.autoUpdate[k] = b[k]
+      return { ...this.autoUpdate }
+    }
     if (method === 'GET' && rawPath === '/codex/stop-hook') return { enabled: true, entries: this.stopHooks }
     if (method === 'POST' && rawPath === '/codex/stop-hook/trust') {
       const row = this.stopHooks.find((e) => e.host === b.host && e.identity === (b.identity ?? null))
